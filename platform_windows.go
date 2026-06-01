@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,9 @@ import (
 	"syscall"
 	"time"
 )
+
+// 抓包期间屏蔽到寿司郎域名的出站 QUIC 的防火墙规则名。
+const quicBlockRuleName = "SushiroOverdoseBlockQUIC"
 
 func powershellCommand(script string, args ...string) *exec.Cmd {
 	return powershellCommandWithOptions(false, script, args...)
@@ -71,6 +75,7 @@ func setWindowsPACProxy(proxyPort, webPort int) error {
 	}
 
 	refreshProxySettings()
+	blockSushiroQUIC()
 	logMessage(time.Now(), fmt.Sprintf("Windows PAC 代理已设置: 仅 %s 走 127.0.0.1:%d，其它域名直连", sushiroHost, proxyPort))
 	return nil
 }
@@ -94,6 +99,7 @@ func setWindowsManualProxy(port int) error {
 	}
 
 	refreshProxySettings()
+	blockSushiroQUIC()
 	return nil
 }
 
@@ -104,8 +110,54 @@ func clearSystemProxy() error {
 	if resetErr := clearWinHTTPProxy(); resetErr != nil {
 		logMessage(time.Now(), "WinHTTP 代理清理跳过: "+resetErr.Error())
 	}
+	unblockSushiroQUIC()
 	refreshProxySettings()
 	return err
+}
+
+// blockSushiroQUIC 屏蔽到寿司郎域名的出站 QUIC(UDP 443)，逼微信的 Chromium/XWeb
+// 内核回退 TCP，从而能被只处理 TCP 的 MITM 代理解密。需要管理员权限；失败仅记录不阻断。
+func blockSushiroQUIC() {
+	_ = removeQUICBlockRule()
+	ips := resolveSushiroIPs()
+	if len(ips) == 0 {
+		logMessage(time.Now(), "QUIC 屏蔽跳过: 无法解析 "+sushiroHost+" 的 IP")
+		return
+	}
+	if err := runHiddenWindowsCommand("netsh", "advfirewall", "firewall", "add", "rule",
+		"name="+quicBlockRuleName, "dir=out", "action=block",
+		"protocol=UDP", "remoteport=443", "remoteip="+strings.Join(ips, ",")); err != nil {
+		logMessage(time.Now(), "QUIC 屏蔽设置失败(可能需管理员权限): "+err.Error())
+		return
+	}
+	logMessage(time.Now(), fmt.Sprintf("已屏蔽到 %s 的出站 QUIC(UDP 443)，强制微信走 TCP 以便抓包", sushiroHost))
+}
+
+func unblockSushiroQUIC() {
+	if err := removeQUICBlockRule(); err != nil {
+		logMessage(time.Now(), "QUIC 屏蔽清理跳过: "+err.Error())
+	}
+}
+
+func removeQUICBlockRule() error {
+	return runHiddenWindowsCommand("netsh", "advfirewall", "firewall", "delete", "rule", "name="+quicBlockRuleName)
+}
+
+func resolveSushiroIPs() []string {
+	addrs, err := net.LookupIP(sushiroHost)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		s := a.String()
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func setWinHTTPProxy(proxyServer, proxyOverride string) error {

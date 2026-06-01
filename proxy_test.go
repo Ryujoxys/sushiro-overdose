@@ -263,3 +263,17 @@ func TestSetForwardRequestBodyPreservesPayload(t *testing.T) {
 		t.Fatalf("body = %q, want %q", got, payload)
 	}
 }
+
+func TestStripQUICAdvertisement(t *testing.T) {
+	h := http.Header{}
+	h.Set("Alt-Svc", `h3=":443"; ma=86400`)
+	h.Set("Alternate-Protocol", "443:quic")
+	h.Set("Content-Type", "application/json")
+	stripQUICAdvertisement(h)
+	if h.Get("Alt-Svc") != "" || h.Get("Alternate-Protocol") != "" {
+		t.Fatalf("QUIC advertisement headers should be stripped: %v", h)
+	}
+	if h.Get("Content-Type") != "application/json" {
+		t.Fatalf("non-QUIC headers must be preserved: %v", h)
+	}
+}

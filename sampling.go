@@ -30,34 +30,36 @@ type SamplingConfig struct {
 }
 
 type SamplingState struct {
-	Status       string   `json:"status"`
-	Message      string   `json:"message"`
-	Running      bool     `json:"running"`
-	Enabled      bool     `json:"enabled"`
-	AutoStart    bool     `json:"auto_start"`
-	StoreIDs     []string `json:"store_ids"`
-	Interval     int      `json:"interval_seconds"`
-	ActiveStart  string   `json:"active_start"`
-	ActiveEnd    string   `json:"active_end"`
-	LastRunAt    string   `json:"last_run_at,omitempty"`
-	NextRunAt    string   `json:"next_run_at,omitempty"`
-	LastError    string   `json:"last_error,omitempty"`
-	SampleRuns   int      `json:"sample_runs"`
-	Snapshots    int      `json:"snapshots"`
-	StoreErrors  int      `json:"store_errors"`
-	LastStoreIDs []string `json:"last_store_ids,omitempty"`
+	Status         string   `json:"status"`
+	Message        string   `json:"message"`
+	Running        bool     `json:"running"`
+	Enabled        bool     `json:"enabled"`
+	AutoStart      bool     `json:"auto_start"`
+	StoreIDs       []string `json:"store_ids"`
+	Interval       int      `json:"interval_seconds"`
+	ActiveStart    string   `json:"active_start"`
+	ActiveEnd      string   `json:"active_end"`
+	LastRunAt      string   `json:"last_run_at,omitempty"`
+	NextRunAt      string   `json:"next_run_at,omitempty"`
+	LastError      string   `json:"last_error,omitempty"`
+	SampleRuns     int      `json:"sample_runs"`
+	Snapshots      int      `json:"snapshots"`
+	QueueSnapshots int      `json:"queue_snapshots"`
+	StoreErrors    int      `json:"store_errors"`
+	LastStoreIDs   []string `json:"last_store_ids,omitempty"`
 }
 
 type SamplingRunResult struct {
-	StartedAt   string                   `json:"started_at"`
-	FinishedAt  string                   `json:"finished_at"`
-	Stores      []SamplingStoreRunResult `json:"stores"`
-	Snapshots   int                      `json:"snapshots"`
-	StoreErrors int                      `json:"store_errors"`
-	Skipped     bool                     `json:"skipped"`
-	SkipReason  string                   `json:"skip_reason,omitempty"`
-	Config      SamplingConfig           `json:"config"`
-	Diagnostics map[string]any           `json:"diagnostics,omitempty"`
+	StartedAt      string                   `json:"started_at"`
+	FinishedAt     string                   `json:"finished_at"`
+	Stores         []SamplingStoreRunResult `json:"stores"`
+	Snapshots      int                      `json:"snapshots"`
+	QueueSnapshots int                      `json:"queue_snapshots"`
+	StoreErrors    int                      `json:"store_errors"`
+	Skipped        bool                     `json:"skipped"`
+	SkipReason     string                   `json:"skip_reason,omitempty"`
+	Config         SamplingConfig           `json:"config"`
+	Diagnostics    map[string]any           `json:"diagnostics,omitempty"`
 }
 
 type SamplingRunOptions struct {
@@ -66,10 +68,14 @@ type SamplingRunOptions struct {
 }
 
 type SamplingStoreRunResult struct {
-	StoreID   string `json:"store_id"`
-	StoreName string `json:"store_name,omitempty"`
-	Slots     int    `json:"slots"`
-	Error     string `json:"error,omitempty"`
+	StoreID         string `json:"store_id"`
+	StoreName       string `json:"store_name,omitempty"`
+	Slots           int    `json:"slots"`
+	QueueObserved   bool   `json:"queue_observed,omitempty"`
+	QueueWaitGroups int    `json:"queue_wait_groups,omitempty"`
+	QueueStatus     string `json:"queue_status,omitempty"`
+	QueueError      string `json:"queue_error,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type SlotSampler struct {
@@ -407,6 +413,25 @@ func (s *SlotSampler) runOnce(ctx context.Context, cfg SamplingConfig, opts Samp
 			result.FinishedAt = time.Now().Format(time.RFC3339)
 			return result
 		}
+		// 排队快照：用认证态 getStoreById（含 groupQueues=当前叫号），写入观测并评估叫号提醒。
+		if storeInfo, err := client.GetStoreInfo(ctx, storeID); err != nil {
+			storeResult.QueueError = err.Error()
+			logMessage(time.Now(), fmt.Sprintf("采样排队快照获取失败，门店 %s: %v", storeID, err))
+		} else if observation, ok := queueObservationFromStoreInfo(storeID, storeInfo, time.Now()); ok {
+			if err := appendQueueObservation(observation); err != nil {
+				storeResult.QueueError = err.Error()
+				logMessage(time.Now(), fmt.Sprintf("采样排队快照保存失败，门店 %s: %v", storeID, err))
+			} else {
+				storeResult.QueueObserved = true
+				storeResult.QueueWaitGroups = storeInfo.GroupQueuesCount
+				storeResult.QueueStatus = storeInfo.StoreStatus
+				result.QueueSnapshots++
+				if storeResult.StoreName == storeID && strings.TrimSpace(storeInfo.Name) != "" {
+					storeResult.StoreName = storeInfo.Name
+				}
+				evaluateQueueAlerts(ctx, observation, storeInfo.Name)
+			}
+		}
 		slots, err := client.GetTimeslots(ctx, storeID)
 		if err != nil {
 			storeResult.Error = err.Error()
@@ -415,15 +440,6 @@ func (s *SlotSampler) runOnce(ctx context.Context, cfg SamplingConfig, opts Samp
 			continue
 		}
 		appendHistory(slots, storeID)
-		if storeInfo, err := client.GetStoreInfo(ctx, storeID); err != nil {
-			logMessage(time.Now(), fmt.Sprintf("采样排队快照获取失败，门店 %s: %v", storeID, err))
-		} else {
-			if observation, ok := queueObservationFromStoreInfo(storeID, storeInfo, time.Now()); ok {
-				if err := appendQueueObservation(observation); err != nil {
-					logMessage(time.Now(), fmt.Sprintf("采样排队快照保存失败，门店 %s: %v", storeID, err))
-				}
-			}
-		}
 		storeResult.Slots = len(slots)
 		result.Snapshots += len(slots)
 		result.Stores = append(result.Stores, storeResult)
@@ -439,7 +455,7 @@ func (s *SlotSampler) applyRunResult(result SamplingRunResult) {
 		s.state.Message = result.SkipReason
 		s.state.LastError = result.SkipReason
 	} else {
-		s.state.Message = fmt.Sprintf("已采样 %d 家门店，记录 %d 条时段", len(result.Stores), result.Snapshots)
+		s.state.Message = fmt.Sprintf("已采样 %d 家门店，记录 %d 条时段、%d 条排队快照", len(result.Stores), result.Snapshots, result.QueueSnapshots)
 		s.state.LastError = ""
 		if result.StoreErrors > 0 {
 			s.state.LastError = fmt.Sprintf("%d 家门店采样失败", result.StoreErrors)
@@ -448,6 +464,7 @@ func (s *SlotSampler) applyRunResult(result SamplingRunResult) {
 	s.state.LastRunAt = result.FinishedAt
 	s.state.SampleRuns++
 	s.state.Snapshots += result.Snapshots
+	s.state.QueueSnapshots += result.QueueSnapshots
 	s.state.StoreErrors += result.StoreErrors
 	s.state.LastStoreIDs = make([]string, 0, len(result.Stores))
 	for _, store := range result.Stores {

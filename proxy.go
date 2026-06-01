@@ -506,11 +506,20 @@ func (ps *proxyServer) relayResponse(w io.Writer, resp *http.Response, method st
 	} else if target != nil && isSushiroTargetHost(target.Host) {
 		ps.addLog(fmt.Sprintf("MITM upstream response: %s %s HTTP %d upstream=%s", method, sanitizedProxyURL(target), resp.StatusCode, upstreamProto))
 	}
+	// 剥掉 HTTP/3 升级提示，避免客户端（尤其 Windows 微信的 Chromium/XWeb 内核）
+	// 据此把后续请求切到 QUIC（UDP 443）——那会绕过只管 TCP 的本代理，导致小程序报网络错误。
+	stripQUICAdvertisement(resp.Header)
 	if err := resp.Write(w); err != nil {
 		ps.addLog(fmt.Sprintf("proxy relay response failed: %s %s: %v", method, sanitizedProxyURL(target), err))
 		return err
 	}
 	return nil
+}
+
+// stripQUICAdvertisement 删除会让客户端升级到 HTTP/3 的响应头。
+func stripQUICAdvertisement(header http.Header) {
+	header.Del("Alt-Svc")
+	header.Del("Alternate-Protocol")
 }
 
 func sanitizedProxyURL(u *url.URL) string {

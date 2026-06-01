@@ -66,6 +66,7 @@ main.go (默认启动 Web UI)
 | `web_sniper.go` | Web 狙击计划 API |
 | `web_sampling.go` | Web 信息收集 API |
 | `web_queue_trends.go` | 本地到店预测 API |
+| `web_queue_live.go` | 实时排队 API（公开门店等位/区域/单店详情） |
 | `web_events.go` | SSE 事件总线 |
 | `web_static.go` | `sushiroLogoSVG` Logo SVG 常量 + `indexHTML` 完整单页（Sushiro 品牌配色 + 官网同款布局） |
 
@@ -74,6 +75,9 @@ main.go (默认启动 Web UI)
 | 文件 | 职责 |
 |------|------|
 | `api.go` | `Client` — 寿司郎官方 API 封装（门店/时段/创建预约/取消预约） |
+| `queue_live.go` | 公开排队接口客户端：门店列表、单店排队、区域列表（标准库实现，支持 `SUSHIRO_TOKEN` 覆盖）；解析 `getStoreById` 的 `groupQueues` 得到当前叫号 |
+| `queue_live_panel.go` | 单店实时面板聚合：实时叫号/在等桌数/预估等待 + 由本机采样历史算近15分钟叫号与历史均速 |
+| `queue_alerts.go` | 叫号提醒规则与去重状态：`wait_below`（预估等待降到阈值）/`called_reach`（叫号接近手中号），采样循环命中即经通知渠道推送 |
 | `config.go` | `Settings` 结构体定义，`LoadSettings` 从 JSON 文件加载（备用，当前未被调用） |
 | `tokens.go` | 捕获到的认证参数模型、本地配置读写、旧配置迁移、认证参数 → `Settings` 转换 |
 | `preferences.go` | **用户偏好持久化**：人数/桌型/自定义时段范围/日期与时段优先级，存到 `~/.sushiro/preferences.json` |
@@ -161,7 +165,7 @@ main.go (默认启动 Web UI)
 ├── sampling.json        信息收集配置
 ├── holidays.json        可选节假日/调休工作日本地表
 ├── history.jsonl        历史时段数据（JSONL 格式）
-├── queue_observations.jsonl 排队公开叫号快照（本地私有）
+├── queue_observations.jsonl 实时排队/公开叫号快照（本地私有）
 ├── queue_sessions.jsonl 真实取号等待 session（本地私有）
 ├── queue_stats.json     本地聚合排队统计缓存
 ├── sushiro.log          后台模式日志
@@ -193,6 +197,11 @@ main.go (默认启动 Web UI)
 | GET | `/api/reservations` | 当前预约列表 |
 | GET | `/api/insights` | 历史洞察与推荐 |
 | GET | `/api/queue/trends` | 本地到店预测：推荐时段、实际过号、全局过号、信息收集权限与数据新鲜度 |
+| GET | `/api/queue/stores?city=深圳&waiting=1&limit=10` | 实时排队门店列表，支持 city/area/q/store/stores/open/waiting/near/limit |
+| GET | `/api/queue/store?id=1012` | 实时单店排队详情 |
+| GET | `/api/queue/live?store=1012` | 单店实时面板：当前叫号/在等桌数/预估等待/近15分钟叫号/历史均速 |
+| GET/POST | `/api/queue/alerts` | 读取/保存叫号提醒规则 |
+| GET | `/api/queue/areas` | 官方区域列表 |
 | GET/POST | `/api/preferences` | 读取/保存用户偏好 |
 | GET/POST | `/api/config` | 读取/保存通知配置 |
 | GET | `/api/diagnostics` | 只读、脱敏的本机诊断信息 |
