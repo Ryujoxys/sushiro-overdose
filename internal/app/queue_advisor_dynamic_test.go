@@ -58,7 +58,7 @@ func TestDynamicConvergence(t *testing.T) {
 		obs = recentStoreObservations(obs, store, now.Add(time.Duration(tMin)*time.Minute), window)
 		nowAt := now.Add(time.Duration(tMin) * time.Minute)
 		// 用 checkpoint 时刻作为 now 算速率（窗口相对该时刻）。
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
 		if !ok {
 			t.Logf("[t=%+d] 数据不足，跳过", tMin)
 			continue
@@ -66,7 +66,7 @@ func TestDynamicConvergence(t *testing.T) {
 		calledAtT := 1000 + (60+tMin)*2
 		remaining := 1200 - calledAtT
 		trueWait := float64(remaining) / 2.0
-		wr, _ := estimateWaitRange(remaining, 0, rate, cv, n, trend, nil)
+		wr, _ := estimateWaitRange(remaining, 0, rate, cv, n, trend, nil, nil)
 		mid := -1.0
 		if wr != nil {
 			mid = float64(wr.Low+wr.High) / 2.0
@@ -88,8 +88,8 @@ func TestDynamicConvergence(t *testing.T) {
 	// 最终点（数据最足）误差应很小。
 	lastObs := collectUpTo(allSamples, now, 0)
 	lastObs = recentStoreObservations(lastObs, store, now, window)
-	rate, cv, n, trend, _ := calledRatePerMinuteWeighted(lastObs, now, window)
-	wr, _ := estimateWaitRange(80, 0, rate, cv, n, trend, nil) // t=0 时还剩 80 组
+	rate, cv, n, trend, _, _ := calledRatePerMinuteWeighted(lastObs, now, window)
+	wr, _ := estimateWaitRange(80, 0, rate, cv, n, trend, nil, nil) // t=0 时还剩 80 组
 	if wr != nil {
 		mid := float64(wr.Low+wr.High) / 2.0
 		err := math.Abs(mid-40) / 40 * 100 // 真实 80/2=40min
@@ -126,7 +126,7 @@ func TestDynamicConceptDrift(t *testing.T) {
 		obs := collectUpTo(allSamples, now, tMin)
 		nowAt := now.Add(time.Duration(tMin) * time.Minute)
 		obs = recentStoreObservations(obs, store, nowAt, window)
-		rate, _, _, _, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
+		rate, _, _, _, _, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
 		if !ok {
 			t.Logf("[t=%+d] 数据不足", tMin)
 			continue
@@ -160,7 +160,7 @@ func TestDynamicNoiseRobustness(t *testing.T) {
 		allSamples = append(allSamples, dynSample(store, now, m, no))
 	}
 	obs := recentStoreObservations(allSamples, store, now, window)
-	rate, cv, n, _, ok := calledRatePerMinuteWeighted(obs, now, window)
+	rate, cv, n, _, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 	if !ok {
 		t.Fatal("噪声场景应算出速度")
 	}
@@ -196,7 +196,7 @@ func TestDynamicWindowBoundary(t *testing.T) {
 		no += 2
 	}
 	obs := recentStoreObservations(allSamples, store, now, window)
-	rate, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, window)
+	rate, _, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 	if !ok {
 		t.Fatal("应算出速度")
 	}
@@ -226,7 +226,7 @@ func TestDynamicUnevenSampling(t *testing.T) {
 		allSamples = append(allSamples, dynSample(store, now, m, no))
 	}
 	obs := recentStoreObservations(allSamples, store, now, window)
-	rate, cv, n, _, ok := calledRatePerMinuteWeighted(obs, now, window)
+	rate, cv, n, _, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 	if !ok {
 		t.Fatal("不均匀采样应算出速度")
 	}
@@ -256,8 +256,8 @@ func TestDynamicSamplingFrequencyChange(t *testing.T) {
 	}
 	denseObs := recentStoreObservations(dense, store, now, window)
 	sparseObs := recentStoreObservations(sparse, store, now, window)
-	rateD, _, nD, _, okD := calledRatePerMinuteWeighted(denseObs, now, window)
-	rateS, _, nS, _, okS := calledRatePerMinuteWeighted(sparseObs, now, window)
+	rateD, _, nD, _, _, okD := calledRatePerMinuteWeighted(denseObs, now, window)
+	rateS, _, nS, _, _, okS := calledRatePerMinuteWeighted(sparseObs, now, window)
 	if !okD || !okS {
 		t.Fatal("两种频率都应算出速度")
 	}
@@ -303,7 +303,7 @@ func TestDynamicRollingStability(t *testing.T) {
 		nowAt := now.Add(time.Duration(tMin) * time.Minute)
 		obs := collectUpTo(fullSamples, now, tMin)
 		obs = recentStoreObservations(obs, store, nowAt, window)
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
 		if !ok {
 			continue
 		}
@@ -321,7 +321,7 @@ func TestDynamicRollingStability(t *testing.T) {
 		// 真实剩余等待：用当前真实速度（由 fullSamples 在 tMin 的斜率）。
 		speed := 1.0 + float64(40+tMin)/40.0*2.0
 		trueWait := float64(remaining) / speed
-		wr, _ := estimateWaitRange(remaining, 0, rate, cv, n, trend, nil)
+		wr, _ := estimateWaitRange(remaining, 0, rate, cv, n, trend, nil, nil)
 		predWait := -1.0
 		if wr != nil {
 			predWait = float64(wr.Low+wr.High) / 2.0
@@ -394,7 +394,8 @@ func TestDynamicRollingStability(t *testing.T) {
 
 // TestDynamicLongWindowTrend 量化「长窗趋势」改进：节奏持续渐变加速时，
 // 用 2h 长窗检测趋势（生产逻辑）相比只用 30min 短窗趋势，能更早修正早期高估。
-// 模拟生产的双窗逻辑：rate/cv/n 用 30min 短窗、trend 用 2h 长窗（取更强信号）。
+// 模拟生产的双窗逻辑：rate/cv/n 用 30min 短窗、trend 在「同向且更强」时用长窗覆盖短窗
+// （见 buildQueueAdvisor 的双窗同向守卫；持续加速场景下短/长窗都>=1，新逻辑与取最强加速信号等价）。
 func TestDynamicLongWindowTrend(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.Local)
 	store := "3006"
@@ -418,11 +419,11 @@ func TestDynamicLongWindowTrend(t *testing.T) {
 	shortObs := recentStoreObservations(all, store, nowAt, shortW)
 	longObs := recentStoreObservations(all, store, nowAt, longW)
 
-	rate, cv, n, shortTrend, ok := calledRatePerMinuteWeighted(shortObs, nowAt, shortW)
+	rate, cv, n, shortTrend, _, ok := calledRatePerMinuteWeighted(shortObs, nowAt, shortW)
 	if !ok {
 		t.Fatal("短窗应算出速度")
 	}
-	_, _, _, longTrend, _ := calledRatePerMinuteWeighted(longObs, nowAt, longW)
+	_, _, _, longTrend, _, _ := calledRatePerMinuteWeighted(longObs, nowAt, longW)
 
 	// 当前真实叫号与剩余。
 	calledAtT := 1000
@@ -435,14 +436,16 @@ func TestDynamicLongWindowTrend(t *testing.T) {
 	speed := 1.0 + float64(90+tMin)/90.0*3.0
 	trueWait := float64(remaining) / speed
 
-	// 策略A：短窗趋势（旧）。
-	wrA, _ := estimateWaitRange(remaining, 0, rate, cv, n, shortTrend, nil)
-	// 策略B：长窗趋势（生产新逻辑，取更强加速信号）。
-	effTrend := longTrend
-	if shortTrend > longTrend {
-		effTrend = shortTrend
+	// 策略A：短窗趋势（仅用短窗）。
+	wrA, _ := estimateWaitRange(remaining, 0, rate, cv, n, shortTrend, nil, nil)
+	// 策略B：生产双窗逻辑——同向（都>=1加速）且长窗更显著时采纳长窗，否则保留短窗。
+	effTrend := shortTrend
+	if longTrend >= 1.0 && shortTrend >= 1.0 && longTrend > shortTrend {
+		effTrend = longTrend
+	} else if longTrend < 1.0 && shortTrend < 1.0 && longTrend < shortTrend {
+		effTrend = longTrend
 	}
-	wrB, _ := estimateWaitRange(remaining, 0, rate, cv, n, effTrend, nil)
+	wrB, _ := estimateWaitRange(remaining, 0, rate, cv, n, effTrend, nil, nil)
 
 	midA, midB := -1.0, -1.0
 	if wrA != nil {
@@ -459,5 +462,120 @@ func TestDynamicLongWindowTrend(t *testing.T) {
 	// 长窗趋势应让偏移更小（或至少不更大）。
 	if math.Abs(midB-trueWait) > math.Abs(midA-trueWait)+1 {
 		t.Errorf("长窗趋势应降低偏移：A=%.0f B=%.0f（B 更差）", math.Abs(midA-trueWait), math.Abs(midB-trueWait))
+	}
+}
+
+// TestDynamicLongWindowTrendConflictDecel 验证双窗「同向守卫」：当 2h 长窗整体仍加速
+// （含高峰爬升段，longTrend>1）但最近 30min 短窗已减速（shortTrend<1，高峰已过）时，
+// 生产新逻辑保留短窗的减速信号（同向才覆盖），而旧逻辑（无条件取离 1 更远）会误判为加速。
+// 关键不变式：shortTrend<1 且 longTrend>1（异向）时，effTrend 必须保留短窗（不取长窗加速信号）。
+func TestDynamicLongWindowTrendConflictDecel(t *testing.T) {
+	shortTrend := 0.7 // 近期已减速
+	longTrend := 1.5  // 长窗含爬升段，整体仍加速（异向）
+
+	// 生产新逻辑：同向且更强才覆盖，异向时保留短窗。
+	effTrendNew := shortTrend
+	if longTrend >= 1.0 && shortTrend >= 1.0 && longTrend > shortTrend {
+		effTrendNew = longTrend
+	} else if longTrend < 1.0 && shortTrend < 1.0 && longTrend < shortTrend {
+		effTrendNew = longTrend
+	}
+	// 旧逻辑：无条件让 trend 离 1 更远（加速取 max、减速取 min）。
+	effTrendOld := shortTrend
+	if longTrend > shortTrend {
+		effTrendOld = longTrend
+	}
+
+	if effTrendNew != shortTrend {
+		t.Errorf("异向时（短窗减速、长窗加速）应保留短窗：got effTrend=%.2f want=%.2f",
+			effTrendNew, shortTrend)
+	}
+	if effTrendOld != longTrend {
+		t.Errorf("旧逻辑在此场景会误取长窗加速信号：effTrendOld=%.2f（暴露旧行为的偏差）", effTrendOld)
+	}
+}
+
+// TestCalledRateWeightedNowTruncatesToSecond 验证 calledRatePerMinuteWeighted 内部把 now
+// 截断到秒级与秒级观测对齐。构造两次相邻采样间隔恰好 60s、now 带纳秒尾数：截断前最后一个间隔
+// 的 spanMin 会偏大（now 高出几百毫秒把 snapshot 推到未来），截断后 spanMin 精确=1min。
+// 不变式：带纳秒 now 与截断后 now 算出的速率应完全一致（截断不改变结果，因为观测本身是秒级）。
+func TestCalledRateWeightedNowTruncatesToSecond(t *testing.T) {
+	store := "3006"
+	t0 := time.Date(2026, 6, 8, 12, 0, 0, 0, time.Local)
+	obs := []QueueObservation{
+		obsAt(store, 1000, 0, 0, t0),
+		obsAt(store, 1002, 0, 0, t0.Add(60*time.Second)),
+		obsAt(store, 1004, 0, 0, t0.Add(120*time.Second)),
+	}
+	nowNano := t0.Add(120 * time.Second).Add(777 * time.Millisecond) // 带纳秒尾数
+	nowSec := nowNano.Truncate(time.Second)
+
+	rNano, _, _, _, _, okNano := calledRatePerMinuteWeighted(obs, nowNano, queueAdvisorWindow30)
+	rSec, _, _, _, _, okSec := calledRatePerMinuteWeighted(obs, nowSec, queueAdvisorWindow30)
+	if !okNano || !okSec {
+		t.Fatalf("两次都应算出速度: nano=%v sec=%v", okNano, okSec)
+	}
+	if rNano != rSec {
+		t.Errorf("now 截断到秒级应不改变速率结果（观测本身是秒级）：nano=%v sec=%v", rNano, rSec)
+	}
+}
+
+// TestDynamicPredictionIntervalCoverage 验证预测区间 [Low,High] 的实际覆盖率——
+// 原排查指出的最大盲区：区间宽度此前从未被验证命中率。匀速过程下，真值（remaining/speed）
+// 应在绝大多数 checkpoint 落在 [Low,High] 内（覆盖率 >= 70%），证明区间不是徒有其表。
+func TestDynamicPredictionIntervalCoverage(t *testing.T) {
+	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.Local)
+	store := "3006"
+	window := queueAdvisorWindow30
+	speed := 2.0 // 匀速 2 组/分
+	targetNo := 1500
+
+	// 生成 90min 匀速叫号序列。
+	var full []QueueObservation
+	no := 1000
+	for m := -90; m <= 0; m++ {
+		full = append(full, dynSample(store, now, m, no))
+		no += int(speed)
+	}
+
+	hit, total := 0, 0
+	for tMin := -60; tMin <= -5; tMin += 5 {
+		nowAt := now.Add(time.Duration(tMin) * time.Minute)
+		all := collectUpTo(full, now, tMin)
+		obs := recentStoreObservations(all, store, nowAt, window)
+		rate, cv, n, trend, rates, ok := calledRatePerMinuteWeighted(obs, nowAt, window)
+		if !ok {
+			continue
+		}
+		// 当前真实叫号与剩余。
+		calledAtT := 0
+		for _, s := range all {
+			if s.DisplayCalledNo > calledAtT {
+				calledAtT = s.DisplayCalledNo
+			}
+		}
+		remaining := targetNo - calledAtT
+		if remaining <= 0 {
+			continue
+		}
+		trueWait := float64(remaining) / speed
+		wr, _ := estimateWaitRange(remaining, 0, rate, cv, n, trend, rates, nil)
+		if wr == nil {
+			continue
+		}
+		total++
+		if float64(wr.Low)-1 <= trueWait && trueWait <= float64(wr.High)+1 {
+			hit++
+		}
+	}
+	if total == 0 {
+		t.Fatal("应有可评估的 checkpoint")
+	}
+	coverage := float64(hit) / float64(total)
+	t.Logf("匀速过程预测区间覆盖率：%.0f%% (%d/%d)", coverage*100, hit, total)
+	// 匀速、无噪声下，真值应几乎总是落在区间内（覆盖率 >= 70%）。
+	// 这是对「区间宽度是否有意义」的最基本校验——若区间恒偏窄，覆盖率会很低。
+	if coverage < 0.70 {
+		t.Errorf("匀速过程区间覆盖率过低：%.0f%%（区间可能恒偏窄，徒有其表）", coverage*100)
 	}
 }

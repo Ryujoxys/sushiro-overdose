@@ -158,7 +158,7 @@ func calledRatePerMinute(sorted []QueueObservation) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
-	rate, _, _, _, okw := calledRatePerMinuteWeighted(sorted, now, queuePanelRateWindow)
+	rate, _, _, _, _, okw := calledRatePerMinuteWeighted(sorted, now, queuePanelRateWindow)
 	if !okw {
 		return 0, false
 	}
@@ -182,14 +182,21 @@ type callRateInterval struct {
 //  4. 【B 离散度】用剔除后的原始 rate_i 算变异系数 cv（σ/mean），供下游动态调节区间宽度。
 //
 // 返回：rate=A 加权结果；cv=变异系数（有效间隔<2 时返回 -1 哨兵）；n=剔除后有效间隔数；
+// rates=IQR 剔除后的瞬时速率序列（供下游经验分位数区间使用；空表示无可用样本）；
 // ok=是否算出可用速度。
 //
 // 退化：密集采样（间隔中点都≈now）→ 权重≈1 → 退化为等权 = 旧行为（回归保护）；
 // 有效间隔为 0 → 退回首尾两点法兜底（不因丢速度而返回 false）。
-func calledRatePerMinuteWeighted(sorted []QueueObservation, now time.Time, window time.Duration) (rate float64, cv float64, n int, trend float64, ok bool) {
+func calledRatePerMinuteWeighted(sorted []QueueObservation, now time.Time, window time.Duration) (rate float64, cv float64, n int, trend float64, rates []float64, ok bool) {
 	if len(sorted) < 2 {
-		return 0, -1, 0, 1, false
+		return 0, -1, 0, 1, nil, false
 	}
+
+	// 观测点的 CollectedAt 全链路是秒级 RFC3339（见 queueObservationFromLiveStore 等），
+	// 而 now 常为纳秒精度的 time.Now()。把 now 截断到秒级与观测对齐，消除 ageMin/now 上 ≤1s
+	// 的系统性偏差；同时避免密集采样（间隔接近 1 分钟）时最后一个间隔因 now 高出几秒而被
+	// 错误地计入/丢弃。截断只影响内部差值计算，不改变调用方传入的 now。
+	now = now.Truncate(time.Second)
 
 	windowMin := window.Minutes()
 	if windowMin <= 0 {
@@ -234,21 +241,21 @@ func calledRatePerMinuteWeighted(sorted []QueueObservation, now time.Time, windo
 	}
 
 	if len(ivs) == 0 {
-		// 有效间隔为 0：退回首尾两点法兜底（仍优于无速度）。无趋势信息。
+		// 有效间隔为 0：退回首尾两点法兜底（仍优于无速度）。无趋势信息、无速率序列。
 		firstAt, ok := parseRFC3339Local(queueObservationCollectedAt(sorted[0]))
 		if !ok {
-			return 0, -1, 0, 1, false
+			return 0, -1, 0, 1, nil, false
 		}
 		lastAt, ok := parseRFC3339Local(queueObservationCollectedAt(sorted[len(sorted)-1]))
 		if !ok {
-			return 0, -1, 0, 1, false
+			return 0, -1, 0, 1, nil, false
 		}
 		span := lastAt.Sub(firstAt).Minutes()
 		diff := sorted[len(sorted)-1].DisplayCalledNo - sorted[0].DisplayCalledNo
 		if span <= 0 || diff <= 0 {
-			return 0, -1, 0, 1, false
+			return 0, -1, 0, 1, nil, false
 		}
-		return float64(diff) / span, -1, 0, 1, true
+		return float64(diff) / span, -1, 0, 1, nil, true
 	}
 
 	// 【A】指数时间衰减加权：近期叫号间隔权重高，反映「当前」节奏。
@@ -271,7 +278,8 @@ func calledRatePerMinuteWeighted(sorted []QueueObservation, now time.Time, windo
 	}
 	weightedRate := wrsum / wsum
 
-	// 【B】变异系数（用剔除后的原始 rate_i，分母用加权均值）。
+	// 【B】变异系数（用剔除后的原始 rate_i，分母用加权均值）。plainRates 同时作为下游
+	// 经验分位数区间的样本序列返回（已 IQR 剔除补号跳变）。
 	plainRates := make([]float64, len(ivs))
 	for i, v := range ivs {
 		plainRates[i] = v.rate
@@ -282,7 +290,7 @@ func calledRatePerMinuteWeighted(sorted []QueueObservation, now time.Time, windo
 	// 用于 ETA 前瞻校正：节奏在变快时，未来叫号会比过去更快，纯用历史速度外推会系统性高估等待。
 	trend = rateTrendRatio(ivs, halfLife)
 
-	return weightedRate, cv, len(ivs), trend, true
+	return weightedRate, cv, len(ivs), trend, plainRates, true
 }
 
 // rateTrendRatio 算速度趋势比 = 近半窗加权速度 / 远半窗加权速度。

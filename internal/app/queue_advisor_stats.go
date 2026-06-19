@@ -62,6 +62,57 @@ func iqrFences(rates []float64) (lo, hi float64) {
 	return mean - 3*mean, mean + 3*mean
 }
 
+// shrinkTrend 对观测到的速度趋势比做均值回归收缩：trend_post = λ·trend + (1-λ)·1。
+// λ 随 realtimeN 增长（样本少→λ 小→收缩回 1，即「不信趋势」；样本足→λ 大→接近观测 trend）。
+//
+// 动机：叫号节奏的「加速/减速」常是确定性日周期（饭点加速、峰后反转），而非持续漂移。
+// 直接用 sqrt(trend) 外推会把周期性加速当成持续加速，系统性高估未来速度（ETA 偏早）。
+// 收缩让小样本/近期偶发抖动不至于扭曲预测，样本累积后才逐步采信趋势信号。
+//
+// 阈值对齐 rateTrendRatio 自身门槛（n>=4 才有非 1 的 trend，且 estimateWaitRange 守卫也要求
+// realtimeN>=4）：n=4→λ≈0.11（刚过门槛，谨慎采信）、n>=12→λ=1（完全采信）。中间线性过渡。
+func shrinkTrend(trend float64, realtimeN int) float64 {
+	if trend == 1.0 {
+		return 1.0
+	}
+	lam := float64(realtimeN-3) / 9.0
+	if lam < 0 {
+		lam = 0
+	}
+	if lam > 1 {
+		lam = 1
+	}
+	return lam*trend + (1-lam)*1.0
+}
+
+// quantileWaitBounds 用 IQR 剔除后的瞬时速率序列 rates 算经验分位数等待区间。
+// base 是已融合历史先验/趋势校正后的中心估计（remaining/effRate）。区间宽度由 rates 的相对离散度
+// 驱动：快档 q90（速度高→等待短）→ 下界，慢档 q10（速度低→等待长）→ 上界。
+// 以 q50（中位速度）做归一化：low=base*(q50/q90)、high=base*(q50/q10)。这样区间中心锚在 base，
+// 形状（右偏、非对称）来自实测速率分布，而非对称的「均值±k·σ」查表。
+//
+// 返回 ok=false 的情况：rates<3（分位数不稳）、q10/q50 非正（脏数据）。调用方应回退 CV 查表。
+func quantileWaitBounds(base float64, rates []float64) (low, high float64, ok bool) {
+	if len(rates) < 3 || base <= 0 {
+		return 0, 0, false
+	}
+	q10 := queueQuantile(rates, 0.10)
+	q50 := queueQuantile(rates, 0.50)
+	q90 := queueQuantile(rates, 0.90)
+	if q10 <= 0 || q50 <= 0 || q90 <= 0 {
+		return 0, 0, false
+	}
+	// q10<=q50<=q90（速度分位数单调）。等待时间 = base * (q50/q_rate)，故：
+	//   low  = base * (q50/q90) <= base（快档：等待短）
+	//   high = base * (q50/q10) >= base（慢档：等待长）
+	low = base * (q50 / q90)
+	high = base * (q50 / q10)
+	if high < low {
+		low, high = high, low // 防御性：脏数据导致反转
+	}
+	return low, high, true
+}
+
 // waitRangeMultipliers 把叫号速度的变异系数 CV 映射成等待区间的下界/上界系数。
 // CV 越大（叫号忽快忽慢）→ 区间越宽，覆盖不确定性；CV 越小（几乎匀速）→ 区间收窄，
 // 给更紧的出发窗口。cv<0（哨兵：样本不足）走默认档。

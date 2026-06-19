@@ -34,10 +34,10 @@ func reportScenario(t *testing.T, name string, rate float64, cv float64, n int, 
 	// targetNo = calledNo + waitGroups，让 remaining=waitGroups。
 	calledNo := 1000
 	targetNo := calledNo + waitGroups
-	eta := computeQueueEta(targetNo, calledNo, 0, officialWait, waitCap, rate, cv, n, trend, hist, now)
+	eta := computeQueueEta(targetNo, calledNo, 0, officialWait, waitCap, rate, cv, n, trend, nil, hist, now)
 
 	// 单独看 estimateWaitRange 的 base（无 officialWait/cap 干扰）。
-	wr, src := estimateWaitRange(waitGroups, 0, rate, cv, n, trend, hist)
+	wr, src := estimateWaitRange(waitGroups, 0, rate, cv, n, trend, nil, hist)
 
 	// 解析预测区间和中点的等待分钟。
 	midWait := -1.0
@@ -85,7 +85,7 @@ func TestAccuracyOverall(t *testing.T) {
 		}
 		obs := scenarioObs(store, now, pts)
 		obs = recentStoreObservations(obs, store, now, window)
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, now, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 		if !ok {
 			t.Fatal("匀速场景应算出速度")
 		}
@@ -109,7 +109,7 @@ func TestAccuracyOverall(t *testing.T) {
 		}
 		obs := scenarioObs(store, now, pts)
 		obs = recentStoreObservations(obs, store, now, window) // 按窗过滤（真实路径）
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, now, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 		if !ok {
 			t.Fatal("先慢后快场景应算出速度")
 		}
@@ -140,7 +140,7 @@ func TestAccuracyOverall(t *testing.T) {
 		}
 		obs := scenarioObs(store, now, pts)
 		obs = recentStoreObservations(obs, store, now, window)
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, now, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 		if !ok {
 			t.Fatal("补号跳变场景应算出速度")
 		}
@@ -170,7 +170,7 @@ func TestAccuracyOverall(t *testing.T) {
 		}
 		obs := scenarioObs(store, now, pts)
 		obs = recentStoreObservations(obs, store, now, window)
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, now, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 		if !ok {
 			t.Fatal("停滞场景应算出速度")
 		}
@@ -190,7 +190,7 @@ func TestAccuracyOverall(t *testing.T) {
 			obsAt(store, 1000, 80, 40, now.Add(-5*time.Minute)),
 			obsAt(store, 1010, 75, 38, now),
 		}
-		rate, cv, n, trend, ok := calledRatePerMinuteWeighted(obs, now, window)
+		rate, cv, n, trend, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 		if !ok {
 			t.Fatal("小样本场景应算出速度")
 		}
@@ -198,7 +198,7 @@ func TestAccuracyOverall(t *testing.T) {
 		// n=2 → sampleW 小 → 历史权重高。真实等待≈40。
 		reportScenario(t, "小样本+历史", rate, cv, n, trend, 80, 40, 0, hist, now, 40, 2.0)
 		// source 应体现融合（realtimeN=2 → w=(2-1)/9 * (1-cv/0.5)；cv 在2点时为0或很小）。
-		_, src := estimateWaitRange(80, 40, rate, cv, n, trend, hist)
+		_, src := estimateWaitRange(80, 40, rate, cv, n, trend, nil, hist)
 		if src == "unknown" {
 			t.Errorf("小样本+历史应给出融合结果，非 unknown")
 		}
@@ -223,7 +223,7 @@ func TestAccuracyWeightedVsEqual(t *testing.T) {
 	}
 	obs := scenarioObs(store, now, pts)
 
-	rateWeighted, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, window)
+	rateWeighted, _, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, window)
 	if !ok {
 		t.Fatal("应算出速度")
 	}

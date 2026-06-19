@@ -247,34 +247,34 @@ func TestEstimateWaitRange(t *testing.T) {
 	// cv=-1（样本不足哨兵）→ 走默认宽度 0.85/1.20，数值与历史行为一致。
 	const cvDefault = -1.0
 	// 速度优先。
-	if wr, src := estimateWaitRange(100, 0, 2.0, cvDefault, 0, 1.0, nil); wr == nil || src != "recent_speed" {
+	if wr, src := estimateWaitRange(100, 0, 2.0, cvDefault, 0, 1.0, nil, nil); wr == nil || src != "recent_speed" {
 		t.Fatalf("speed range nil/src=%q", src)
 	}
 	// 速度 + 官方等待：用户不可能比门店整体更快叫到，官方等待抬低下界而非压缩。
 	// remaining=178/rate=2 → base≈89，low=floor(89*0.85)=75，high=ceil(89*1.2)=107。
 	// officialWait=120 高于本机估算区间 → low/high 都被抬到 120。
-	if wr, src := estimateWaitRange(178, 120, 2.0, cvDefault, 0, 1.0, nil); wr == nil || src != "recent_speed" {
+	if wr, src := estimateWaitRange(178, 120, 2.0, cvDefault, 0, 1.0, nil, nil); wr == nil || src != "recent_speed" {
 		t.Fatalf("official+speed range nil/src=%q", src)
 	} else if wr.Low < 120 || wr.High < 120 {
 		t.Errorf("officialWait should raise floor (max), got Low=%d High=%d want >=120", wr.Low, wr.High)
 	}
 	// officialWait 远小于本机估算（号码靠后）时不应压缩 low。
-	if wr, _ := estimateWaitRange(178, 30, 2.0, cvDefault, 0, 1.0, nil); wr == nil || wr.Low < 75 {
+	if wr, _ := estimateWaitRange(178, 30, 2.0, cvDefault, 0, 1.0, nil, nil); wr == nil || wr.Low < 75 {
 		t.Errorf("small officialWait must not shrink low, got Low=%d want >=75", wr.Low)
 	}
 	// 无速度退化到官方。
-	wr, src := estimateWaitRange(0, 60, 0, cvDefault, 0, 1.0, nil)
+	wr, src := estimateWaitRange(0, 60, 0, cvDefault, 0, 1.0, nil, nil)
 	if wr == nil || src != "official" {
 		t.Fatalf("official range nil/src=%q", src)
 	}
 	// 无速度无官方退化到历史。
 	hist := &QueueWaitRange{Low: 40, High: 70}
-	wr2, src2 := estimateWaitRange(0, 0, 0, cvDefault, 0, 1.0, hist)
+	wr2, src2 := estimateWaitRange(0, 0, 0, cvDefault, 0, 1.0, nil, hist)
 	if wr2 == nil || src2 != "history" || wr2.Low != 40 || wr2.High != 70 {
 		t.Fatalf("history range %+v src=%q", wr2, src2)
 	}
 	// 全缺 → unknown。
-	if wr3, src3 := estimateWaitRange(0, 0, 0, cvDefault, 0, 1.0, nil); wr3 != nil || src3 != "unknown" {
+	if wr3, src3 := estimateWaitRange(0, 0, 0, cvDefault, 0, 1.0, nil, nil); wr3 != nil || src3 != "unknown" {
 		t.Fatalf("unknown range %+v src=%q", wr3, src3)
 	}
 }
@@ -285,24 +285,24 @@ func TestComputeQueueEta(t *testing.T) {
 	const n = 0
 
 	// 已轮到：targetNo==calledNo 是真的即将轮到。
-	done := computeQueueEta(950, 950, 0, 90, 0, 2.0, cv, n, 1.0, nil, now)
+	done := computeQueueEta(950, 950, 0, 90, 0, 2.0, cv, n, 1.0, nil, nil, now)
 	if done.RemainingGroups != 0 || done.Risk != "low" {
 		t.Errorf("done eta=%+v", done)
 	}
 
 	// 过号：targetNo<calledNo（哪怕只差一个号）也不能再说“已轮到、低风险”，
 	// 寿司郎过号不会自动叫到，需补号或重新取号，与 dashboard 路径口径一致。
-	passed := computeQueueEta(900, 950, 0, 90, 0, 2.0, cv, n, 1.0, nil, now)
+	passed := computeQueueEta(900, 950, 0, 90, 0, 2.0, cv, n, 1.0, nil, nil, now)
 	if passed.Risk != "high" || !strings.Contains(passed.ArrivalSuggestion, "过号") {
 		t.Errorf("passed eta should be high risk + 过号 hint, got %+v", passed)
 	}
-	passedBy1 := computeQueueEta(949, 950, 0, 90, 0, 2.0, cv, n, 1.0, nil, now)
+	passedBy1 := computeQueueEta(949, 950, 0, 90, 0, 2.0, cv, n, 1.0, nil, nil, now)
 	if passedBy1.Risk != "high" || !strings.Contains(passedBy1.ArrivalSuggestion, "过号") {
 		t.Errorf("passed-by-1 eta should be high risk + 过号 hint, got %+v", passedBy1)
 	}
 
 	// 正常：还差 178，速度 2/分 → ~89 分钟，带区间与出发建议。
-	eta := computeQueueEta(1078, 900, 25, 90, 0, 2.0, cv, n, 1.0, nil, now)
+	eta := computeQueueEta(1078, 900, 25, 90, 0, 2.0, cv, n, 1.0, nil, nil, now)
 	if eta.RemainingGroups != 178 {
 		t.Errorf("remaining=%d want 178", eta.RemainingGroups)
 	}
@@ -317,13 +317,13 @@ func TestComputeQueueEta(t *testing.T) {
 	}
 
 	// 数据不足：无速度、无官方、无历史 → 无法预估。
-	none := computeQueueEta(1078, 900, 0, 0, 0, 0, cv, n, 1.0, nil, now)
+	none := computeQueueEta(1078, 900, 0, 0, 0, 0, cv, n, 1.0, nil, nil, now)
 	if none.EstimatedCalledAt != "" || none.WaitMinutesRange != nil {
 		t.Errorf("insufficient data should not estimate: %+v", none)
 	}
 
 	// 只有官方等待：只能作为门店压力参考，不能包装成到号码的 ETA。
-	officialOnly := computeQueueEta(1078, 900, 0, 90, 0, 0, cv, n, 1.0, nil, now)
+	officialOnly := computeQueueEta(1078, 900, 0, 90, 0, 0, cv, n, 1.0, nil, nil, now)
 	if officialOnly.WaitMinutesRange != nil || officialOnly.Source != "official" || officialOnly.Risk != "high" {
 		t.Fatalf("official-only ETA should not estimate target number: %+v", officialOnly)
 	}
@@ -334,7 +334,7 @@ func TestComputeQueueEtaWaitCapGuard(t *testing.T) {
 	now := time.Date(2026, 6, 8, 12, 0, 0, 0, time.Local)
 	// 剩 200 桌、近窗速度偏慢 → 模型可能算出很高的高位；waitCap=180 应把高位钳到 180。
 	// cv=-1、realtimeN=0 → 融合权重 w=0，走纯历史 source=history，base 经 soft floor 后高位仍超 180 触发钳制。
-	eta := computeQueueEta(1100, 900, 0, 0, 180, 1.0, -1.0, 0, 1.0, &QueueWaitRange{Low: 150, High: 320}, now)
+	eta := computeQueueEta(1100, 900, 0, 0, 180, 1.0, -1.0, 0, 1.0, nil, &QueueWaitRange{Low: 150, High: 320}, now)
 	if eta.WaitMinutesRange == nil {
 		t.Fatalf("应有等待区间")
 	}
@@ -345,7 +345,7 @@ func TestComputeQueueEtaWaitCapGuard(t *testing.T) {
 		t.Fatalf("超过封顶时应给出 SourceNote 提示")
 	}
 	// waitCap=0 表示无封顶信息，不应触发钳制（SourceNote 不含封顶提示）。
-	noCap := computeQueueEta(1100, 900, 0, 0, 0, 1.0, -1.0, 0, 1.0, &QueueWaitRange{Low: 150, High: 320}, now)
+	noCap := computeQueueEta(1100, 900, 0, 0, 0, 1.0, -1.0, 0, 1.0, nil, &QueueWaitRange{Low: 150, High: 320}, now)
 	if strings.Contains(noCap.SourceNote, "官方等位封顶") {
 		t.Fatalf("无封顶信息时不应给出封顶提示，实际 %q", noCap.SourceNote)
 	}
@@ -468,8 +468,8 @@ func TestWaitRangeMultipliers(t *testing.T) {
 
 func TestEstimateWaitRangeNarrowsWhenStable(t *testing.T) {
 	// 稳定速率 cv<0.15 → high 系数 1.10，比默认 1.20 窄。
-	stable, _ := estimateWaitRange(100, 0, 2.0, 0.05, 10, 1.0, nil)
-	def, _ := estimateWaitRange(100, 0, 2.0, -1.0, 10, 1.0, nil) // -1 走默认 1.20
+	stable, _ := estimateWaitRange(100, 0, 2.0, 0.05, 10, 1.0, nil, nil)
+	def, _ := estimateWaitRange(100, 0, 2.0, -1.0, 10, 1.0, nil, nil) // -1 走默认 1.20
 	if stable == nil || def == nil {
 		t.Fatal("nil range")
 	}
@@ -480,8 +480,8 @@ func TestEstimateWaitRangeNarrowsWhenStable(t *testing.T) {
 
 func TestEstimateWaitRangeWidensWhenVolatile(t *testing.T) {
 	// 高 cv → high 系数 1.50，比默认宽。
-	vol, _ := estimateWaitRange(100, 0, 2.0, 0.60, 10, 1.0, nil)
-	def, _ := estimateWaitRange(100, 0, 2.0, -1.0, 10, 1.0, nil)
+	vol, _ := estimateWaitRange(100, 0, 2.0, 0.60, 10, 1.0, nil, nil)
+	def, _ := estimateWaitRange(100, 0, 2.0, -1.0, 10, 1.0, nil, nil)
 	if vol == nil || def == nil {
 		t.Fatal("nil range")
 	}
@@ -493,7 +493,7 @@ func TestEstimateWaitRangeWidensWhenVolatile(t *testing.T) {
 // C: 实时/历史融合
 func TestEstimateWaitRangeBlendedRealtimeDominant(t *testing.T) {
 	// realtimeN 大、cv 小、有历史 → w≈1 → source=recent_speed，base≈waitGroups/rate。
-	wr, src := estimateWaitRange(100, 0, 2.0, 0.1, 10, 1.0, &QueueWaitRange{Low: 40, High: 80})
+	wr, src := estimateWaitRange(100, 0, 2.0, 0.1, 10, 1.0, nil, &QueueWaitRange{Low: 40, High: 80})
 	if wr == nil || src != "recent_speed" {
 		t.Fatalf("realtime-dominant should be recent_speed, got src=%q wr=%+v", src, wr)
 	}
@@ -505,7 +505,7 @@ func TestEstimateWaitRangeBlendedRealtimeDominant(t *testing.T) {
 
 func TestEstimateWaitRangeBlendedHistoryDominant(t *testing.T) {
 	// realtimeN=1（sampleW=0）→ w=0 → source=history，base≈waitGroups/histMid。
-	wr, src := estimateWaitRange(100, 0, 2.0, 0.1, 1, 1.0, &QueueWaitRange{Low: 40, High: 80})
+	wr, src := estimateWaitRange(100, 0, 2.0, 0.1, 1, 1.0, nil, &QueueWaitRange{Low: 40, High: 80})
 	if wr == nil || src != "history" {
 		t.Fatalf("history-dominant should be history, got src=%q wr=%+v", src, wr)
 	}
@@ -513,7 +513,7 @@ func TestEstimateWaitRangeBlendedHistoryDominant(t *testing.T) {
 
 func TestEstimateWaitRangeBlendedMiddle(t *testing.T) {
 	// realtimeN 中等 → 0<w<0.5 → source=blended。
-	wr, src := estimateWaitRange(100, 0, 2.0, 0.3, 4, 1.0, &QueueWaitRange{Low: 40, High: 80})
+	wr, src := estimateWaitRange(100, 0, 2.0, 0.3, 4, 1.0, nil, &QueueWaitRange{Low: 40, High: 80})
 	if wr == nil || src != "blended" {
 		t.Fatalf("middle blend should be blended, got src=%q wr=%+v", src, wr)
 	}
@@ -521,7 +521,7 @@ func TestEstimateWaitRangeBlendedMiddle(t *testing.T) {
 
 func TestEstimateWaitRangeOfficialFloorStillApplies(t *testing.T) {
 	// 融合后 base 可能 < officialWait，但 low 仍被 officialWait 抬高（物理约束不破）。
-	wr, _ := estimateWaitRange(100, 120, 2.0, 0.1, 10, 1.0, &QueueWaitRange{Low: 40, High: 80})
+	wr, _ := estimateWaitRange(100, 120, 2.0, 0.1, 10, 1.0, nil, &QueueWaitRange{Low: 40, High: 80})
 	if wr == nil || wr.Low < 120 {
 		t.Errorf("officialWait floor must still apply after blend, Low=%d want >=120", wr.Low)
 	}
@@ -530,7 +530,7 @@ func TestEstimateWaitRangeOfficialFloorStillApplies(t *testing.T) {
 func TestEstimateWaitRangeHistMidTinySoftFloor(t *testing.T) {
 	// hist P50 极小（2min）→ rateHist 巨大，但 soft floor（融合路径每组≥0.25min）兜住，
 	// base=waitGroups*0.25=25（waitGroups=100），不产生「2分钟叫到100桌」的离谱小值。
-	wr, _ := estimateWaitRange(100, 0, 2.0, 0.1, 1, 1.0, &QueueWaitRange{Low: 1, High: 3})
+	wr, _ := estimateWaitRange(100, 0, 2.0, 0.1, 1, 1.0, nil, &QueueWaitRange{Low: 1, High: 3})
 	if wr == nil {
 		t.Fatal("nil range")
 	}
@@ -571,7 +571,7 @@ func TestCalledRateWeightedPrefersRecent(t *testing.T) {
 		obsAt(store, 140, 45, 55, now.Add(-10*time.Minute)), // 40min 推 40 → 1.0
 		obsAt(store, 170, 40, 50, now),                      // 10min 推 30 → 3.0
 	}
-	rate, _, _, _, ok := calledRatePerMinuteWeighted(obs2, now, 60*time.Minute)
+	rate, _, _, _, _, ok := calledRatePerMinuteWeighted(obs2, now, 60*time.Minute)
 	if !ok {
 		t.Fatal("expected rate")
 	}
@@ -590,7 +590,7 @@ func TestCalledRateWeightedDenseConvergesToEqual(t *testing.T) {
 		obsAt(store, 110, 45, 55, now.Add(-1*time.Minute)), // 1min 推 10 → 10
 		obsAt(store, 120, 40, 50, now),                     // 1min 推 10 → 10
 	}
-	rate, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, 15*time.Minute)
+	rate, _, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, 15*time.Minute)
 	if !ok {
 		t.Fatal("expected rate")
 	}
@@ -610,7 +610,7 @@ func TestCalledRateWeightedOutlierDoesNotInflate(t *testing.T) {
 		obsAt(store, 220, 45, 55, now.Add(-3*time.Minute)), // 1min 推 10 → 10
 		obsAt(store, 230, 45, 55, now.Add(-2*time.Minute)), // 1min 推 10 → 10
 	}
-	rate, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, 15*time.Minute)
+	rate, _, _, _, _, ok := calledRatePerMinuteWeighted(obs, now, 15*time.Minute)
 	if !ok {
 		t.Fatal("expected rate")
 	}
@@ -632,5 +632,115 @@ func TestCoefficientOfVariation(t *testing.T) {
 	// 有离散 → cv>0。
 	if cv := coefficientOfVariation([]float64{2, 4, 6, 8}); cv <= 0 {
 		t.Errorf("dispersed → cv>0, got %v", cv)
+	}
+}
+
+// TestEstimateWaitRangeTrendGuardedByRealtimeN 验证趋势前瞻校正的 realtimeN 守卫：
+// realtimeN<4 时（趋势来自 1~2 个间隔的噪声），即便 source=blended（effRate 几乎纯历史），
+// 也不应套用 sqrt(trend) 校正——否则偶发抖动会系统性偏移稳定的历史先验。
+func TestEstimateWaitRangeTrendGuardedByRealtimeN(t *testing.T) {
+	hist := &QueueWaitRange{Low: 40, High: 80} // histMid=60 → rateHist=100/60≈1.67
+	// realtimeN=2, cv 较小 → w=(2-1)/9*(1-cv/0.5) 很小 → source=blended，effRate≈rateHist。
+	// trend=2.0（强加速噪声）。守卫生效时不校正，base≈100/rateHist≈60。
+	wrGuarded, _ := estimateWaitRange(100, 0, 3.0, 0.2, 2, 2.0, nil, hist)
+	// realtimeN=10 → 守卫放行，校正生效：effRate 上抬，base 变小。
+	wrApplied, _ := estimateWaitRange(100, 0, 3.0, 0.2, 10, 2.0, nil, hist)
+	if wrGuarded == nil || wrApplied == nil {
+		t.Fatalf("两个区间都应非 nil: guarded=%+v applied=%+v", wrGuarded, wrApplied)
+	}
+	// 校正生效时 base 更小 → low 更低。若守卫失效（realtimeN=2 也校正），两者会接近相等。
+	if wrApplied.Low >= wrGuarded.Low {
+		t.Errorf("realtimeN=10 套趋势校正应让 base 更小（low 更低）：guarded.Low=%d applied.Low=%d",
+			wrGuarded.Low, wrApplied.Low)
+	}
+}
+
+// TestEstimateWaitRangeTrendOnlyWhenSufficient 直接验证守卫门槛：realtimeN<4 不校正、>=4 校正。
+func TestEstimateWaitRangeTrendOnlyWhenSufficient(t *testing.T) {
+	// 无历史、纯实时：source=recent_speed，base=waitGroups/rate。
+	// rate=2.0, trend=2.0 → 校正后 effRate=2*sqrt(2)≈2.83, base≈35。
+	// realtimeN=3（<4 守卫）：不校正，base=50。
+	wrNo, _ := estimateWaitRange(100, 0, 2.0, 0.1, 3, 2.0, nil, nil)
+	wrYes, _ := estimateWaitRange(100, 0, 2.0, 0.1, 4, 2.0, nil, nil)
+	if wrNo == nil || wrYes == nil {
+		t.Fatalf("区间都应非 nil: no=%+v yes=%+v", wrNo, wrYes)
+	}
+	if wrYes.Low >= wrNo.Low {
+		t.Errorf("realtimeN>=4 时趋势校正应让 base 更小：no.Low=%d yes.Low=%d", wrNo.Low, wrYes.Low)
+	}
+}
+
+// TestShrinkTrend 验证趋势均值回归收缩：trend_post = λ·trend + (1-λ)·1，
+// λ 随 realtimeN 增长（样本少收缩回 1、样本足接近观测值）。
+func TestShrinkTrend(t *testing.T) {
+	// trend=1 时恒为 1（无趋势不动）。
+	if got := shrinkTrend(1.0, 10); got != 1.0 {
+		t.Errorf("trend=1 应返回 1，got %v", got)
+	}
+	// realtimeN<3（守卫之外）→ λ=0 → 完全收缩回 1。
+	if got := shrinkTrend(2.0, 2); got != 1.0 {
+		t.Errorf("小样本应完全收缩回 1，got %v", got)
+	}
+	// realtimeN=4 → λ≈0.11 → trend_post 介于 1 和 2 之间，且 >1。
+	got4 := shrinkTrend(2.0, 4)
+	if got4 <= 1.0 || got4 >= 2.0 {
+		t.Errorf("n=4 应部分收缩（1<trend_post<2），got %v", got4)
+	}
+	// realtimeN>=12 → λ=1 → 完全采信观测 trend。
+	if got := shrinkTrend(2.0, 12); got != 2.0 {
+		t.Errorf("大样本应完全采信 trend=2，got %v", got)
+	}
+	if got := shrinkTrend(0.6, 20); got != 0.6 {
+		t.Errorf("大样本减速也应完全采信 trend=0.6，got %v", got)
+	}
+	// 单调性：固定 trend=2，realtimeN 越大 trend_post 越大（越采信）。
+	prev := 0.0
+	for n := 4; n <= 12; n++ {
+		cur := shrinkTrend(2.0, n)
+		if cur < prev-1e-9 {
+			t.Errorf("trend_post 应随 realtimeN 单调不减：n=%d cur=%v prev=%v", n, cur, prev)
+		}
+		prev = cur
+	}
+}
+
+// TestQuantileWaitBounds 验证经验分位数区间的非对称性与回退。
+func TestQuantileWaitBounds(t *testing.T) {
+	// 样本不足（<3）→ ok=false，调用方回退 CV 查表。
+	if _, _, ok := quantileWaitBounds(50, []float64{2.0, 2.5}); ok {
+		t.Errorf("rates<3 应返回 ok=false")
+	}
+	// 匀速（所有 rate 相同）→ low==high==base（无离散）。
+	low, high, ok := quantileWaitBounds(50, []float64{2.0, 2.0, 2.0})
+	if !ok || low != 50 || high != 50 {
+		t.Errorf("匀速应 low=high=base=50：low=%v high=%v ok=%v", low, high, ok)
+	}
+	// 右偏（慢尾）：速率分布含慢值 → high（慢档等待）应显著大于 low（快档等待），且 high>base>low。
+	// base=50，rates 有快有慢。
+	low, high, ok = quantileWaitBounds(50, []float64{1.0, 2.0, 4.0})
+	if !ok {
+		t.Fatalf("应有区间")
+	}
+	if !(low < 50 && high > 50) {
+		t.Errorf("区间应跨 base 两侧：low=%v base=50 high=%v", low, high)
+	}
+	if high <= low {
+		t.Errorf("high 应大于 low：low=%v high=%v", low, high)
+	}
+}
+
+// TestEstimateWaitRangeQuantileWiderThanSymmetric 验证经验分位数区间在有 rates 时启用、
+// 且对右偏（慢尾）分布给出比对称查表更宽的上界（更贴合真实长等待风险）。
+func TestEstimateWaitRangeQuantileWiderThanSymmetric(t *testing.T) {
+	// base=100/2=50。rates 右偏（含慢值 1.0）：慢档等待被推高。
+	rates := []float64{1.0, 2.0, 2.0, 4.0}
+	wrQ, _ := estimateWaitRange(100, 0, 2.0, 0.3, 10, 1.0, rates, nil) // 走分位数
+	wrS, _ := estimateWaitRange(100, 0, 2.0, 0.3, 10, 1.0, nil, nil)   // 走 CV 查表回退
+	if wrQ == nil || wrS == nil {
+		t.Fatalf("区间都应非 nil：q=%+v s=%+v", wrQ, wrS)
+	}
+	// 分位数区间因右偏慢尾，上界应不低于对称查表（覆盖长等待更充分）。
+	if wrQ.High < wrS.High {
+		t.Errorf("右偏分布下分位数上界应>=对称查表：quantile.High=%d symmetric.High=%d", wrQ.High, wrS.High)
 	}
 }
