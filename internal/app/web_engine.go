@@ -9,15 +9,21 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Ryujoxys/sushiro-overdose/internal/platform"
 )
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	pid := readPID()
 	hasConfig := HasValidConfig()
+	// quarantine 检测：<10ms（一次 xattr 子进程），darwin 外恒 false；executable_path 给前端拼修复命令用。
+	quarantined, _ := platform.IsQuarantined()
+	exePath, _ := os.Executable()
 	status := map[string]any{
 		"version":           Version,
 		"running":           isRunning(),
@@ -28,6 +34,8 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		"sampling":          sampler.GetState(),
 		"auth_health":       getAuthHealth(),
 		"notify_configured": len(configuredNotificationChannels()) > 0,
+		"quarantined":       quarantined,
+		"executable_path":   exePath,
 	}
 	writeJSON(w, status)
 }

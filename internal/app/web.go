@@ -108,6 +108,7 @@ func cmdWeb() {
 	mux.HandleFunc("/api/repair-proxy", handleRepairProxy)
 	mux.HandleFunc("/api/uninstall", handleUninstall)
 	mux.HandleFunc("/api/processes/stop", handleStopProcesses)
+	mux.HandleFunc("/api/wechat/kill", handleKillWeChat)
 
 	// Engine control
 	mux.HandleFunc("/api/engine/state", handleEngineState)

@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func runCmd(name string, args ...string) (string, error) {
@@ -206,6 +208,88 @@ func killRelatedAppProcesses(excludePID int) []MaintenanceResult {
 func isProcessAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil
+}
+
+// isQuarantined 判断当前可执行文件是否带 com.apple.quarantine 扩展属性（Gatekeeper 隔离）。
+// 用 xattr -p 读该属性：退出码 0 = 有隔离属性（已隔离）；退出码 1 = 无此属性（未隔离）；
+// 其它错误（如 xattr 命令缺失）返回 err。os.Executable() 取自身路径。
+func isQuarantined() (bool, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	cmd := exec.Command("xattr", "-p", "com.apple.quarantine", exe)
+	if err := cmd.Run(); err != nil {
+		// 退出码 1 = 属性不存在 = 未隔离；这是正常路径，不是错误。
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// listWeChatProcesses 用 pgrep + ps 枚举 macOS 微信进程。StartTime 取 ps 的 lstart（如
+// "Mon Jan 2 15:04:05 2026"），转 RFC3339；解析失败留空。失败/无进程返回 nil。
+func listWeChatProcesses() []WeChatProcessInfo {
+	out, err := exec.Command("pgrep", "-f", `WeChat\.app|微信\.app`).Output()
+	if err != nil {
+		return nil
+	}
+	var infos []WeChatProcessInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pidStr := strings.TrimSpace(line)
+		if pidStr == "" {
+			continue
+		}
+		pid, perr := strconv.Atoi(pidStr)
+		if perr != nil || pid <= 0 {
+			continue
+		}
+		info := WeChatProcessInfo{PID: pid}
+		if comm, err := exec.Command("ps", "-p", pidStr, "-o", "comm=").Output(); err == nil {
+			info.Path = strings.TrimSpace(string(comm))
+			info.Name = filepath.Base(info.Path)
+		}
+		if ls, err := exec.Command("ps", "-p", pidStr, "-o", "lstart=").Output(); err == nil {
+			if t, perr := time.Parse("Mon Jan 2 15:04:05 2006", strings.TrimSpace(string(ls))); perr == nil {
+				info.StartTime = t.Format(time.RFC3339)
+			}
+		}
+		infos = append(infos, info)
+	}
+	return infos
+}
+
+func killWeChatProcesses() []MaintenanceResult {
+	procs := listWeChatProcesses()
+	if len(procs) == 0 {
+		return []MaintenanceResult{{
+			Name:   "wechat_processes",
+			Action: "kill_wechat",
+			Status: MaintenanceStatusMissing,
+		}}
+	}
+	results := make([]MaintenanceResult, 0, len(procs))
+	for _, p := range procs {
+		name := p.Name
+		if name == "" {
+			name = "wechat_process"
+		}
+		r := MaintenanceResult{
+			Name:   name,
+			Action: "kill_wechat",
+			Path:   p.Path,
+			Status: MaintenanceStatusOK,
+			Error:  fmt.Sprintf("pid %d", p.PID),
+		}
+		if err := killProcess(p.PID); err != nil {
+			r.Status = MaintenanceStatusError
+			r.Error = fmt.Sprintf("pid %d: %s", p.PID, err.Error())
+		}
+		results = append(results, r)
+	}
+	return results
 }
 
 func openBrowser(url string) error {

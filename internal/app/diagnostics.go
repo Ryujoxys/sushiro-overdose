@@ -54,8 +54,10 @@ type Diagnostics struct {
 }
 
 type DiagnosticPlatform struct {
-	GOOS   string `json:"goos"`
-	GOARCH string `json:"goarch"`
+	GOOS            string `json:"goos"`
+	GOARCH          string `json:"goarch"`
+	Quarantined     bool   `json:"quarantined,omitempty"`      // 仅 macOS：当前可执行文件是否被 Gatekeeper 隔离
+	QuarantineError string `json:"quarantine_error,omitempty"` // 检测隔离属性时的错误（如 xattr 缺失）
 }
 
 type DiagnosticRunning struct {
@@ -180,13 +182,22 @@ func CollectDiagnostics() Diagnostics {
 	proxyMarker := collectProxyMarkerDiagnostics()
 	systemProxy := collectSystemProxyDiagnostics()
 
+	quarantined, qerr := IsQuarantined()
+	platformField := DiagnosticPlatform{
+		GOOS:   runtime.GOOS,
+		GOARCH: runtime.GOARCH,
+	}
+	if quarantined {
+		platformField.Quarantined = true
+	}
+	if qerr != nil {
+		platformField.QuarantineError = qerr.Error()
+	}
+
 	d := Diagnostics{
 		GeneratedAt: time.Now().Format(time.RFC3339),
 		Version:     Version,
-		Platform: DiagnosticPlatform{
-			GOOS:   runtime.GOOS,
-			GOARCH: runtime.GOARCH,
-		},
+		Platform:    platformField,
 		Running: DiagnosticRunning{
 			Running: isRunning(),
 			PID:     readPID(),

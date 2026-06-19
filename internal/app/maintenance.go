@@ -169,6 +169,18 @@ func StopAppProcesses(options StopProcessOptions) MaintenanceReport {
 	return report
 }
 
+// KillWeChat 结束所有微信系进程（PC 微信抓包引导用：用户忘关 WeChatAppEx 导致抓不到包时一键结束）。
+// 返回 MaintenanceReport，OK 由各进程结果综合判定。Linux 无微信客户端，恒返回 missing。
+func KillWeChat() MaintenanceReport {
+	results := KillWeChatProcesses()
+	report := MaintenanceReport{
+		Action:  "kill_wechat",
+		Results: results,
+	}
+	report.OK = maintenanceReportOK(report.Results)
+	return report
+}
+
 type processCleanupTarget struct {
 	name string
 	pid  int

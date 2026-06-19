@@ -180,6 +180,29 @@ func handleStopProcesses(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleKillWeChat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	report := KillWeChat()
+	// 反馈到 engine 日志，前端 SSE 'log' 事件会渲染，让用户知道杀了几/结果。
+	killed := 0
+	for _, res := range report.Results {
+		if res.Status == MaintenanceStatusOK {
+			killed++
+		}
+	}
+	engine.addLog("已结束 " + strconv.Itoa(killed) + " 个微信进程（共 " + strconv.Itoa(len(report.Results)) + " 项）")
+	status := http.StatusOK
+	if !report.OK {
+		status = http.StatusInternalServerError
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(report)
+}
+
 func uninstallOptionsSelected(options UninstallOptions) bool {
 	return options.All || options.Config || options.Notify || options.Feishu ||
 		options.Preferences || options.Stores || options.State || options.History ||

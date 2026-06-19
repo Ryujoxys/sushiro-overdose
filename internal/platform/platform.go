@@ -96,3 +96,31 @@ func InstallSamplingAutoStart() error {
 func RemoveSamplingAutoStart() error {
 	return removeSamplingAutoStart()
 }
+
+// IsQuarantined 报告当前可执行文件是否被 macOS Gatekeeper 隔离（带 com.apple.quarantine
+// 扩展属性）。隔离状态下系统可能限制网络/代理设置或弹 Gatekeeper 拦截。
+// Windows/Linux 恒返回 (false, nil)。
+func IsQuarantined() (bool, error) {
+	return isQuarantined()
+}
+
+// WeChatProcessInfo 描述一个被识别为微信系的进程（Windows: WeChat/WeChatAppEx/Weixin/
+// WeChatPlayer；macOS: 微信.app）。StartTime 为 RFC3339 字符串，便于跨平台一致地做基线比对。
+type WeChatProcessInfo struct {
+	PID       int    `json:"pid"`
+	Name      string `json:"name"`
+	StartTime string `json:"start_time,omitempty"`
+	Path      string `json:"path,omitempty"`
+}
+
+// ListWeChatProcesses 枚举当前运行的微信系进程。Windows 用 PowerShell（结构化输出），
+// macOS 用 pgrep+ps，Linux 恒返回空切片（Linux 无微信小程序客户端）。失败返回空切片，不 panic。
+func ListWeChatProcesses() []WeChatProcessInfo {
+	return listWeChatProcesses()
+}
+
+// KillWeChatProcesses 终止所有微信系进程并返回逐个结果（复用 MaintenanceResult）。
+// 用于 PC 微信抓包场景：用户忘关 WeChatAppEx 导致抓不到包时，一键结束。
+func KillWeChatProcesses() []MaintenanceResult {
+	return killWeChatProcesses()
+}

@@ -98,6 +98,21 @@ func isProcessAlive(pid int) bool {
 	return err == nil
 }
 
+// isQuarantined 在 Linux 上恒返回未隔离（Gatekeeper 是 macOS 专属机制）。
+func isQuarantined() (bool, error) {
+	return false, nil
+}
+
+// Linux 无微信小程序客户端，枚举恒空、杀进程恒 missing。
+func listWeChatProcesses() []WeChatProcessInfo { return nil }
+func killWeChatProcesses() []MaintenanceResult {
+	return []MaintenanceResult{{
+		Name:   "wechat_processes",
+		Action: "kill_wechat",
+		Status: MaintenanceStatusMissing,
+	}}
+}
+
 func openBrowser(url string) error {
 	for _, name := range []string{"microsoft-edge", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "brave-browser"} {
 		path, err := exec.LookPath(name)

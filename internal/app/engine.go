@@ -42,6 +42,11 @@ const (
 	EngineError EngineStatus = "error"
 )
 
+// weChatProbeInterval 是 runCapture 轮询里探测 PC 微信进程的节流间隔。
+// PowerShell/ps 冷启动约 300ms，4s 间隔下平均开销可忽略；capture 等待期本就空转，
+// 4s 粒度对「微信是否被关再重开」的信号灯足够（用户自己主导重启动作，不需秒级反馈）。
+const weChatProbeInterval = 4 * time.Second
+
 type EngineState struct {
 	Status      EngineStatus       `json:"status"`
 	Message     string             `json:"message"`
@@ -61,6 +66,18 @@ type CaptureStatusJSON struct {
 	PhoneNumber     bool `json:"phone_number"`
 	StoreIDs        bool `json:"store_ids"`
 	Complete        bool `json:"complete"`
+	// WeChat 是 PC 微信进程状态（仅 Windows/darwin capturing 期有意义）。nil 表示无信息/非该平台。
+	// 指针+omitempty 保证旧前端忽略未知字段（向前兼容）。
+	WeChat *WeChatStatusJSON `json:"wechat,omitempty"`
+}
+
+// WeChatStatusJSON 给前端做信号灯：Running=是否有微信在跑；
+// Restarted=本次 capture 期间是否检测到微信被关掉再重开。
+type WeChatStatusJSON struct {
+	Running   bool     `json:"running"`
+	Restarted bool     `json:"restarted"`
+	PIDs      []int    `json:"pids,omitempty"`
+	Names     []string `json:"names,omitempty"`
 }
 
 type LogEntry struct {
@@ -85,6 +102,9 @@ type BookingEngine struct {
 	// pinnedSlot，非空时 booking 只预约这一个确切时段（直接预约），不按偏好扫描。
 	// 仅单次运行有效，finishRun 清空。
 	pinnedSlot *TargetSlot
+	// captureWeChat 缓存 runCapture 最近一次微信进程探测结果，供 GetState→captureStatus 附到
+	// CaptureStatusJSON.WeChat 推给前端做信号灯。capturing 期由 runCapture 持 mu 写，退出时清空。
+	captureWeChat *WeChatStatusJSON
 }
 
 // engine 是全局单例：Web handler 和 CLI 都操作这一个实例，状态集中在它身上。
@@ -103,7 +123,12 @@ func (e *BookingEngine) GetState() EngineState {
 }
 
 func (e *BookingEngine) captureStatus() *CaptureStatusJSON {
-	return captureStatusForTokens(e.tokens)
+	cs := captureStatusForTokens(e.tokens)
+	// 附上缓存的本轮微信进程探测结果（runCapture 持 mu 写入）。
+	if cs != nil && e.captureWeChat != nil {
+		cs.WeChat = e.captureWeChat
+	}
+	return cs
 }
 
 func captureStatusForTokens(tokens *CapturedTokens) *CaptureStatusJSON {
@@ -258,7 +283,9 @@ func (e *BookingEngine) runCapture(ctx context.Context) {
 	if !trusted {
 		e.addLog("首次运行，正在安装CA证书...")
 		if err := InstallCert(); err != nil {
-			e.setState(EngineError, "证书安装失败，请查看设置页面的安装指南")
+			// 把底层错误关键词带进 message：Windows 机器级证书需 UAC，用户拒绝时会含
+			// 「管理员权限」「LocalMachine」等，前端 explainMsg 据此给精准人话 + 引导卡。
+			e.setState(EngineError, "证书安装失败："+err.Error())
 			e.addLogLevel("证书安装失败: "+err.Error(), "error")
 			return
 		}
@@ -301,13 +328,48 @@ func (e *BookingEngine) runCapture(ctx context.Context) {
 	defer ticker.Stop()
 	savedForDiscovery := false
 
+	// PC 微信进程探测状态（局部变量，不进 e 字段，避免与 Stop goroutine 的数据竞争）。
+	// 仅 Windows/darwin 有意义；Linux 无微信客户端，跳过探测省一次子进程。
+	probeWeChat := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+	var wechatBaseline []WeChatProcessInfo // 进入「等待捕获」态时的微信进程基线
+	var wechatClosedOnce bool              // 是否已观察到微信被关停（锁存）
+	var wechatRestarted bool               // 是否判定为已重启（锁存，置 true 后不再翻回）
+	var wechatLastProbe time.Time
+	if probeWeChat {
+		wechatBaseline = ListWeChatProcesses()
+		e.mu.Lock()
+		e.captureWeChat = buildWeChatStatus(wechatBaseline, false)
+		e.mu.Unlock()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			e.cleanupProxy()
+			// 清掉微信探测缓存，避免残留到 idle 态（GetState 在非 capturing 不读 Capture，但保险）。
+			e.mu.Lock()
+			e.captureWeChat = nil
+			e.mu.Unlock()
 			e.setState(EngineIdle, "已停止捕获")
 			return
 		case <-ticker.C:
+			// 微信进程探测：每 weChatProbeInterval 秒一次（PowerShell 冷启动~300ms，
+			// 不必每秒探；4s 粒度对「是否重启」信号灯足够，用户自己主导重启动作）。
+			if probeWeChat && !wechatRestarted && (wechatLastProbe.IsZero() || time.Since(wechatLastProbe) >= weChatProbeInterval) {
+				current := ListWeChatProcesses()
+				restarted, nowClosed := weChatAppearsRestarted(wechatBaseline, current, wechatClosedOnce)
+				if nowClosed {
+					wechatClosedOnce = true
+				}
+				if restarted {
+					wechatRestarted = true
+					e.addLog("检测到 PC 微信已重新打开，请在寿司郎小程序里点一次排队或预约。")
+				}
+				e.mu.Lock()
+				e.captureWeChat = buildWeChatStatus(current, wechatRestarted)
+				e.mu.Unlock()
+				wechatLastProbe = time.Now()
+			}
 			bus.publish("engine", mustJSON(e.GetState()))
 			if tokens.IsComplete() {
 				prefs := LoadPreferences()

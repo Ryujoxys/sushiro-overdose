@@ -502,6 +502,59 @@ func isProcessAlive(pid int) bool {
 	return false
 }
 
+// isQuarantined 在 Windows 上恒返回未隔离（Gatekeeper 是 macOS 专属机制）。
+func isQuarantined() (bool, error) {
+	return false, nil
+}
+
+// weChatEnumScript 用 Get-CimInstance Win32_Process 枚举微信系进程并输出每行一个 JSON。
+// 用 CIM 而非 Get-Process：CreationDate 更稳（Get-Process 的 StartTime 在新版 PS/部分权限下抛异常）。
+const weChatEnumScript = `
+$procs = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(WeChat|WeChatAppEx|Weixin|WeChatPlayer)\.exe$' }
+foreach ($p in $procs) {
+  $start = ''
+  try { $start = ([Management.ManagementDateTimeConverter]::ToDateTime($p.CreationDate)).ToString('o') } catch {}
+  [pscustomobject]@{ pid=[int]$p.ProcessId; name=$p.Name; start_time=$start; path=$p.ExecutablePath } | ConvertTo-Json -Compress
+}
+`
+
+// weChatKillScript 枚举微信进程并逐个 Stop-Process -Force，每行输出 {pid,name,status,error} JSON。
+const weChatKillScript = `
+$procs = Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(WeChat|WeChatAppEx|Weixin|WeChatPlayer)\.exe$' }
+foreach ($p in $procs) {
+  $status='ok'; $err=''
+  try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch { $status='error'; $err=$_.Exception.Message }
+  [pscustomobject]@{ pid=[int]$p.ProcessId; name=$p.Name; status=$status; error=$err } | ConvertTo-Json -Compress
+}
+`
+
+func listWeChatProcesses() []WeChatProcessInfo {
+	cmd := powershellCommand(weChatEnumScript)
+	cmd.WaitDelay = 6 * time.Second // 超时强杀 PowerShell，防偶发卡死阻塞 engine ticker
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return parseWeChatProcessLines(string(out))
+}
+
+func killWeChatProcesses() []MaintenanceResult {
+	cmd := powershellCommand(weChatKillScript)
+	cmd.WaitDelay = 8 * time.Second
+	out, err := cmd.Output()
+	if err != nil && out == nil {
+		return []MaintenanceResult{{
+			Name:   "wechat_processes",
+			Action: "kill_wechat",
+			Status: MaintenanceStatusError,
+			Error:  err.Error(),
+		}}
+	}
+	results := parseWeChatKillOutput(string(out))
+	// 若枚举为空（PowerShell 输出空），parseWeChatKillOutput 已回退 missing；这里再确认。
+	return results
+}
+
 func openBrowser(url string) error {
 	for _, exe := range windowsChromiumExecutables() {
 		if _, err := os.Stat(exe); err != nil {
