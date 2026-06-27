@@ -921,6 +921,16 @@ func handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, CollectDiagnostics())
 }
 
+// handleCertCheck 是证书一键自检：只查证书文件存在性 + 系统信任库状态（毫秒级、不依赖代理运行），
+// 让用户在通行证状态区直接看到「证书已信任」绿灯 / 「未信任/未生成」红灯，不必进全量诊断翻找。
+func handleCertCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	writeJSON(w, collectCertificateDiagnostics())
+}
+
 func handleNotificationTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")

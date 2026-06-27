@@ -101,6 +101,73 @@ func (m *MultiNotifier) List() []Notifier {
 	return out
 }
 
+// channelAllowed 判断名为 name 的渠道是否在白名单 channels 内。
+// channels 为空 = 不限（全发），与老配置（无 channels 字段）语义一致。
+func channelAllowed(name string, channels []string) bool {
+	if len(channels) == 0 {
+		return true
+	}
+	for _, c := range channels {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// SendToChannels 同 Send，但只扇出到 channels 白名单内的渠道（按 Notifier.Name() 匹配）。
+// channels 为空时退化为全发（兼容老配置）。
+func (m *MultiNotifier) SendToChannels(ctx context.Context, title, content string, channels []string) {
+	m.mu.Lock()
+	snapshot := make([]Notifier, len(m.notifiers))
+	copy(snapshot, m.notifiers)
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, n := range snapshot {
+		if !channelAllowed(n.Name(), channels) {
+			continue
+		}
+		wg.Add(1)
+		go func(n Notifier) {
+			defer wg.Done()
+			if err := n.Send(ctx, title, content); err != nil {
+				LogMessage(time.Now(), fmt.Sprintf("[%s] 通知发送失败: %s", n.Name(), err))
+			}
+		}(n)
+	}
+	wg.Wait()
+}
+
+// SendSessionToChannels 同 SendSession，但只扇出到 channels 白名单内的渠道。
+func (m *MultiNotifier) SendSessionToChannels(ctx context.Context, sessionKey, title, content string, channels []string) {
+	m.mu.Lock()
+	snapshot := make([]Notifier, len(m.notifiers))
+	copy(snapshot, m.notifiers)
+	m.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, n := range snapshot {
+		if !channelAllowed(n.Name(), channels) {
+			continue
+		}
+		wg.Add(1)
+		go func(n Notifier) {
+			defer wg.Done()
+			var err error
+			if sn, ok := n.(SessionNotifier); ok && sessionKey != "" {
+				err = sn.SendSession(ctx, sessionKey, title, content)
+			} else {
+				err = n.Send(ctx, title, content)
+			}
+			if err != nil {
+				LogMessage(time.Now(), fmt.Sprintf("[%s] 通知发送失败: %s", n.Name(), err))
+			}
+		}(n)
+	}
+	wg.Wait()
+}
+
 // ---- Notification config ----
 
 type NotifyConfig struct {

@@ -117,3 +117,37 @@ func TestMultiNotifierFanOut(t *testing.T) {
 		t.Errorf("fan-out counts a=%d b=%d c=%d, want 1/1/1", a.got, b.got, c.got)
 	}
 }
+
+// TestMultiNotifierSendToChannels 验证 per-level 通道路由：channels 白名单非空时只发命中的渠道，
+// 为空时全发（兼容老配置）。这是块 A 防止透传链静默失效的核心测试。
+func TestMultiNotifierSendToChannels(t *testing.T) {
+	feishu := &fakeNotifier{name: "feishu"}
+	telegram := &fakeNotifier{name: "telegram"}
+	bark := &fakeNotifier{name: "bark"}
+	mn := NewMultiNotifier(feishu, telegram, bark)
+
+	// 只发 bark
+	mn.SendToChannels(context.Background(), "t", "c", []string{"bark"})
+	if bark.got != 1 || feishu.got != 0 || telegram.got != 0 {
+		t.Errorf("channels=[bark]: feishu=%d telegram=%d bark=%d, want 0/0/1", feishu.got, telegram.got, bark.got)
+	}
+
+	// 多选 feishu+bark
+	mn.SendToChannels(context.Background(), "t", "c", []string{"feishu", "bark"})
+	if feishu.got != 1 || bark.got != 2 || telegram.got != 0 {
+		t.Errorf("channels=[feishu,bark]: feishu=%d telegram=%d bark=%d, want 1/0/2", feishu.got, telegram.got, bark.got)
+	}
+
+	// 空 channels = 全发（兼容老配置）
+	mn.SendToChannels(context.Background(), "t", "c", nil)
+	if feishu.got != 2 || telegram.got != 1 || bark.got != 3 {
+		t.Errorf("channels=nil: feishu=%d telegram=%d bark=%d, want 2/1/3", feishu.got, telegram.got, bark.got)
+	}
+
+	// 白名单里没有的渠道名 = 谁都不发
+	before := feishu.got + telegram.got + bark.got
+	mn.SendToChannels(context.Background(), "t", "c", []string{"nonexistent"})
+	if feishu.got+telegram.got+bark.got != before {
+		t.Errorf("channels=[nonexistent] should send to no one, got extra sends")
+	}
+}

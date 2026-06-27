@@ -2,6 +2,8 @@ package app
 
 import . "github.com/Ryujoxys/sushiro-overdose/internal/notify"
 
+import . "github.com/Ryujoxys/sushiro-overdose/internal/platform"
+
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
@@ -28,18 +30,19 @@ const (
 
 // QueueAlertRule 是一条叫号提醒规则。
 type QueueAlertRule struct {
-	StoreID     string `json:"store_id"`
-	StoreName   string `json:"store_name,omitempty"`
-	Label       string `json:"label,omitempty"`
-	Type        string `json:"type"`
-	WaitMinutes int    `json:"wait_minutes,omitempty"` // wait_below：预估等待 ≤ 此值时提醒
-	TargetNo    int    `json:"target_no,omitempty"`    // called_reach：我手里的号
-	LeadGroups  int    `json:"lead_groups,omitempty"`  // called_reach：提前多少号提醒（兼容旧配置）
-	NotifyAtNo  int    `json:"notify_at_no,omitempty"` // called_reach：叫到/超过这个号时提醒
-	NotifyAtNos []int  `json:"notify_at_nos,omitempty"`
-	TravelMin   int    `json:"travel_minutes,omitempty"`
-	Template    string `json:"template,omitempty"`
-	Enabled     bool   `json:"enabled"`
+	StoreID     string   `json:"store_id"`
+	StoreName   string   `json:"store_name,omitempty"`
+	Label       string   `json:"label,omitempty"`
+	Type        string   `json:"type"`
+	WaitMinutes int      `json:"wait_minutes,omitempty"` // wait_below：预估等待 ≤ 此值时提醒
+	TargetNo    int      `json:"target_no,omitempty"`    // called_reach：我手里的号
+	LeadGroups  int      `json:"lead_groups,omitempty"`  // called_reach：提前多少号提醒（兼容旧配置）
+	NotifyAtNo  int      `json:"notify_at_no,omitempty"` // called_reach：叫到/超过这个号时提醒
+	NotifyAtNos []int    `json:"notify_at_nos,omitempty"`
+	TravelMin   int      `json:"travel_minutes,omitempty"`
+	Template    string   `json:"template,omitempty"`
+	Channels    []string `json:"channels,omitempty"` // 限定只发这些通道（英文名 feishu/telegram/bark/serverchan）；为空 = 全通道（兼容旧配置）
+	Enabled     bool     `json:"enabled"`
 }
 
 func (r QueueAlertRule) key() string {
@@ -283,7 +286,7 @@ func evaluateQueueAlerts(ctx context.Context, obs QueueObservation, storeName st
 			if rule.Type == queueAlertCalledReach && rule.TargetNo > 0 {
 				session = fmt.Sprintf("called|%s|%d", storeID, rule.TargetNo)
 			}
-			out = append(out, queueAlertNotification{Title: title, Content: name + "：" + body, SessionKey: session})
+			out = append(out, queueAlertNotification{Title: title, Content: name + "：" + body, SessionKey: session, Channels: rule.Channels})
 		}
 		if changed {
 			// 先落盘 state：失败则丢弃本次通知（不更新内存 state、不发通知），
@@ -297,14 +300,15 @@ func evaluateQueueAlerts(ctx context.Context, obs QueueObservation, storeName st
 	}()
 
 	for _, item := range notifications {
-		sendQueueAlertSession(ctx, item.Title, item.Content, item.SessionKey)
+		sendQueueAlertWithChannels(ctx, item.Title, item.Content, item.SessionKey, item.Channels)
 	}
 }
 
 type queueAlertNotification struct {
 	Title      string
 	Content    string
-	SessionKey string // 非空时走原地更新（同一进度卡）
+	SessionKey string   // 非空时走原地更新（同一进度卡）
+	Channels   []string // 限定只发这些通道；为空 = 全通道（兼容老配置）
 }
 
 // queueAlertEvaluateRule 评估单条规则，更新 state，返回是否需要推送及内容。
@@ -366,13 +370,25 @@ func queueAlertEvaluateRule(rule QueueAlertRule, obs QueueObservation, state map
 					fmt.Sprintf("%s当前叫号 %d，已超过你的号码 %d。可能已过号，请尽快回店确认。%s", prefix, calledNo, rule.TargetNo, travel),
 					true
 			}
-			return "🔔 快叫到你了",
+			return calledReachTitle(max(0, rule.TargetNo-calledNo)),
 				fmt.Sprintf("%s当前叫号 %d，已达到提醒点 %d；号码 %d，还差 %d 桌。%s", prefix, calledNo, threshold, rule.TargetNo, max(0, rule.TargetNo-calledNo), travel),
 				true
 		}
 		return "", "", false
 	}
 	return "", "", false
+}
+
+// calledReachTitle 按实时还差桌数分级标题，紧迫度随距离递增，便于用户从通知标题就判断要不要立刻动身。
+func calledReachTitle(remaining int) string {
+	switch {
+	case remaining <= 2:
+		return "⚠️ 立刻回店！"
+	case remaining <= 9:
+		return "🔔🔔 马上到你了"
+	default:
+		return "🔔 快叫到你了"
+	}
 }
 
 func queueAlertLabel(rule QueueAlertRule) string {
@@ -388,6 +404,7 @@ func queueAlertLabel(rule QueueAlertRule) string {
 
 func sendQueueAlert(ctx context.Context, title, content string) {
 	LogMessage(time.Now(), fmt.Sprintf("[排队提醒] %s — %s", title, content))
+	DesktopNotification(title, content)
 	BuildNotifierFromConfig().Send(ctx, title, content)
 }
 
@@ -399,5 +416,22 @@ func sendQueueAlertSession(ctx context.Context, title, content, sessionKey strin
 		return
 	}
 	LogMessage(time.Now(), fmt.Sprintf("[排队提醒·更新] %s — %s", title, content))
+	// 多档进度卡场景：外部通道已用 SendSession 合并多档为一条消息，桌面通知也只弹一次（本次更新代表整个会话的最新状态）。
+	DesktopNotification(title, content)
 	BuildNotifierFromConfig().SendSession(ctx, sessionKey, title, content)
+}
+
+// sendQueueAlertWithChannels 同 sendQueueAlertSession，但支持 per-rule 通道路由：
+// channels 为空 = 全通道（兼容老配置/无 channels 字段的规则）；非空时只发到指定通道。
+// 用于 evaluateQueueAlerts 走「按规则限定通道」的提醒；netticket 等不需要分通道的路径继续用 sendQueueAlert。
+func sendQueueAlertWithChannels(ctx context.Context, title, content, sessionKey string, channels []string) {
+	if sessionKey == "" {
+		LogMessage(time.Now(), fmt.Sprintf("[排队提醒] %s — %s", title, content))
+		DesktopNotification(title, content)
+		BuildNotifierFromConfig().SendToChannels(ctx, title, content, channels)
+		return
+	}
+	LogMessage(time.Now(), fmt.Sprintf("[排队提醒·更新] %s — %s", title, content))
+	DesktopNotification(title, content)
+	BuildNotifierFromConfig().SendSessionToChannels(ctx, sessionKey, title, content, channels)
 }

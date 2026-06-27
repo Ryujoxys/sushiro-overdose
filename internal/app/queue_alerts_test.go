@@ -161,6 +161,35 @@ func TestQueueAlertCalledReachIncludesLabelAndTravel(t *testing.T) {
 	}
 }
 
+// TestQueueAlertCalledReachTieredTitle 覆盖块 B 分级标题：按实时还差桌数分档，
+// 紧迫度随距离递增（≥10 默认 / 3-9 马上 / ≤2 立刻回店）。
+func TestQueueAlertCalledReachTieredTitle(t *testing.T) {
+	cfg := normalizeQueueAlertConfig(QueueAlertConfig{Rules: []QueueAlertRule{{
+		StoreID: "3006", Type: queueAlertCalledReach, TargetNo: 1000, NotifyAtNo: 980, Enabled: true,
+	}}})
+	rule := cfg.Rules[0]
+	cases := []struct {
+		called int
+		want   string
+	}{
+		{981, "🔔 快叫到你了"},  // 还差 19 桌 → default
+		{990, "🔔 快叫到你了"},  // 还差 10 桌 → default（边界 ≥10）
+		{991, "🔔🔔 马上到你了"}, // 还差 9 桌 → 中档
+		{997, "🔔🔔 马上到你了"}, // 还差 3 桌 → 中档（边界 3-9）
+		{998, "⚠️ 立刻回店！"}, // 还差 2 桌 → 最高档
+		{999, "⚠️ 立刻回店！"}, // 还差 1 桌 → 最高档
+	}
+	for _, c := range cases {
+		title, _, fire := queueAlertEvaluateRule(rule, QueueObservation{DisplayCalledNo: c.called}, map[string]queueAlertRuleState{})
+		if !fire {
+			t.Fatalf("called=%d expected fire", c.called)
+		}
+		if title != c.want {
+			t.Fatalf("called=%d title=%q want %q", c.called, title, c.want)
+		}
+	}
+}
+
 func TestEvaluateQueueAlertsKeepsRuleAndDedupsAfterFire(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := normalizeQueueAlertConfig(QueueAlertConfig{Rules: []QueueAlertRule{
