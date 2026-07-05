@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-2d9c4a)](LICENSE)
 
 <p align="center">
-  <img src="docs/screenshot-home.png" width="720" alt="首页" />
+  <img src="docs/screenshot-home.png" width="720" alt="首页：想吃寿司郎先看现在排多久，三种用法一目了然" />
 </p>
 
 ---
@@ -26,7 +26,13 @@
 > **预测长这样**：`1078 号，当前叫到 1051，预计 38–62 分钟后叫到（约 12:18–12:42）。建议 12:10 前后出发。`
 
 <p align="center">
-  <img src="docs/screenshot-chart.png" width="720" alt="叫号进度与排队压力" />
+  <img src="docs/screenshot-queue.png" width="720" alt="我有号码：填排队号，看叫到时间、出发时间与排队压力" />
+</p>
+
+预测参考这家店今天的叫号速度和前面剩的桌数，并跟着叫号进度一直更新：
+
+<p align="center">
+  <img src="docs/screenshot-chart.png" width="720" alt="叫号趋势曲线：今天叫号进度与排队压力随时间变化" />
 </p>
 
 快叫到了可以推一条通知（飞书 / Telegram / Bark / Server酱，能同时开多个），先找地方坐会儿，不用一直守着屏幕。
