@@ -60,12 +60,18 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 	recordAuthCaptured(captureMethodImport) // 记录捕获时间/方式，重置寿命周期
 	prefs := LoadPreferences()
 	tokens.Lock()
-	if len(tokens.StoreIDs) > 0 && len(prefs.SelectedStores) == 0 {
-		prefs.SelectedStores = append([]string(nil), tokens.StoreIDs...)
-		prefs.StorePriority = append([]string(nil), tokens.StoreIDs...)
-		_ = SavePreferences(prefs)
-	}
+	storeIDs := append([]string(nil), tokens.StoreIDs...)
 	tokens.Unlock()
+	if len(storeIDs) > 0 && len(prefs.SelectedStores) == 0 {
+		// 读改写走 preferencesMu，避免与 UI 保存并发冲掉字段。
+		_ = UpdatePreferences(func(p *UserPreferences) {
+			if len(p.SelectedStores) == 0 {
+				p.SelectedStores = append([]string(nil), storeIDs...)
+				p.StorePriority = append([]string(nil), storeIDs...)
+				prefs = *p // 同步给下方 setWebSettings
+			}
+		})
+	}
 	setWebSettings(tokens.ToSettingsWithPrefs(prefs))
 	resp["saved"] = true
 	resp["message"] = "凭证参数已导入并保存，可到本机诊断里测试基础接口。"

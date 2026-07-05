@@ -2,6 +2,8 @@ package app
 
 import . "github.com/Ryujoxys/sushiro-overdose/internal/notify"
 
+import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
+
 import (
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +15,7 @@ import (
 
 func TestNetTicketIssuedTodayBlocksSampling(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	now := time.Date(2026, 6, 3, 18, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 3, 18, 0, 0, 0, SushiroTimezone)
 	if err := SaveNetTicketPlan(NetTicketPlan{
 		Enabled:   false,
 		StoreID:   "3006",
@@ -32,7 +34,7 @@ func TestNetTicketIssuedTodayBlocksSampling(t *testing.T) {
 
 func TestNetTicketIssuedYesterdayDoesNotBlockSampling(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	now := time.Date(2026, 6, 3, 18, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 3, 18, 0, 0, 0, SushiroTimezone)
 	if err := SaveNetTicketPlan(NetTicketPlan{
 		Enabled:   true,
 		StoreID:   "3006",
@@ -50,7 +52,7 @@ func TestNetTicketIssuedYesterdayDoesNotBlockSampling(t *testing.T) {
 }
 
 func TestTerminalNetTicketPlanFromPreviousDayIsNotArmed(t *testing.T) {
-	now := time.Date(2026, 6, 3, 18, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 3, 18, 0, 0, 0, SushiroTimezone)
 	plan := normalizeNetTicketPlan(NetTicketPlan{
 		Enabled:   true,
 		StoreID:   "3006",
@@ -66,7 +68,7 @@ func TestTerminalNetTicketPlanFromPreviousDayIsNotArmed(t *testing.T) {
 }
 
 func TestTerminalNetTicketPlanFromTodayIsNotArmed(t *testing.T) {
-	now := time.Date(2026, 6, 3, 18, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 3, 18, 0, 0, 0, SushiroTimezone)
 	plan := normalizeNetTicketPlan(NetTicketPlan{
 		Enabled:   true,
 		StoreID:   "3006",
@@ -84,7 +86,7 @@ func TestTerminalNetTicketPlanFromTodayIsNotArmed(t *testing.T) {
 }
 
 func TestActiveNetTicketPlanStaysArmed(t *testing.T) {
-	now := time.Date(2026, 6, 3, 18, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 3, 18, 0, 0, 0, SushiroTimezone)
 	plan := normalizeNetTicketPlan(NetTicketPlan{
 		Enabled:    true,
 		StoreID:    "3006",
@@ -122,7 +124,7 @@ func TestNetTicketServerRetryCountPersists(t *testing.T) {
 // 由 netTicketTick 在新一天的首次调度时清零（见 netticket.go 中 FiredDate != today 的重置分支）。
 func TestNetTicketServerRetryResetsAcrossDay(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	now := time.Date(2026, 6, 3, 18, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 3, 18, 0, 0, 0, SushiroTimezone)
 	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
 	if err := SaveNetTicketPlan(NetTicketPlan{
 		Enabled:          true,
@@ -254,8 +256,8 @@ func TestNetTicketRoutineRequiresNotificationBeforeArming(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	now := time.Date(2026, 6, 9, 11, 0, 0, 0, time.Local)
-	appendRoutineHistoryForTest(t, time.Date(2026, 6, 2, 12, 0, 0, 0, time.Local))
+	now := time.Date(2026, 6, 9, 11, 0, 0, 0, SushiroTimezone)
+	appendRoutineHistoryForTest(t, time.Date(2026, 6, 2, 12, 0, 0, 0, SushiroTimezone))
 
 	resp := saveNetTicketRoutineConfigLocked(NetTicketRoutine{
 		Enabled:             true,
@@ -310,7 +312,7 @@ func TestDisablingNetTicketRoutineClearsPendingRoutinePlan(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	now := time.Date(2026, 6, 9, 9, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 9, 9, 0, 0, 0, SushiroTimezone)
 	if err := SaveNetTicketPlan(NetTicketPlan{
 		Enabled:            true,
 		StoreID:            "3006",
@@ -345,7 +347,7 @@ func TestNetTicketRoutineWaitsForDataInsteadOfGuessing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	now := time.Date(2026, 6, 9, 9, 0, 0, 0, time.Local)
+	now := time.Date(2026, 6, 9, 9, 0, 0, 0, SushiroTimezone)
 
 	resp := saveNetTicketRoutineConfigLocked(NetTicketRoutine{
 		Enabled:             true,

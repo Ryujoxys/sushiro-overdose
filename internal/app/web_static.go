@@ -1699,10 +1699,14 @@ function renderDashboardSamplingCard(){
  const last=s.last_run_at?new Date(s.last_run_at).toLocaleString():'还没有',next=s.next_run_at?new Date(s.next_run_at).toLocaleString():'-',ids=(cfg.store_ids||[]).map(String),storeText=ids.length?ids.map(storeDisplayName).join('、'):'偏好门店';
  const msg=s.last_error||s.message||q.message||'开启后会在本机记录叫号、等位和可预约时段。';
  const toggle='<label class="switch"><input type="checkbox" '+(running?'checked':'')+' onchange="toggleDashboardSampling(this.checked)"> 本机持续采集</label>';
+ const adv=currentUIMode()==='advanced';
+ // GitHub/线上基准是进阶版功能：简化版不暴露登录入口，只讲本机采集。
  const cloudButton=cloudReady||cloudLoggedIn?'<button class="bt bt-w bt-s" onclick="loadQueueDashboard()">刷新图表</button>':'<button class="bt bt-w bt-s" onclick="startCloudLogin()">登录 GitHub 获取线上基准</button>';
- const localActions=toggle+'<button class="bt bt-w bt-s" onclick="runDashboardSampleOnce()">收集一次</button>'+(running?'<button class="bt bt-o bt-s" onclick="stopSampling()">暂停</button>':'')+'<button class="bt bt-w bt-s" onclick="openSettingsFold(\'fold-sm\')">详细配置</button>';
- const actions=localNeedsAuth?cloudButton+'<button class="bt bt-o bt-s" onclick="startAuth()">小程序采集补强</button>':localActions;
- box.innerHTML='<div><p style="margin-top:0">图表走 GitHub + 线上数据库；小程序通行证只用于本机采集补强。只记录 '+esc(storeText)+' 的叫号、等位和可预约时段；本机采集数据只留在本机，不上传。</p><div class="sample-state">'+chip('图表',cloudReady?'线上基准可用':cloudLoggedIn?'GitHub 已登录，基准待验证':'登录 GitHub 获取线上基准',cloudReady?'ok':'warn')+chip('本机采集',running?'运行中':enabled?'已启用':'未启动',running?'ok':enabled?'warn':'')+chip('小程序通行证',localNeedsAuth?'采集需更新':'采集可用',localNeedsAuth?'warn':'ok')+chip('样本',s.queue_snapshots||s.snapshots||0,'ok')+chip('上次',last,'ok')+chip('下次',next,'ok')+chip('最近结果',msg,s.last_error?'warn':'ok')+'</div></div><div class="curve-sampling-actions">'+actions+'</div>'
+ const localActions=toggle+'<button class="bt bt-w bt-s" onclick="runDashboardSampleOnce()">收集一次</button>'+(running?'<button class="bt bt-o bt-s" onclick="stopSampling()">暂停</button>':'')+(adv?'<button class="bt bt-w bt-s" onclick="openSettingsFold(\'fold-sm\')">详细配置</button>':'');
+ const actions=adv&&localNeedsAuth?cloudButton+'<button class="bt bt-o bt-s" onclick="startAuth()">小程序采集补强</button>':(localNeedsAuth?'<button class="bt bt-o bt-s" onclick="startAuth()">小程序采集补强</button>':localActions);
+ const intro=adv?('图表走 GitHub + 线上数据库；小程序通行证只用于本机采集补强。'):'开启本机采集后，叫号曲线会越来越准。';
+ const chartChip=adv?chip('图表',cloudReady?'线上基准可用':cloudLoggedIn?'GitHub 已登录，基准待验证':'登录 GitHub 获取线上基准',cloudReady?'ok':'warn'):'';
+ box.innerHTML='<div><p style="margin-top:0">'+intro+'只记录 '+esc(storeText)+' 的叫号、等位和可预约时段；本机采集数据只留在本机，不上传。</p><div class="sample-state">'+chartChip+chip('本机采集',running?'运行中':enabled?'已启用':'未启动',running?'ok':enabled?'warn':'')+chip('小程序通行证',localNeedsAuth?'采集需更新':'采集可用',localNeedsAuth?'warn':'ok')+chip('样本',s.queue_snapshots||s.snapshots||0,'ok')+chip('上次',last,'ok')+chip('下次',next,'ok')+chip('最近结果',msg,s.last_error?'warn':'ok')+'</div></div><div class="curve-sampling-actions">'+actions+'</div>'
 }
 async function toggleDashboardSampling(on){if(on&&!hc){toast('本机持续采集需要先拿通行证');renderDashboardSamplingCard();startAuth();return}try{if(!spCfg||!Object.keys(spCfg).length)await loadSampling();const ids=qdSelected.length?qdSelected.slice(0,1):(spCfg.store_ids||[]);const payload={...spCfg,enabled:!!on,auto_start:on?true:!!spCfg.auto_start,interval_seconds:spCfg.interval_seconds||300,active_start:spCfg.active_start||'100000',active_end:spCfg.active_end||'220000',store_ids:ids,use_preference_stores:ids.length===0};let d=await safeFetch('/api/sampling',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});spCfg=d.config||payload;spState=d.state||spState;if(on){d=await safeFetch('/api/sampling/start',{method:'POST'});spState=d.state||spState;toast('已启动本机持续采集')}else{d=await safeFetch('/api/sampling/stop',{method:'POST'});spState=d.state||spState;toast('已暂停本机持续采集')}await loadSampling();renderDashboardSamplingCard()}catch(e){toast('采集开关失败：'+String(e.message||e));await loadSampling();renderDashboardSamplingCard()}}
 async function runDashboardSampleOnce(){if(!hc){toast('本机采集需要先拿通行证');startAuth();return}try{if(!spCfg||!Object.keys(spCfg).length)await loadSampling();const ids=qdSelected.length?qdSelected.slice(0,1):(spCfg.store_ids||[]);const payload={...spCfg,enabled:true,interval_seconds:spCfg.interval_seconds||300,active_start:spCfg.active_start||'100000',active_end:spCfg.active_end||'220000',store_ids:ids,use_preference_stores:ids.length===0};let d=await safeFetch('/api/sampling',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});spCfg=d.config||payload;spState=d.state||spState;d=await safeFetch('/api/sampling/once',{method:'POST'});spState=d.state||spState;const r=d.result||{};toast(r.skipped?'本轮跳过：'+(r.skip_reason||'未知原因'):'收集完成：'+(r.queue_snapshots||0)+' 条排队快照，'+(r.snapshots||0)+' 条时段');await loadSampling();renderDashboardSamplingCard()}catch(e){toast('收集失败：'+String(e.message||e));await loadSampling();renderDashboardSamplingCard()}}
@@ -1784,7 +1788,7 @@ async function loadQueueMealPlan(){const ans=el('qpAnswer');if(!ans)return;const
 function renderMealPlan(d){const ans=el('qpAnswer');if(!ans)return;if(d.message&&!d.recommend_pickup_range){ans.innerHTML='<div class="answer-lead">'+esc(d.message)+'</div>';return}const rp=d.recommend_pickup_range||{},wr=d.wait_minutes_range||{},lead='想 '+esc(d.target_meal)+' 吃，建议 '+esc(rp.early||d.stable_pickup||'?')+'-'+esc(rp.late||d.stable_pickup||'?')+' 取号。'+(d.latest_pickup?(' 最晚别拖过 '+esc(d.latest_pickup)+'。'):'');const chips=[answerChip('建议取号',esc((rp.early||'?')+'-'+(rp.late||'?')),''),answerChip('偏稳取号',esc(d.stable_pickup||'-'),''),answerChip('最晚取号',esc(d.latest_pickup||'-'),''),answerChip('预计等待',(wr.low||0)+'-'+(wr.high||0)+' 分',''),answerChip('风险',riskLabelCN(d.risk),riskClass(d.risk))].join('');ans.innerHTML='<div class="answer-lead">'+esc(lead)+'</div><div class="answer-chips">'+chips+'</div>'+(d.basis?'<details class="plan-basis mt8"><summary>为什么这么算</summary><div class="mu mt8">'+esc(d.basis)+'</div></details>':'')+'<div class="mu mt8">⚠ 倒推按历史等待估的；取号后前面可能被插队，实际等待可能 ±15 分钟，别把建议取号时间当死线。</div>'}
 function renderQueueDashboard(d){renderDashboardAdvisor(d.advisor||{});renderDashboardInsights(d);renderDashboardDataSource(d)}
 function dashboardBaselineStatusHTML(d){const b=(d&&d.baseline)||{};const configured=!!b.configured,authenticated=!!b.authenticated,used=!!b.used,rollupCount=Number(b.rollup_count||0),latestCount=Number(b.latest_count||0),rollup=fmtN(rollupCount),latest=fmtN(latestCount);let title,lines=[],cls='ok';if(used){title='本次图表已使用线上数据库基准';lines.push('来源：线上数据库基准');if(rollupCount||latestCount)lines.push('聚合样本 '+rollup+' 条，最新明细 '+latest+' 条');else lines.push('基准已响应，暂无样本');cls='ok'}else if(authenticated){title='仍在用本机数据，线上数据库基准未参与本次图表';lines.push('GitHub 已登录，但线上数据库还没验证成功，需在设置页确认。');cls='warn'}else if(configured){title='本次图表用本机数据，GitHub 尚未登录';lines.push('云端服务已配置；登录 GitHub 后可验证线上基准并叠加参考。');cls='warn'}else{title='本次图表用本机数据，未配置线上基准';lines.push('可在「设置」登录 GitHub 并验证线上基准后，叠加全国线上参考。');cls='warn'}const ws=(d&&d.warnings)||[];if(ws.length){cls=cls==='ok'?'warn':cls;lines.push('注意：'+ws.join('；'));if(ws.some(w=>/明细|基准|曲线/.test(w)))lines.push('这能解释为什么基准可用、但叫号曲线仍没明细。')}return{cls:cls,html:'<b>📊 图表数据来源</b><p>'+esc(title)+'</p><div class="data-source-lines">'+lines.map(l=>'<span>'+esc(l)+'</span>').join('')+'</div>'}}
-function renderDashboardDataSource(d){const box=el('qdDataSource');if(!box)return;const s=dashboardBaselineStatusHTML(d);box.className='data-source mt16 '+(s.cls||'');box.innerHTML=s.html||''}
+function renderDashboardDataSource(d){const box=el('qdDataSource');if(!box)return;if(currentUIMode()!=='advanced'){box.className='data-source mt16 hid';box.innerHTML='';return}const s=dashboardBaselineStatusHTML(d);box.className='data-source mt16 '+(s.cls||'');box.innerHTML=s.html||''}
 function renderDashboardInsights(d){const heat=el('qdHeatmap'),wk=el('qdWeekday'),tr=el('qdTrend'),cc=el('qdCalledCurve');if(heat)heat.innerHTML=renderHeatmapHTML(d.heatmap||[]);
 if(wk)wk.innerHTML=renderWeekdayHTML(d.weekday_profiles||[]);
 if(tr)tr.innerHTML=renderTrendHTML(d.trend||[]);
@@ -1798,10 +1802,21 @@ function renderTrendHTML(trend){if(!trend.length)return emptyTrendHTML();const t
 // 趋势数据有两个来源——登录 GitHub 拉线上数据库基准（全国聚合，开箱即用）、或本机采集（更准但需积累）。
 // 没数据时主推这两条路，已做的就不再重复推。headOverride 用于热力图等不同标题。
 function emptyTrendHTML(headOverride){
-	const cloudLoggedIn=!!(cloudAuth&&cloudAuth.connected);
-	const cloudReady=!!(cloudAuth&&cloudAuth.baseline_connected)||(qdDashboardData.baseline&&qdDashboardData.baseline.used);
 	const sp=spState||{},samplingOn=!!(sp.running||sp.enabled||sp.sample_runs>0);
 	let head=headOverride||'这家店还没有叫号趋势数据',copy='',btns=[];
+	// 简化版不暴露 GitHub/线上基准：统一引导到本机采集。
+	if(currentUIMode()!=='advanced'){
+		if(samplingOn){
+			head='正在采集，叫号趋势会逐步补齐';
+			copy='本机采集已在运行，但这家店的样本还不够画出趋势。多用几次、或在店里多待一会儿，数据就会上来。';
+		}else{
+			copy='开启本机采集后，这家店的叫号趋势会随着使用越来越准。';
+			btns.push('<button class="bt bt-r bt-s" onclick="openSettingsFold(\'fold-sm\')">开启本机采集</button>');
+		}
+		return '<div class="empty"><div class="mascot-wrap"><span class="pm" data-kind="plain" data-size="48"></span></div><b>'+esc(head)+'</b><p class="mt8" style="margin-bottom:12px">'+esc(copy)+'</p><div class="fl g8 fw">'+btns.join('')+'</div></div>';
+	}
+	const cloudLoggedIn=!!(cloudAuth&&cloudAuth.connected);
+	const cloudReady=!!(cloudAuth&&cloudAuth.baseline_connected)||(qdDashboardData.baseline&&qdDashboardData.baseline.used);
 	if(cloudReady){
 		// 线上基准已参与但仍无该店趋势：多半是这家店线上样本也少，或本机窗内没采到。
 		head='线上基准暂无这家店的叫号趋势';

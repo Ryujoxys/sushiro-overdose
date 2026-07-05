@@ -599,11 +599,16 @@ func (e *BookingEngine) runCapture(ctx context.Context) {
 				}
 
 				tokens.Lock()
-				if len(tokens.StoreIDs) > 0 && len(prefs.SelectedStores) == 0 {
-					prefs.SelectedStores = tokens.StoreIDs
-					SavePreferences(prefs)
-				}
+				storeIDs := append([]string(nil), tokens.StoreIDs...)
 				tokens.Unlock()
+				if len(storeIDs) > 0 && len(prefs.SelectedStores) == 0 {
+					// 读改写走 preferencesMu，避免与 UI 保存并发冲掉字段。
+					_ = UpdatePreferences(func(p *UserPreferences) {
+						if len(p.SelectedStores) == 0 {
+							p.SelectedStores = storeIDs
+						}
+					})
+				}
 				return
 			}
 		}

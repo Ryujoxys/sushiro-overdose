@@ -227,3 +227,27 @@ func captureStdout(t *testing.T, fn func()) (result string) {
 	fn()
 	return result
 }
+
+// TestSamplingWindowUsesCSTNotLocalTime 验证采样活跃窗口按 CST 解释，不被机器本地时区带偏。
+// 关键回归：TZ=UTC 时，CST 10:00 (=UTC 02:00) 必须落在 [100000,220000] 窗口内；
+//
+//	若用 time.Local 解释，UTC 02:00 会被判为「不在窗口」而空转。
+func TestSamplingWindowUsesCSTNotLocalTime(t *testing.T) {
+	cfg := SamplingConfig{ActiveStart: "100000", ActiveEnd: "220000"}
+	// CST 10:30 = UTC 02:30。用 UTC 时刻喂进去，窗口判定必须仍认它在 CST 10:00-22:00 内。
+	cst1030 := time.Date(2026, 6, 3, 2, 30, 0, 0, time.UTC)
+	if !samplingInActiveWindow(cfg, cst1030) {
+		t.Fatal("CST 10:30 (UTC 02:30) should be inside the 10:00-22:00 window; tz normalization regressed")
+	}
+	// CST 22:30 = UTC 14:30，应落在窗口外（22:00 关门）。
+	cst2230 := time.Date(2026, 6, 3, 14, 30, 0, 0, time.UTC)
+	if samplingInActiveWindow(cfg, cst2230) {
+		t.Fatal("CST 22:30 (UTC 14:30) should be outside the 10:00-22:00 window")
+	}
+	// nextSamplingWindowStart：CST 22:30 的下一次开窗应是次日 CST 10:00。
+	next := nextSamplingWindowStart(cfg, cst2230)
+	want := time.Date(2026, 6, 4, 2, 0, 0, 0, time.UTC) // 次日 CST 10:00 = UTC 02:00
+	if !next.Equal(want) {
+		t.Fatalf("next window = %v (UTC), want %v", next.UTC(), want)
+	}
+}

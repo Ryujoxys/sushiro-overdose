@@ -15,7 +15,7 @@ func TestOfficialMutationCallsStayInApprovedEntrypoints(t *testing.T) {
 
 	allowed := map[string][]string{
 		".CreateReservation(": {"runBooking", "runBookingLoop", "runSniper", "runSniperLoop"},
-		".CreateNetTicket(":   {"handleQueueTicket", "fireNetTicket", "runAuthVerify"},
+		".CreateNetTicket(":   {"takeNetTicketLocked", "fireNetTicket", "runAuthVerify"},
 		".CancelReservation(": {"handleCancelReservation", "cmdCancel"},
 		".CancelNetTicket(":   {"handleCancelNetTicket", "runAuthVerify"},
 	}

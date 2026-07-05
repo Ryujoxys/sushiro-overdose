@@ -79,7 +79,8 @@ func buildQueueLivePanel(ctx context.Context, storeID string, now time.Time) (Qu
 	}
 	if rate, ok := calledRatePerMinute(history); ok && rate > 0 {
 		panel.RatePerMin = &rate
-		eta := int(float64(panel.WaitGroups) / rate)
+		// 向上取整：剩 1 组、0.3 组/分时实际要 ~3-4 分钟，截断成 3 会系统性偏短。
+		eta := int(math.Ceil(float64(panel.WaitGroups) / rate))
 		if eta > 0 {
 			panel.EtaMinutes = &eta
 		}

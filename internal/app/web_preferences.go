@@ -8,7 +8,30 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 )
+
+// preferencesMu 序列化所有对 preferences 的「读-改-写」与整盘写。
+// SavePreferences 本身是原子写（不写半截），但不防 lost-update：
+// engine 抓到凭证回填 SelectedStores 与用户在 UI 点保存（整盘覆写）并发时，
+// 后写者会冲掉先写者的字段。这把锁把两端串起来。
+var preferencesMu sync.Mutex
+
+// UpdatePreferences 在锁内执行 Load→mutate→Save，供所有读改写场景使用。
+func UpdatePreferences(mutate func(*UserPreferences)) error {
+	preferencesMu.Lock()
+	defer preferencesMu.Unlock()
+	prefs := LoadPreferences()
+	mutate(&prefs)
+	return SavePreferences(prefs)
+}
+
+// SavePreferencesLocked 在 preferencesMu 持有时整盘保存（用户显式覆盖全部字段）。
+func SavePreferencesLocked(prefs UserPreferences) error {
+	preferencesMu.Lock()
+	defer preferencesMu.Unlock()
+	return SavePreferences(prefs)
+}
 
 func handlePreferences(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -21,7 +44,8 @@ func handlePreferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		prefs = NormalizePreferences(prefs)
-		if err := SavePreferences(prefs); err != nil {
+		// 整盘写也走锁，防止与 engine 的 UpdatePreferences 读改写并发冲掉字段。
+		if err := SavePreferencesLocked(prefs); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存失败: "+err.Error())
 			return
 		}

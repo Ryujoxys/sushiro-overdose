@@ -540,19 +540,27 @@ func TestEmbeddedCloudLoginRefreshesQueueCharts(t *testing.T) {
 }
 
 func TestEmbeddedDashboardCloudChartsDoNotRequireSushiroAuth(t *testing.T) {
+	// cloud（GitHub 线上基准）图表入口与寿司郎通行证解耦：进阶版下 cloud 不需寿司郎认证即可叠加。
+	// 简化版把 cloud 入口收敛隐藏（见 TestSimpleModeHidesQDCloudEntry），但解耦逻辑保留。
 	for _, needle := range []string{
 		"await loadCloudAuth(false);await loadSampling();",
 		"const cloudReady=!!(cloudAuth.baseline_connected||(qdDashboardData.baseline&&qdDashboardData.baseline.used))",
 		"const cloudLoggedIn=!!cloudAuth.connected",
-		"chip('图表',cloudReady?'线上基准可用':cloudLoggedIn?'GitHub 已登录，基准待验证':'登录 GitHub 获取线上基准'",
 		"const localNeedsAuth=!hc||q.needs_auth||q.auth_ok===false",
 		"const cloudButton=cloudReady||cloudLoggedIn?'<button class=\"bt bt-w bt-s\" onclick=\"loadQueueDashboard()\">刷新图表</button>':'<button class=\"bt bt-w bt-s\" onclick=\"startCloudLogin()\">登录 GitHub 获取线上基准</button>'",
-		"const actions=localNeedsAuth?cloudButton+'<button class=\"bt bt-o bt-s\" onclick=\"startAuth()\">小程序采集补强</button>'",
+		// 进阶版下 cloud 入口与小程序采集解耦的文案保留
 		"图表走 GitHub + 线上数据库；小程序通行证只用于本机采集补强。",
 	} {
 		if !strings.Contains(indexHTML, needle) {
 			t.Errorf("indexHTML 缺少 GitHub 图表与小程序采集解耦片段：%s", needle)
 		}
+	}
+	// 简化版收敛：cloud 入口被 adv 门控
+	if !strings.Contains(indexHTML, "const adv=currentUIMode()==='advanced';") {
+		t.Error("indexHTML 缺少采样卡的进阶模式门控")
+	}
+	if !strings.Contains(indexHTML, "const actions=adv&&localNeedsAuth?cloudButton") {
+		t.Error("indexHTML 采样卡 actions 未按进阶模式收敛 cloud 入口")
 	}
 }
 
@@ -650,4 +658,22 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestSimpleModeHidesQDCloudEntry 锁住第三批收敛：简化版 #qd 页的 emptyTrendHTML
+// 走纯本机采集分支，不推 GitHub/线上基准；进阶版才保留 cloud 入口。
+func TestSimpleModeHidesQDCloudEntry(t *testing.T) {
+	// emptyTrendHTML 必须先判 currentUIMode()!=='advanced' 走简化分支
+	if !strings.Contains(indexHTML, "if(currentUIMode()!=='advanced'){") {
+		t.Error("emptyTrendHTML 未按 currentUIMode 收敛 cloud 入口")
+	}
+	// 简化版分支文案应是纯本机采集，不含 GitHub
+	simpleBranch := "copy='开启本机采集后，这家店的叫号趋势会随着使用越来越准。'"
+	if !strings.Contains(indexHTML, simpleBranch) {
+		t.Error("简化版 emptyTrendHTML 缺少纯本机采集引导文案")
+	}
+	// renderDashboardDataSource 简化版应整体隐藏
+	if !strings.Contains(indexHTML, "if(currentUIMode()!=='advanced'){box.className='data-source mt16 hid'") {
+		t.Error("renderDashboardDataSource 未在简化版隐藏图表数据来源块")
+	}
 }

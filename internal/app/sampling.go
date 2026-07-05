@@ -569,6 +569,9 @@ func samplingWaitDuration(cfg SamplingConfig, now time.Time) time.Duration {
 func samplingInActiveWindow(cfg SamplingConfig, now time.Time) bool {
 	start := ParseTimeSeconds(cfg.ActiveStart)
 	end := ParseTimeSeconds(cfg.ActiveEnd)
+	// 窗口配置（如 100000-220000）是 CST 门店营业时间，必须按 CST 解释当前时刻，
+	// 否则 TZ=UTC/海外机会整体偏移 8 小时（采到打烊数据或一直空转）。
+	now = now.In(SushiroTimezone)
 	current := now.Hour()*3600 + now.Minute()*60 + now.Second()
 	if start < 0 || end < 0 || start == end {
 		return true
@@ -586,10 +589,12 @@ func nextSamplingWindowStart(cfg SamplingConfig, now time.Time) time.Time {
 	if start < 0 {
 		return now
 	}
+	// 窗口时刻按 CST 构造，与 samplingInActiveWindow 的时区解释一致。
+	now = now.In(SushiroTimezone)
 	hour := start / 3600
 	minute := (start % 3600) / 60
 	second := start % 60
-	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, second, 0, now.Location())
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, second, 0, SushiroTimezone)
 	if !next.After(now) {
 		next = next.Add(24 * time.Hour)
 	}

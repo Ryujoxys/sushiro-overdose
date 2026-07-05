@@ -114,6 +114,8 @@ func netTicketPlanFiredOn(p NetTicketPlan, day time.Time) bool {
 	if day.IsZero() {
 		day = time.Now()
 	}
+	// 「今天」按 CST 算，避免 TZ=UTC 跨 CST 午夜时重复取号或漏取。
+	day = day.In(SushiroTimezone)
 	today := day.Format("2006-01-02")
 	if strings.TrimSpace(p.FiredDate) == today {
 		return true
@@ -175,7 +177,7 @@ func netTicketTick(ctx context.Context) {
 	netTicketMu.Lock()
 	defer netTicketMu.Unlock()
 
-	now := time.Now()
+	now := time.Now().In(SushiroTimezone)
 	refreshNetTicketRoutineLocked(now)
 	plan := LoadNetTicketPlan()
 	if !plan.Enabled || strings.TrimSpace(plan.StoreID) == "" {
@@ -439,12 +441,13 @@ func clearNetTicketFire(date string) {
 
 // netTicketTargetToday 把「HHMM」字符串解析成今天的目标时刻。
 // 左侧补零容忍简写（如 "900" -> "0900"）；小时>23 或分钟>59 视为非法。
-// 返回的 time 用 now 的 Location，保证与 tick 的 now 比较时区一致。
+// 目标时刻按 CST 构造，保证与 tick 的 now（CST）比较时区一致。
 func netTicketTargetToday(hhmm string, now time.Time) (time.Time, bool) {
 	hhmm = strings.TrimSpace(hhmm)
 	for len(hhmm) < 4 {
 		hhmm = "0" + hhmm
 	}
+	now = now.In(SushiroTimezone)
 	if len(hhmm) < 4 {
 		return time.Time{}, false
 	}
@@ -453,7 +456,7 @@ func netTicketTargetToday(hhmm string, now time.Time) (time.Time, bool) {
 	if err1 != nil || err2 != nil || h > 23 || m > 59 {
 		return time.Time{}, false
 	}
-	return time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location()), true
+	return time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, SushiroTimezone), true
 }
 
 func netTicketDisplayTime(hhmm string) string {

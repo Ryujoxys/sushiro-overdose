@@ -338,6 +338,9 @@ func buildQueueAdvisor(ctx context.Context, storeID string, targetNo, travelMinu
 	if now.IsZero() {
 		now = time.Now()
 	}
+	// 出发时间、叫到时间都按 CST 解释（门店营业/排队是 CST 现实）。
+	// 不归一化的话 TZ=UTC/海外机会把「建议 18:30 出发」显示成机器本地时间，差 8 小时。
+	now = now.In(SushiroTimezone)
 	store, err := NewQueueLiveClient().GetStore(ctx, storeID)
 	if err != nil {
 		return QueueAdvisor{}, err
@@ -793,7 +796,14 @@ func buildLocalQueuePressureCurvePoints(storeID, date string) []QueuePressureCur
 			continue
 		}
 		at, ok := parseRFC3339Local(queueObservationCollectedAt(o))
-		if !ok || at.Format("2006-01-02") != date {
+		if !ok {
+			continue
+		}
+		// date 是按 CST 切的日期键；at 必须先归一化到 CST 再 Format，
+		// 否则 UTC 容器上 CST 凌晨/早上的样本会劈到前一天被整段丢弃。
+		// 与 queue_trends.go:648-655 的做法保持一致。
+		at = at.In(SushiroTimezone)
+		if at.Format("2006-01-02") != date {
 			continue
 		}
 		dayObservations = append(dayObservations, o)

@@ -11,10 +11,16 @@ import (
 )
 
 // State 是持久化到 ~/.sushiro/.sushiro_state.json 的运行态。
-// ActiveReservation 记录当前活跃的预约/取号，用于进程重启后恢复对「这条号还在不在」的监控。
+//
+// 预约和排队号物理隔离成两个槽，避免历史上「单槽混装 + 事后用 isLocalNetTicketRecord
+// 区分」导致后写入的一方静默覆盖先写入的另一方（预约被取号冲掉、或反之）。
+//   - ActiveReservation：当前活跃的预约（含本地手填的预约记录）
+//   - ActiveNetTicket：当前活跃的排队号（当天有效）
+//
 // SavedAt 是写入时间戳（RFC3339），便于诊断「这个状态是多久前写的」。
 type State struct {
 	ActiveReservation *ReservationRecord `json:"active_reservation,omitempty"`
+	ActiveNetTicket   *ReservationRecord `json:"active_net_ticket,omitempty"`
 	SavedAt           string             `json:"saved_at,omitempty"`
 }
 

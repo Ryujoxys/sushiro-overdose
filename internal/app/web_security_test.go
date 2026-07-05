@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -116,8 +117,10 @@ func TestClearLocalReservationOnlyPreservesNetTicket(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	// 双槽模型：预约和排队号分槽。清预约槽时，排队号槽应原样保留。
 	if err := SaveState(StateFilePath(), State{
-		ActiveReservation: &ReservationRecord{Kind: "net_ticket", Number: "1843", Wait: 12},
+		ActiveReservation: &ReservationRecord{Kind: "reservation", Number: "A001", TicketID: 123},
+		ActiveNetTicket:   &ReservationRecord{Kind: "net_ticket", Number: "1843", Wait: 12},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +129,11 @@ func TestClearLocalReservationOnlyPreservesNetTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ActiveReservation == nil || state.ActiveReservation.Kind != "net_ticket" {
-		t.Fatalf("net ticket should be preserved: %+v", state.ActiveReservation)
+	if state.ActiveReservation != nil {
+		t.Fatalf("reservation should be cleared: %+v", state.ActiveReservation)
+	}
+	if state.ActiveNetTicket == nil || state.ActiveNetTicket.Kind != "net_ticket" {
+		t.Fatalf("net ticket should be preserved: %+v", state.ActiveNetTicket)
 	}
 }
 
@@ -185,8 +191,8 @@ func TestLoadReservationsFallbackDropsStaleNetTicket(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	if err := SaveState(StateFilePath(), State{
-		ActiveReservation: &ReservationRecord{Kind: "net_ticket", Number: "893", QueueDate: "20000101", Wait: 25},
-		SavedAt:           "2000-01-01T16:40:00+08:00",
+		ActiveNetTicket: &ReservationRecord{Kind: "net_ticket", Number: "893", QueueDate: "20000101", Wait: 25},
+		SavedAt:         "2000-01-01T16:40:00+08:00",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +209,8 @@ func TestLoadReservationsFallbackDropsStaleNetTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ActiveReservation != nil {
-		t.Fatalf("stale net ticket state should be cleared: %+v", state.ActiveReservation)
+	if state.ActiveNetTicket != nil {
+		t.Fatalf("stale net ticket state should be cleared: %+v", state.ActiveNetTicket)
 	}
 	plan := LoadNetTicketPlan()
 	if plan.Number != "" || plan.TicketID != 0 {
@@ -217,7 +223,8 @@ func TestNoCurrentNetTicketErrorClearsLocalNetTicket(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	if err := SaveState(StateFilePath(), State{
-		ActiveReservation: &ReservationRecord{Kind: "net_ticket", Number: "893", QueueDate: time.Now().Format("20060102"), Wait: 25},
+		ActiveReservation: &ReservationRecord{Kind: "reservation", Number: "A001", TicketID: 456},
+		ActiveNetTicket:   &ReservationRecord{Kind: "net_ticket", Number: "893", QueueDate: time.Now().Format("20060102"), Wait: 25},
 		SavedAt:           time.Now().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
@@ -235,8 +242,12 @@ func TestNoCurrentNetTicketErrorClearsLocalNetTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ActiveReservation != nil {
-		t.Fatalf("net ticket state should be cleared: %+v", state.ActiveReservation)
+	if state.ActiveNetTicket != nil {
+		t.Fatalf("net ticket state should be cleared: %+v", state.ActiveNetTicket)
+	}
+	// 清排队号槽时，预约槽必须保留（双槽隔离的核心断言）。
+	if state.ActiveReservation == nil || state.ActiveReservation.Kind != "reservation" {
+		t.Fatalf("reservation should be preserved when clearing net ticket: %+v", state.ActiveReservation)
 	}
 }
 
@@ -287,5 +298,82 @@ func TestFilterCalendarSlots(t *testing.T) {
 	dinner := filterCalendarSlots(slots, false, "dinner")
 	if len(dinner) != 1 || dinner[0].Start != "193000" {
 		t.Fatalf("dinner = %#v", dinner)
+	}
+}
+
+// TestStateSlotsAreIsolated 验证预约槽与排队号槽物理隔离：先写预约，再写排队号，
+// 两槽都应保留（历史 bug：单槽整盘覆写会冲掉先写的记录）。
+func TestStateSlotsAreIsolated(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	// 1) 先抢到一条预约
+	if err := saveActiveReservationSlot(ReservationRecord{
+		Kind: "reservation", Number: "A001", TicketID: 123, SlotLabel: "19:30",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := LoadState(StateFilePath())
+	if state.ActiveReservation == nil || state.ActiveReservation.Number != "A001" {
+		t.Fatalf("reservation slot should have A001: %+v", state.ActiveReservation)
+	}
+
+	// 2) 之后又取到一张排队号——旧实现这里会把预约冲掉
+	if err := saveActiveNetTicketSlot(ReservationRecord{
+		Kind: "net_ticket", Number: "1843", Wait: 12, QueueDate: time.Now().Format("20060102"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = LoadState(StateFilePath())
+	if state.ActiveNetTicket == nil || state.ActiveNetTicket.Number != "1843" {
+		t.Fatalf("net ticket slot should have 1843: %+v", state.ActiveNetTicket)
+	}
+	if state.ActiveReservation == nil || state.ActiveReservation.Number != "A001" {
+		t.Fatalf("reservation slot must be preserved after net ticket save (isolation bug): %+v", state.ActiveReservation)
+	}
+
+	// 3) 反向再来一次：再更新预约，排队号槽仍不受影响
+	if err := saveActiveReservationSlot(ReservationRecord{
+		Kind: "reservation", Number: "A002", TicketID: 456, SlotLabel: "20:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = LoadState(StateFilePath())
+	if state.ActiveReservation == nil || state.ActiveReservation.Number != "A002" {
+		t.Fatalf("reservation slot should have A002: %+v", state.ActiveReservation)
+	}
+	if state.ActiveNetTicket == nil || state.ActiveNetTicket.Number != "1843" {
+		t.Fatalf("net ticket slot must be preserved after reservation update: %+v", state.ActiveNetTicket)
+	}
+}
+
+// TestClearSlotPreservesOtherSlot 验证清一个槽时另一个槽保留、两槽都空时文件才删。
+func TestClearSlotPreservesOtherSlot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	saveActiveReservationSlot(ReservationRecord{Kind: "reservation", Number: "A001", TicketID: 123})
+	saveActiveNetTicketSlot(ReservationRecord{Kind: "net_ticket", Number: "1843", Wait: 12})
+
+	// 清排队号槽：预约槽保留，文件不删
+	if err := clearActiveNetTicketSlot(); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := LoadState(StateFilePath())
+	if state.ActiveNetTicket != nil {
+		t.Fatalf("net ticket slot should be cleared: %+v", state.ActiveNetTicket)
+	}
+	if state.ActiveReservation == nil {
+		t.Fatal("reservation slot should be preserved when clearing net ticket slot")
+	}
+
+	// 再清预约槽：两槽都空，文件应被删除（干净初始态）
+	if err := clearActiveReservationSlot(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(StateFilePath()); !os.IsNotExist(err) {
+		t.Fatalf("state file should be removed when both slots empty, got err=%v", err)
 	}
 }

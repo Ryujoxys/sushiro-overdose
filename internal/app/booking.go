@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -39,9 +40,14 @@ func cmdList() {
 	if err != nil {
 		if errors.Is(err, ErrReservationsEndpointUnavailable) {
 			state, stateErr := LoadState(StateFilePath())
-			if stateErr == nil && state.ActiveReservation != nil {
-				fmt.Println("官方当前预约接口不可用，显示本地保存的最近预约记录。")
-				reservations = []ReservationRecord{*state.ActiveReservation}
+			if stateErr == nil && (state.ActiveReservation != nil || state.ActiveNetTicket != nil) {
+				fmt.Println("官方当前预约接口不可用，显示本地保存的最近预约/排队号记录。")
+				if state.ActiveNetTicket != nil {
+					reservations = append(reservations, *state.ActiveNetTicket)
+				}
+				if state.ActiveReservation != nil {
+					reservations = append(reservations, *state.ActiveReservation)
+				}
 			} else {
 				fmt.Println("官方当前预约接口不可用，且本地没有保存的预约记录。")
 				return
@@ -126,6 +132,10 @@ func cmdCancel(args []string) {
 
 	fmt.Printf("预约 #%d 已取消\n", ticketID)
 	LogMessage(time.Now(), fmt.Sprintf("预约 #%d 已取消", ticketID))
+	// 清掉本地预约槽，避免 fallback 仍显示已取消的预约。
+	if err := clearActiveReservationSlot(); err != nil {
+		LogMessage(time.Now(), "清除本地预约状态失败: "+err.Error())
+	}
 }
 
 // onBookingSuccess handles the shared logic for a successful booking:
@@ -137,12 +147,22 @@ func onBookingSuccess(reservation ReservationRecord, storeName, storeAddress, sl
 	reservation.StoreAddress = storeAddress
 	reservation.SlotLabel = slotLabel
 
-	state := State{
-		ActiveReservation: &reservation,
-		SavedAt:           now.Format(time.RFC3339),
+	// 按 mode 分流写入对应槽：取号写 ActiveNetTicket，预约/狙击写 ActiveReservation。
+	// load-merge-save 保证另一槽不被覆盖（历史 bug：单槽整盘写会冲掉先有的另一类记录）。
+	var saveErr error
+	if mode == "取号" {
+		if strings.TrimSpace(reservation.Kind) == "" {
+			reservation.Kind = "net_ticket"
+		}
+		saveErr = saveActiveNetTicketSlot(reservation)
+	} else {
+		if strings.TrimSpace(reservation.Kind) == "" {
+			reservation.Kind = "reservation"
+		}
+		saveErr = saveActiveReservationSlot(reservation)
 	}
-	if err := SaveState(StateFilePath(), state); err != nil {
-		LogMessage(now, "保存预约状态失败: "+err.Error())
+	if saveErr != nil {
+		LogMessage(now, "保存预约状态失败: "+saveErr.Error())
 	}
 
 	fmt.Println()
