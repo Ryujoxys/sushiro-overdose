@@ -1141,7 +1141,7 @@ func buildQueueSamplingStatus(now time.Time, summary QueueTrendSummary) QueueSam
 	switch {
 	case status.NeedsAuth:
 		status.PermissionStatus = "needs_auth"
-		status.Message = "凭证参数需要更新，重新获取后才能继续信息收集。"
+		status.Message = "通行证需要更新，重新获取后才能继续信息收集。"
 	case status.NeedsBackground:
 		status.PermissionStatus = "needs_background"
 		status.Message = "还没有持续信息收集。开启后会按门店积累预测数据。"
@@ -1159,7 +1159,7 @@ func buildQueueSamplingStatus(now time.Time, summary QueueTrendSummary) QueueSam
 	if state.LastError != "" && strings.Contains(strings.ToLower(state.LastError), "凭证") {
 		status.PermissionStatus = "needs_auth"
 		status.NeedsAuth = true
-		status.Message = "最近信息收集提示凭证异常，请重新获取凭证。"
+		status.Message = "最近信息收集提示通行证异常，请重新获取通行证。"
 	}
 	return status
 }

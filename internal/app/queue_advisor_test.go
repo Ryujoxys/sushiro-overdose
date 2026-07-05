@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,95 @@ func obsAt(storeID string, called, groups, wait int, at time.Time) QueueObservat
 		GroupQueuesCount: groups,
 		WaitMinutes:      wait,
 		CollectedAt:      at.Format(time.RFC3339),
+	}
+}
+
+func stubQueueLiveWaitEstimate(t *testing.T, fn func(context.Context, string, time.Time) (QueueWaitRange, bool)) {
+	t.Helper()
+	old := queueLiveWaitEstimate
+	queueLiveWaitEstimate = fn
+	t.Cleanup(func() { queueLiveWaitEstimate = old })
+}
+
+func writeQueueObservationLines(t *testing.T, lines ...string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(queueObservationPath()), 0o755); err != nil {
+		t.Fatalf("mkdir app dir: %v", err)
+	}
+	if err := os.WriteFile(queueObservationPath(), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write observations: %v", err)
+	}
+}
+
+func TestQueuePickupPlanUsesLiveWaitForCurrentPickup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	now := time.Date(2026, 6, 4, 12, 10, 0, 0, time.FixedZone("CST", 8*3600))
+	writeQueueObservationLines(t,
+		`{"collected_at":"2026-05-28T12:00:00+08:00","store_id":"3006","wait_minutes":100,"group_queues_count":40,"display_called_no":600}`,
+		`{"collected_at":"2026-05-28T12:20:00+08:00","store_id":"3006","wait_minutes":120,"group_queues_count":46,"display_called_no":630}`,
+	)
+	stubQueueLiveWaitEstimate(t, func(context.Context, string, time.Time) (QueueWaitRange, bool) {
+		return QueueWaitRange{Low: 10, High: 20}, true
+	})
+
+	got := buildQueuePickupPlan(context.Background(), "3006", "12:10", now)
+	if got.WaitMinutesRange == nil || got.WaitMinutesRange.Low != 10 || got.WaitMinutesRange.High != 20 {
+		t.Fatalf("current pickup should prefer live wait, got %+v", got)
+	}
+	if got.Basis != queuePlanLiveBasis {
+		t.Fatalf("basis = %q, want live basis", got.Basis)
+	}
+	if !strings.Contains(got.Basis, "现在取号") || strings.Contains(got.Basis, "没有历史样本") {
+		t.Fatalf("live basis should explain current pickup without implying missing history, got %q", got.Basis)
+	}
+}
+
+func TestQueuePickupPlanDoesNotUseHistoryWhenCurrentLiveWaitUnavailable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	now := time.Date(2026, 6, 4, 12, 10, 0, 0, time.FixedZone("CST", 8*3600))
+	writeQueueObservationLines(t,
+		`{"collected_at":"2026-05-28T12:00:00+08:00","store_id":"3006","wait_minutes":100,"group_queues_count":40,"display_called_no":600}`,
+		`{"collected_at":"2026-05-28T12:20:00+08:00","store_id":"3006","wait_minutes":120,"group_queues_count":46,"display_called_no":630}`,
+	)
+	stubQueueLiveWaitEstimate(t, func(context.Context, string, time.Time) (QueueWaitRange, bool) {
+		return QueueWaitRange{}, false
+	})
+
+	got := buildQueuePickupPlan(context.Background(), "3006", "12:10", now)
+	if got.WaitMinutesRange != nil || got.MealRange != nil {
+		t.Fatalf("current pickup with unavailable live wait must not fall back to historical time, got %+v", got)
+	}
+	if !strings.Contains(got.Message, "当前") || !strings.Contains(got.Message, "取号") {
+		t.Fatalf("message should explain current pickup is unavailable, got %q", got.Message)
+	}
+}
+
+func TestQueuePickupPlanUsesHistoryForFuturePickup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	now := time.Date(2026, 6, 4, 12, 10, 0, 0, time.FixedZone("CST", 8*3600))
+	writeQueueObservationLines(t,
+		`{"collected_at":"2026-05-28T18:00:00+08:00","store_id":"3006","wait_minutes":90,"group_queues_count":35,"display_called_no":900}`,
+		`{"collected_at":"2026-05-28T18:20:00+08:00","store_id":"3006","wait_minutes":110,"group_queues_count":44,"display_called_no":950}`,
+	)
+	stubQueueLiveWaitEstimate(t, func(context.Context, string, time.Time) (QueueWaitRange, bool) {
+		return QueueWaitRange{Low: 10, High: 20}, true
+	})
+
+	got := buildQueuePickupPlan(context.Background(), "3006", "18:00", now)
+	if got.WaitMinutesRange == nil {
+		t.Fatalf("future pickup should use historical wait, got %+v", got)
+	}
+	if got.WaitMinutesRange.Low == 10 && got.WaitMinutesRange.High == 20 {
+		t.Fatalf("future pickup should not use current live wait, got %+v", got)
+	}
+	if got.Basis == queuePlanLiveBasis {
+		t.Fatalf("future pickup basis should remain historical, got %q", got.Basis)
 	}
 }
 
@@ -324,11 +415,17 @@ func TestComputeQueueEta(t *testing.T) {
 	if none.EstimatedCalledAt != "" || none.WaitMinutesRange != nil {
 		t.Errorf("insufficient data should not estimate: %+v", none)
 	}
+	if !strings.Contains(none.ArrivalSuggestion, "能吃上") || strings.Contains(none.ArrivalSuggestion, "叫到时间") {
+		t.Fatalf("insufficient data copy should use meal-time language, got %q", none.ArrivalSuggestion)
+	}
 
 	// 只有官方等待：只能作为门店压力参考，不能包装成到号码的 ETA。
 	officialOnly := computeQueueEta(1078, 900, 0, 90, 0, 0, cv, n, 1.0, nil, nil, now)
 	if officialOnly.WaitMinutesRange != nil || officialOnly.Source != "official" || officialOnly.Risk != "high" {
 		t.Fatalf("official-only ETA should not estimate target number: %+v", officialOnly)
+	}
+	if !strings.Contains(officialOnly.ArrivalSuggestion, "能吃上") || strings.Contains(officialOnly.ArrivalSuggestion, "几点叫到") {
+		t.Fatalf("official-only copy should use meal-time language, got %q", officialOnly.ArrivalSuggestion)
 	}
 }
 

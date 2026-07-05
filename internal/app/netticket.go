@@ -279,7 +279,7 @@ func fireNetTicket(ctx context.Context, plan NetTicketPlan, now time.Time, today
 	if client == nil {
 		plan.Enabled = false
 		plan.Status = "error"
-		plan.LastError = "尚未捕获凭证参数（或已过期），无法自动取号"
+		plan.LastError = "尚未获取通行证（或已过期），无法自动取号"
 		if err := SaveNetTicketPlan(plan); err != nil {
 			LogMessage(now, "保存排队号计划失败: "+err.Error())
 		}
@@ -309,7 +309,7 @@ func fireNetTicket(ctx context.Context, plan NetTicketPlan, now time.Time, today
 			if err := SaveNetTicketPlan(plan); err != nil {
 				LogMessage(now, "保存排队号计划失败: "+err.Error())
 			}
-			sendQueueAlert(ctx, "⚠️ 定时取号需要重置认证", DefaultString(plan.StoreName, plan.StoreID)+"："+plan.LastError+"。寿司郎凭证会过期或被手机端登录顶掉，请重置认证后重新启用自动取号。")
+			sendQueueAlert(ctx, "⚠️ 定时取号需要更新通行证", DefaultString(plan.StoreName, plan.StoreID)+"："+plan.LastError+"。寿司郎通行证会过期或被手机端登录顶掉，请重置通行证后重新启用自动取号。")
 			return
 		}
 		if isOfficialServerHTTPError(err) {
@@ -370,7 +370,7 @@ func resetNetTicketPlanAfterAuthReset() {
 	if strings.TrimSpace(plan.Status) == "" || strings.TrimSpace(plan.Status) == "armed" || strings.TrimSpace(plan.Status) == "retrying" {
 		plan.Status = "error"
 	}
-	plan.LastError = "已重置本地凭证；寿司郎凭证会过期或被手机端登录顶掉，请重新获取凭证后再启用自动取号"
+	plan.LastError = "已重置本地通行证；寿司郎通行证会过期或被手机端登录顶掉，请重新获取通行证后再启用自动取号"
 	if err := SaveNetTicketPlan(plan); err != nil {
 		LogMessage(time.Now(), "保存排队号计划失败: "+err.Error())
 	}

@@ -548,7 +548,7 @@ func handleQueueTicket(w http.ResponseWriter, r *http.Request) {
 	refreshWebClient()
 	client := getWebClient()
 	if client == nil {
-		writeError(w, http.StatusBadRequest, "尚未捕获凭证参数，请先完成凭证再取号")
+		writeError(w, http.StatusBadRequest, "尚未获取通行证，请先获取通行证再取号")
 		return
 	}
 
@@ -640,7 +640,7 @@ func handleQueueTicketStatus(w http.ResponseWriter, r *http.Request) {
 	refreshWebClient()
 	client := getWebClient()
 	if client == nil {
-		writeError(w, http.StatusBadRequest, "尚未捕获凭证参数，请先完成凭证")
+		writeError(w, http.StatusBadRequest, "尚未获取通行证，请先获取通行证")
 		return
 	}
 	ticket, err := client.GetNetTicketStatus(r.Context())
@@ -791,7 +791,7 @@ func handleCancelNetTicket(w http.ResponseWriter, r *http.Request) {
 	refreshWebClient()
 	client := getWebClient()
 	if client == nil {
-		writeError(w, http.StatusBadRequest, "尚未捕获凭证参数，无法取消")
+		writeError(w, http.StatusBadRequest, "尚未获取通行证，无法取消")
 		return
 	}
 	if err := client.CancelNetTicket(r.Context()); err != nil {
@@ -830,7 +830,7 @@ func handleCancelReservation(w http.ResponseWriter, r *http.Request) {
 	refreshWebClient()
 	client := getWebClient()
 	if client == nil {
-		writeError(w, http.StatusBadRequest, "尚未捕获凭证参数，无法取消")
+		writeError(w, http.StatusBadRequest, "尚未获取通行证，无法取消")
 		return
 	}
 	if err := client.CancelReservation(r.Context(), body.TicketID); err != nil {
@@ -863,7 +863,7 @@ func handleAuthReset(w http.ResponseWriter, r *http.Request) {
 		"ok":          true,
 		"has_config":  false,
 		"auth_health": getAuthHealth(),
-		"message":     "已重置本地寿司郎凭证；凭证会过期或被手机端登录顶掉，请重新获取凭证。",
+		"message":     "已重置本地寿司郎通行证；通行证会过期或被手机端登录顶掉，请重新获取通行证。",
 	})
 }
 
@@ -876,7 +876,7 @@ func handleEngineCapture(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "message": "捕获已开始"})
+	writeJSON(w, map[string]any{"ok": true, "message": "通行证获取已开始"})
 }
 
 func handleEngineBooking(w http.ResponseWriter, r *http.Request) {

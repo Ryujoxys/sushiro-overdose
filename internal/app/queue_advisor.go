@@ -567,15 +567,15 @@ func computeQueueEta(targetNo, calledNo, travelMinutes, officialWait, waitCap in
 	eta.SourceLabel = queueEtaSourceLabel(source)
 	eta.SourceNote = queueEtaSourceNote(source)
 	if source == "official" {
-		// 只有官方等待、没有叫号速度时：无法定位到用户号码的叫到时间，标记 high 风险并提示，
+		// 只有官方等待、没有叫号速度时：无法定位到用户号码的能吃上时间，标记 high 风险并提示，
 		// 直接返回，不推具体时间区间（estimateWaitRange 虽然给了区间，但基于门店整体，不可靠）。
 		eta.Risk = "high"
-		eta.ArrivalSuggestion = "当前缺少叫号速度，官方等待只能代表门店排队压力，暂时不能可靠判断你的号码几点叫到。"
+		eta.ArrivalSuggestion = "当前缺少叫号速度，官方等待只能代表门店排队压力，暂时不能可靠判断你的号码几点能吃上。"
 		return eta
 	}
 	if waitRange == nil {
 		// 三档全部数据不足（recent/official/history 都拿不到）。
-		eta.ArrivalSuggestion = "实时和历史数据都不足，暂时无法预估叫到时间。"
+		eta.ArrivalSuggestion = "实时和历史数据都不足，暂时无法预估能吃上的时间。"
 		return eta
 	}
 	eta.WaitMinutesRange = waitRange
@@ -637,7 +637,7 @@ func queueEtaSourceLabel(source string) string {
 func queueEtaSourceNote(source string) string {
 	switch source {
 	case "recent_speed":
-		return "按本机近期采样的叫号推进速度估算，适合判断你手里号码的大概叫到时间。"
+		return "按本机近期采样的叫号推进速度估算，适合判断你手里号码的大概能吃上时间。"
 	case "blended":
 		return "综合近期叫号速度与同门店历史规律估算；实时样本尚少，已用历史做参照加权。"
 	case "history":
@@ -1107,7 +1107,9 @@ func liveWaitEstimate(ctx context.Context, storeID string, now time.Time) (Queue
 	return QueueWaitRange{Low: wait, High: high}, true
 }
 
-const queuePlanLiveBasis = "按当前实时等待粗估（这家店还没有历史样本）"
+var queueLiveWaitEstimate = liveWaitEstimate
+
+const queuePlanLiveBasis = "按当前实时等待粗估（适合现在取号）"
 const queuePlanLiveHint = "先按此刻的实时等待粗估；开启「预测准确度」积累几天后，会自动换成更准的历史曲线。"
 
 func buildQueuePickupPlan(ctx context.Context, storeID, pickupRaw string, now time.Time) QueuePickupPlan {
@@ -1121,10 +1123,26 @@ func buildQueuePickupPlan(ctx context.Context, storeID, pickupRaw string, now ti
 		return out
 	}
 	out.Pickup = pickup.Format("15:04")
+	if queuePickupShouldPreferLiveWait(pickup, now) {
+		if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
+			out.WaitMinutesRange = &lw
+			out.MealRange = &QueueTimeRange{
+				Early: pickup.Add(time.Duration(lw.Low) * time.Minute).Format("15:04"),
+				Late:  pickup.Add(time.Duration(lw.High) * time.Minute).Format("15:04"),
+			}
+			out.Basis = queuePlanLiveBasis
+			out.Risk = queuePlanRisk(storeID, now, lw)
+			out.Message = "现在取号优先按此刻实时等待估算；历史曲线只作为未来计划参考。"
+			return out
+		}
+		out.Basis = queuePlanLiveBasis
+		out.Message = "当前实时取号等待不可用，可能门店未开放线上取号；请刷新或换一家门店。"
+		return out
+	}
 	hist, basis := historicalWaitByBucket(storeID, now)
 	wr, found := hist[queueTrendBucket(pickup, 30)]
 	if !found {
-		if lw, ok := liveWaitEstimate(ctx, storeID, now); ok {
+		if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
 			out.WaitMinutesRange = &lw
 			out.MealRange = &QueueTimeRange{
 				Early: pickup.Add(time.Duration(lw.Low) * time.Minute).Format("15:04"),
@@ -1149,6 +1167,16 @@ func buildQueuePickupPlan(ctx context.Context, storeID, pickupRaw string, now ti
 	return out
 }
 
+func queuePickupShouldPreferLiveWait(pickup, now time.Time) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	pickup = pickup.In(SushiroTimezone)
+	now = now.In(SushiroTimezone)
+	diff := pickup.Sub(now)
+	return diff >= -10*time.Minute && diff <= 20*time.Minute
+}
+
 // buildQueueMealPlan 计算“想几点吃→几点取号”。allowLiveFallback 为 true 时（Web 只读查询），
 // 没有历史样本会退回当前实时等待粗估；Routine 提醒必须传 false，维持“样本不足不乱提醒”的承诺。
 func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinutes int, now time.Time, allowLiveFallback bool) QueueMealPlan {
@@ -1166,7 +1194,7 @@ func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinu
 	hist, _ := historicalWaitByBucket(storeID, now)
 	if len(hist) == 0 {
 		if allowLiveFallback {
-			if lw, ok := liveWaitEstimate(ctx, storeID, now); ok {
+			if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
 				stable := target.Add(-time.Duration(lw.High) * time.Minute)
 				latest := target.Add(-time.Duration(lw.Low) * time.Minute)
 				out.StablePickup = stable.Format("15:04")

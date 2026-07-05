@@ -22,7 +22,7 @@ func TestKnownOfficialServerError(t *testing.T) {
 		t.Fatalf("isCredentialRefreshLikelyError() = false")
 	}
 	msg := friendlyOfficialAPIError(err)
-	if !strings.Contains(msg, "E010") || !strings.Contains(msg, "重置认证") || !strings.Contains(msg, "凭证已经过期") {
+	if !strings.Contains(msg, "E010") || !strings.Contains(msg, "重置通行证") || !strings.Contains(msg, "通行证已经过期") {
 		t.Fatalf("friendly message = %q", msg)
 	}
 }

@@ -90,12 +90,12 @@ func markAuthStale(reason string) {
 	if shouldNotify {
 		// 新一段 stale 才回填寿命样本，喂给「年龄接近寿命」的提前提醒模型。
 		recordAuthStaleLifespan()
-		body := "寿司郎凭证会过期；在手机上用过寿司郎小程序后，电脑这边的凭证也会失效（同一账号只认一个会话）。请在工具里重新获取凭证——若上次用某种方式抓过，会默认沿用、点一下即可。"
+		body := "寿司郎通行证会过期；在手机上用过寿司郎小程序后，电脑这边的通行证也会失效（同一账号只认一个会话）。请在工具里重新获取通行证——若上次用某种方式获取过，会默认沿用、点一下即可。"
 		if reason != "" {
 			body = reason + "。" + body
 		}
 		body += recaptureDeepLinkSuffix()
-		sendNotification("寿司郎 - 凭证可能已过期",
+		sendNotification("寿司郎 - 通行证可能已过期",
 			body)
 	}
 }
@@ -108,10 +108,10 @@ func noteAuthResult(err error) {
 		return
 	}
 	if isAuthError(err) {
-		markAuthStale("官方接口返回凭证失败（401/403）")
+		markAuthStale("官方接口返回通行证失败（401/403）")
 		return
 	}
 	if isCredentialRefreshLikelyError(err) {
-		markAuthStale("官方接口返回 E010/error.server，凭证可能需要刷新")
+		markAuthStale("官方接口返回 E010/error.server，通行证可能需要刷新")
 	}
 }
