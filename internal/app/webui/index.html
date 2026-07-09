@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="sushiro-csrf" content="{{CSRF_TOKEN}}">
+<link rel="icon" type="image/png" href="data:image/png;base64,{{LOGO_BASE64}}">
+<link rel="apple-touch-icon" href="data:image/png;base64,{{LOGO_BASE64}}">
+<title>SUSHIRO Overdose</title>
+<style>{{APP_CSS}}</style>
+</head>
+<body>
+<div class="topline"></div>
+<header class="hdr">
+  <div class="shell hdr-in">
+    <div class="brand">
+      <img src="data:image/png;base64,{{LOGO_BASE64}}" alt="SUSHIRO">
+      <div><strong>SUSHIRO Overdose</strong><span>reservation assistant</span></div>
+    </div>
+    <nav class="nav top">
+      <a href="#" class="on" data-group="home" onclick="goGroup('home');return false">首页</a>
+      <a href="#" data-group="eat" onclick="goGroup('eat');return false">现在去吃</a>
+      <a href="#" data-group="number" onclick="goGroup('number');return false">我有号码</a>
+      <a href="#" data-group="book" onclick="goGroup('book');return false">约未来</a>
+      <a href="#" data-group="mine" onclick="goGroup('mine');return false">我的单据</a>
+      <a href="#" data-group="settings" onclick="goGroup('settings');return false">设置</a>
+    </nav>
+    <div class="mode-switch" id="uiModeSwitch" aria-label="界面模式">
+      <button type="button" id="uiModeSimple" onclick="setUIMode('simple')">简化</button>
+      <button type="button" id="uiModeAdvanced" onclick="setUIMode('advanced')">进阶</button>
+    </div>
+    <span class="authpill hid" id="authPill" onclick="authPillClick()"></span>
+    <span class="ver hid" id="ver"></span>
+  </div>
+</header>
+
+<main class="shell wrap">
+  <div id="authBanner" class="authbanner hid" onclick="startAuth()"></div>
+  <nav class="nav subnav hid" id="subnav"></nav>
+  <section id="p-da">
+    <div class="grid">
+      <div>
+        <div id="activeHome"></div>
+        <div class="hero" id="heroBox">
+          <span class="pm hero-pm" data-kind="salmon" data-size="56"></span>
+          <span class="pm hero-pm" style="right:80px;top:28px;opacity:.6" data-kind="uni" data-size="40"></span>
+          <span class="pm hero-pm" style="right:126px;top:40px;opacity:.35" data-kind="tako" data-size="30"></span>
+          <div class="eyebrow" id="heroBadge">到店助手</div>
+          <h1 id="heroTitle"><span class="skeleton" style="display:inline-block;width:56%;min-width:220px;height:30px;border-radius:8px"></span></h1>
+          <p id="heroCopy"><span class="skeleton" style="display:inline-block;width:82%;height:14px;border-radius:6px"></span></p>
+          <div class="actions">
+            <button class="bt bt-r bt-l hid" id="bm" onclick="mA()">开始</button>
+            <button class="bt bt-o hid" id="bs" onclick="sE()">停止</button>
+            <button class="bt bt-w hid" id="bc">获取通行证</button>
+          </div>
+          <div id="heroPick" class="hero-pick hid">
+            <button id="heroReadOnlyPrimary" class="bt bt-r bt-l" onclick="openGuestStorePicker()">🔍 选门店看排队</button>
+            <button class="bt bt-w" onclick="go('gu')">先看机制图</button>
+            <span class="mu">不用登录、不用通行证；选过的店会记住，以后各页面自动带入。</span>
+          </div>
+          <div id="nc" class="notice hid"></div>
+        </div>
+        <div id="homeDecisionPanel" class="home-decision mt16">
+          <div class="home-decision-head">
+            <div><div class="eyebrow">寿司郎机制</div><h2>你现在是哪种情况</h2></div>
+            <div><p>看排队和预测不用登录，抢预约才要通行证。</p><button class="bt bt-w bt-s mt8" onclick="go('gu')">看机制图</button></div>
+          </div>
+          <div class="home-decision-grid">
+            <button class="home-decision-card read" onclick="go('qt')" type="button">
+              <span>今天去吃</span>
+              <b>先看哪家排得少</b>
+              <small>比门店、等位、当前叫号。</small>
+            </button>
+            <button class="home-decision-card read" onclick="go('qd')" type="button">
+              <span>我有当天排队号</span>
+              <b>算几点能吃上</b>
+              <small>填号码，按叫号进度估到店时间。</small>
+            </button>
+            <button class="home-decision-card auth" onclick="currentUIMode()==='advanced'?go('ca'):enterAdvanced('ca')" type="button">
+              <span>想约未来某天</span>
+              <b>查未来预约</b>
+              <small>看可约日历，要约再拿证。</small>
+            </button>
+          </div>
+        </div>
+        <div id="journeyPanel" class="journey-panel mt16"><div class="ci">正在判断今天该走哪条路…</div></div>
+        <div id="homeLive" class="mt16"></div>
+        <div id="cb" class="card hid mt16">
+          <h2>通行证获取进度</h2>
+          <div id="cg" class="cg"></div>
+        </div>
+      </div>
+      <aside class="side">
+        <div id="eb" class="engine idle"><div class="row"><span class="dot"></span><strong>就绪</strong></div><p>等待操作。</p></div>
+        <div class="card hid" id="updBox"></div>
+        <div class="card" id="setupCard">
+          <h2>准备清单</h2>
+          <div id="setupList"></div>
+          <div class="fl g8 fw mt16"><button class="bt bt-r bt-s" onclick="openGuestStorePicker()">选门店看排队</button><button class="bt bt-w bt-s" onclick="openFirstUseWizard()">新手引导</button><button class="bt bt-w bt-s" onclick="go('gu')">机制图</button></div>
+        </div>
+        <details class="card adv">
+          <summary>当前偏好（人数 / 桌型 / 时段）</summary>
+          <div class="ps mt16" id="ps"></div>
+          <div class="fl g8 fw mt16"><button class="bt bt-w bt-s" onclick="openSnPrefs()">改预约/取号偏好</button><button class="bt bt-w bt-s" onclick="enterAdvanced('re')">我的单据</button></div>
+        </details>
+      </aside>
+    </div>
+  </section>
+
+  <section id="p-gu" class="hid">
+    <div class="guide-hero">
+      <div class="eyebrow">新手入门</div>
+      <h2>新手入门：寿司郎排队机制</h2>
+      <p>先分清三件事：今天到店排队、未来预约、通行证。看信息是只读；真的取号、预约、取消才会向寿司郎提交操作。</p>
+      <div class="guide-kpis" id="guideActionLegend">
+        <div class="guide-kpi read"><span>只读 · 直接用</span><b>看门店排队、当前叫号、估几点能吃上。</b></div>
+        <div class="guide-kpi auth"><span>需要通行证</span><b>读我的单据、抢未来预约、远程取号前才需要。</b></div>
+        <div class="guide-kpi action"><span>会执行操作</span><b>预约、取号、取消前都会再次确认。</b></div>
+      </div>
+    </div>
+    <div class="cd mt16">
+      <div class="page-lead"><div><h2 class="ph">两条常见路径</h2><p class="ph-sub">不知道从哪开始，就按下面的流程走。每一步都能在顶部导航找到。</p></div></div>
+      <div class="guide-flow" id="guideFlow">
+        <div class="flow-lane">
+          <div class="flow-lane-head"><div><b>今天去吃</b><span>目标是少等、别过号。</span></div><div class="flow-lane-actions"><button class="bt bt-r bt-s" onclick="openGuestStorePicker()" type="button">从看排队开始</button><span class="tag read">只读优先</span></div></div>
+          <div class="flow-steps">
+            <div class="flow-step read"><span>1</span><b>选常去门店</b><small>搜城市或门店名，先看公开实时排队。</small></div>
+            <div class="flow-step read"><span>2</span><b>看当前叫号</b><small>比较在等桌数、预估等待和营业状态。</small></div>
+            <div class="flow-step read"><span>3</span><b>拿到当天排队号</b><small>可以现场拿号；进阶版也能确认后远程取号。</small></div>
+            <div class="flow-step read"><span>4</span><b>填号码预测</b><small>输入当天排队号，估几点能吃上、几点出发。</small></div>
+            <div class="flow-step read"><span>5</span><b>到店吃饭</b><small>以寿司郎小程序和店内叫号为准。</small></div>
+          </div>
+        </div>
+        <div class="flow-lane">
+          <div class="flow-lane-head"><div><b>约未来</b><span>目标是抢到未来某天的预约。</span></div><div class="flow-lane-actions"><button class="bt bt-w bt-s" onclick="currentUIMode()==='advanced'?go('ca'):enterAdvanced('ca')" type="button">先查未来日历</button><span class="tag auth">需要通行证</span></div></div>
+          <div class="flow-steps">
+            <div class="flow-step auth"><span>1</span><b>获取通行证</b><small>通行证不是排队号，只是让工具能代表你查询和提交。</small></div>
+            <div class="flow-step auth"><span>2</span><b>选门店偏好</b><small>人数、桌型、门店顺序只配置一次。</small></div>
+            <div class="flow-step read"><span>3</span><b>查可约日历</b><small>看到未来日期和时段，已满也能留作目标。</small></div>
+            <div class="flow-step action"><span>4</span><b>预约或自动抢</b><small>会提交真实预约，执行前会再次确认。</small></div>
+            <div class="flow-step auth"><span>5</span><b>看我的单据</b><small>预约成功后，以寿司郎小程序记录为准。</small></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="guide-action-legend mt16">
+      <div class="guide-note"><b>当天排队号</b><p>是今天现场/线上排队用的号，会跟着店内叫号前进；过号通常要重新取号。</p></div>
+      <div class="guide-note"><b>未来预约</b><p>是某个日期和时段的预约，和当天排队号不是一回事。</p></div>
+      <div class="guide-note"><b>通行证不是排队号</b><p>它是小程序请求里的身份信息，会过期；看排队不用它，提交操作才需要。</p></div>
+    </div>
+    <div id="guideNextActions" class="guide-next">
+      <div class="guide-next-head">
+        <div><h3>看完流程图，下一步去哪</h3><p>按你现在的情况选一个入口；看排队和预测都不会提交操作。</p></div>
+      </div>
+      <div class="guide-next-grid">
+        <button class="guide-next-card read" onclick="go('qt')" type="button">
+          <span>今天去吃</span>
+          <b>先看今天排队</b>
+          <small>选门店，看营业、等位、当前叫号。</small>
+        </button>
+        <button class="guide-next-card read" onclick="go('qd')" type="button">
+          <span>已有号码</span>
+          <b>算这个号几点能吃上</b>
+          <small>填当天排队号，按叫号进度估出发和到店。</small>
+        </button>
+        <button class="guide-next-card auth" onclick="currentUIMode()==='advanced'?go('ca'):enterAdvanced('ca')" type="button">
+          <span>约未来</span>
+          <b>查未来可约日历</b>
+          <small>先看日期和时段，要提交预约前再获取通行证。</small>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section id="p-ca" class="hid advanced-page">
+    <div class="cd">
+      <div class="fl ai jb mb16 fw g8">
+        <div><h2 class="ph">约未来 <span class="pm" data-kind="ikura" data-size="32"></span></h2><p class="ph-sub">这里看的是未来预约，不是当天排队号。查看可约日历和创建预约都需要通行证；只看今天排队请去「现在去吃」。</p></div>
+        <div class="fl g8 fw"><button class="bt bt-w bt-s" onclick="saveCalendarStoresAsPrefs()">保存为预约/取号门店</button><button class="bt bt-w bt-s" onclick="rC()">刷新</button><select id="ar" onchange="setAR()" style="width:auto"><option value="0">不自动刷新</option><option value="15">15 秒</option><option value="30">30 秒</option><option value="60">60 秒</option></select></div>
+      </div>
+      <div class="fg"><label>门店</label><div id="storeChoices" class="chips"><span class="mu">加载中</span></div></div>
+      <div class="fl g8 fw mb16">
+        <label class="check"><input type="checkbox" id="avOnly" onchange="rC()">只看可预约</label>
+        <select id="period" onchange="rC()" style="width:auto"><option value="all">全部时段</option><option value="lunch">午餐</option><option value="dinner">晚餐</option></select>
+      </div>
+      <div class="db" id="dbar"></div>
+      <div id="sc"><div class="empty"><div class="mascot-wrap"><span class="pm" data-kind="plain" data-size="56"></span></div>选择门店查看时段<div class="mt8"><button class="bt bt-r bt-s" onclick="openStorePicker({selected:selStores,onConfirm:applyCalendarStores})">选择门店</button></div></div></div>
+    </div>
+  </section>
+
+  <section id="p-qd" class="hid">
+    <div class="cd">
+      <div class="dash-head">
+        <div>
+          <div class="cd-t" style="margin-bottom:8px">排队时间预测 <span class="pm" data-kind="maguro" data-size="30"></span></div>
+          <div class="dash-title">先分清：现在取号，还是已经有号</div>
+          <p class="dash-copy"><span class="tag read">只读 · 直接用</span> 两种情况分开算，避免把等待分钟和叫号号码混在一起。</p>
+        </div>
+        <div id="qdPrimaryActions" class="dash-controls">
+          <button class="bt bt-r bt-s" onclick="openStorePicker({selected:qdSelected.slice(0,1),multi:false,onConfirm:applyDashboardStores})">选门店</button>
+          <button class="bt bt-w bt-s" onclick="loadQueueDashboard()">刷新</button>
+        </div>
+      </div>
+      <div id="qdStores" class="chips mb16"><span class="mu">正在确认常用门店</span></div>
+      <div id="qdModeTabs" class="fl g8 fw mb16">
+        <button id="qdModeTicket" type="button" class="chip on" onclick="setQueuePredictionMode('ticket')">我有号码</button>
+        <button id="qdModePickup" type="button" class="chip" onclick="setQueuePredictionMode('pickup')">还没拿号</button>
+      </div>
+      <div id="qdPredictionModes" class="prediction-modes mt16">
+        <div id="qdNowTicketCard" class="prediction-panel now hid">
+          <div class="prediction-head">
+            <div><span class="tag read">还没拿号</span><h3>现在取号，几点能吃上</h3><p>还没拿号时用这个。按“如果现在取号，要等多久”来算；默认用当前时间，也可以改成计划取号时间。</p></div>
+            <button type="button" class="bt bt-w bt-s" onclick="useNowForPickupPlan()">用现在估算</button>
+          </div>
+          <div id="qdPlanFold" class="plan-card">
+            <div class="plan-head">
+              <div><b id="planTitle">现在取号，几点能吃上</b><p class="mu" id="planSub">默认按当前时间估算，适合还没拿号、想判断现在去不去。</p></div>
+              <button type="button" class="plan-swap" id="planSwapBtn" onclick="swapPlanDir()" title="切换计算方向" aria-label="切换计算方向">⇄</button>
+            </div>
+            <div class="plan-row">
+              <div class="fg" id="qpPickupWrap">
+                <label>取号时间</label>
+                <input id="qpPickup" type="time" oninput="runPlanCalcDebounced()">
+              </div>
+              <div class="fg hid" id="qwMealWrap">
+                <label>想几点吃上</label>
+                <input id="qwMeal" type="time" value="13:00" oninput="runPlanCalcDebounced()">
+              </div>
+              <div class="fg hid" id="qwTravelWrap">
+                <label>路上几分钟（可选）</label>
+                <input id="qwTravel" type="number" min="0" placeholder="如 25" oninput="runPlanCalcDebounced()">
+              </div>
+            </div>
+            <div id="qpAnswer" class="answer-card mt8"><div class="ci">先在上方选门店，这里会按现在取号估算几点能吃上。</div></div>
+          </div>
+        </div>
+        <div id="qdExistingTicketCard" class="prediction-panel existing">
+          <div class="prediction-head">
+            <div><span class="tag read">已有号码</span><h3>我已经取到号，这个号几点能吃上</h3><p>拿到当天排队号后用这个。它按当前叫号和叫号速度估算，不用“现在取号”的等待分钟。</p></div>
+          </div>
+          <div class="fr mt12">
+            <label class="dash-target">当天排队号 <input id="qdTargetNo" type="number" min="1" placeholder="如 893" oninput="qdInputDebounced()" onkeydown="if(event.key==='Enter'){clearTimeout(_qdInputTimer);loadQueueDashboard()}"></label>
+            <label class="dash-datepick">参考曲线 <select id="qdDateType" onchange="loadQueueDashboard()"><option value="all">全部日期</option><option value="weekday">工作日</option><option value="weekend">周末（含周五晚）</option><option value="holiday">节假日</option></select></label>
+          </div>
+          <div class="cd-t" style="margin:14px 0 8px">现在 · 你的号码</div>
+          <div id="qdAnswer" class="answer-card"><div class="ci">选门店、填当天排队号，这里按当前实时叫号速度告诉你大概几点能吃上、几点出发。</div></div>
+          <div id="qdAdvisorBlock" class="hid">
+            <div class="cd-t" style="margin:16px 0 8px">历史规律 · 到店建议</div>
+            <div id="qdAdvisor" class="advisor-panel"><div class="ci">这里按这家店的历史曲线给出到店建议和时间里程碑。</div></div>
+          </div>
+        </div>
+      </div>
+      <details id="qdAnalysisFold" class="card adv mt16">
+        <summary><span class="setting-fold-title"><b>为什么这样判断</b><span>需要看走势图、历史规律和数据来源时再展开。</span></span></summary>
+        <div id="qdEvidence" class="qbox mt16">
+          <div class="cd-t"><b>📊 整合走势大图</b></div>
+          <div id="qdPressChart" class="dash-chart mt16"><div class="empty">选门店后，这里把今天的叫号进度、排队压力和你的当天排队号画在同一张图上，悬停每个点可看全部数据。</div></div>
+          <div id="qdDataSource" class="data-source mt16"></div>
+        </div>
+        <div id="qdInsights" class="qbox mt16">
+          <div class="cd-t"><b>🗓 这家店的历史规律</b></div>
+          <div id="qdCalledCurve" class="mt16"></div>
+          <div id="qdHeatmap" class="mt16"></div>
+          <div id="qdWeekday" class="mt16"></div>
+          <div id="qdTrend" class="mt16"></div>
+        </div>
+      </details>
+      <details id="qdMoreTools" class="card adv mt16">
+        <summary><span class="setting-fold-title"><b>提醒和进阶工具</b><span>想被叫号前提醒、每日取号提醒或提升曲线准确度时再展开。</span></span></summary>
+      <div class="cd-t" style="margin:16px 0 8px">叫号提醒</div>
+      <div id="qdReminderCard" class="curve-sampling mt16">
+        <div>
+          <b>🔔 提醒 <span class="tag read">只提醒 · 不取号</span></b><button type="button" class="hint-btn" data-hint="两种提醒：已经有当天排队号时分几次提醒你出发；或每天按想吃的时间提醒你该取号了。都不会替你操作。" onclick="toggleHint(this)" aria-label="提醒说明">ⓘ</button>
+          <p class="mu">两种模式，都不会替你操作。</p>
+          <div class="fl g8 fw mt8"><button class="chip on" id="remTabOnce" onclick="remTab('once')">当次 · 快叫到我时</button><button class="chip" id="remTabDaily" onclick="remTab('daily')">每日 · 该取号了</button></div>
+          <div id="remOnce">
+          <div class="fr mt8">
+            <div class="fg"><label>提醒节奏</label><select id="qdrTemplate" onchange="renderReminderTemplateHint()"><option value="normal">标准 · 提前 80/50/25 号各提醒一次</option><option value="conservative">从容 · 提前 120/90/60/30 号</option><option value="urgent">临近 · 提前 50/25/10 号</option><option value="custom">自定义（在下方高级里填）</option></select></div>
+            <div class="fg"><label>路上要多久（分钟，可选）</label><input id="qdrTravel" type="number" min="0" placeholder="如 25，用于推算出发时间"></div>
+            <div class="fg"><label>备注（可选）</label><input id="qdrLabel" placeholder="如：我的当天排队号 / 帮朋友盯"></div>
+          </div>
+          <div class="fg mt8"><label>只发哪些通道（可选 · 不选=全部）</label><div id="remChannels" class="fl g8 fw"></div><span class="mu" id="remChannelsHint"></span></div>
+          <details class="adv mt8 advanced-only">
+            <summary>高级 · 自定义提醒号码</summary>
+            <div class="fg mt8"><label>叫到哪些号时提醒（逗号分隔，需小于你的当天排队号）</label><input id="qdrPoints" placeholder="如 1000,1025,1050" oninput="renderReminderTemplateHint()"></div>
+            <p class="ps mt8">填了这里就按这些号码提醒，忽略上面的节奏。</p>
+          </details>
+          <div id="qdReminderStatus" class="mt8"><span class="mu">选门店并输入号码后，点「生成提醒」。</span></div>
+          </div>
+          <div id="remDaily" class="hid">
+          <p class="mu mt8">按想吃饭的时间倒推取号窗口，每天提前提醒你手动取号；样本不足时不会乱提醒。<span class="tag auth">需要通知</span></p>
+          <div class="fr mt8">
+            <div class="fg"><label>门店</label><select id="nrStore"></select></div>
+            <div class="fg"><label>想几点吃</label><input type="time" id="nrMeal" value="13:00"></div>
+            <div class="fg"><label>路上要多久（分钟）</label><input type="number" id="nrTravel" value="0" min="0"></div>
+            <div class="fg"><label>提前几分钟提醒</label><input type="number" id="nrSafety" value="10" min="0"></div>
+            <div class="fg" style="align-self:flex-end"><button class="bt bt-r bt-s" onclick="saveNetTicketRoutine(true)">启用提醒</button></div>
+            <div class="fg" style="align-self:flex-end"><button class="bt bt-o bt-s" onclick="saveNetTicketRoutine(false)">关闭提醒</button></div>
+          </div>
+          <div id="nrStatus" class="pick-out mt8"><span class="mu">状态加载中…</span></div>
+          </div>
+        </div>
+        <div class="curve-sampling-actions"><button class="bt bt-r bt-s" id="qdrCreateBtn" onclick="createTicketReminder()">🔔 生成提醒</button><button class="bt bt-w bt-s" id="qdrNotifyBtn" onclick="focusNotifySettings()">设置通知</button></div>
+      </div>
+      <details id="qdSamplingFold" class="card adv mt16 advanced-only">
+        <summary><span class="setting-fold-title"><b>📡 本机持续采集</b><span>让「几点能吃上」的判断越用越准；数据只留在本机，不上传。</span></span></summary>
+        <div id="qdSamplingCard" class="curve-sampling mt16"><div><p style="margin-top:0">常用门店的公开排队曲线（叫号、等位）已默认自动记录，不需要通行证，越用越准；获取通行证后还能额外采集可约时段。</p></div><div class="curve-sampling-actions"><button class="bt bt-w bt-s" onclick="openSettingsFold('fold-sm')">详细配置</button></div></div>
+      </details>
+      </details>
+    </div>
+  </section>
+  <section id="p-qt" class="hid">
+    <div class="cd">
+      <div class="page-lead"><div><h2 class="ph">现在去吃 <span class="pm" data-kind="salmon" data-size="32"></span></h2><p class="ph-sub"><span class="tag read">只读 · 直接用</span> 今天哪家在营业、前面几桌、还要等多久。</p></div><div class="fl g8 fw"><button class="bt bt-w bt-s" onclick="refreshQueueView()">刷新</button></div></div>
+      <div class="fg"><label>关注门店</label>
+        <div class="fl g8 fw" style="align-items:center"><button class="bt bt-w bt-s" onclick="openStorePicker({selected:qtSelected,onConfirm:applyQueueStores})">+ 选择门店（全国）</button><span class="mu">搜城市或门店名，勾选关注。</span></div>
+        <div id="qtStores" class="chips mt8"><span class="mu">正在确认关注门店</span></div>
+      </div>
+      <div id="qtRecommend" class="mb16"></div>
+      <div id="qtLive" class="mt16"><div class="skeleton skk"></div></div>
+      <div class="card mt16" id="qtNextSteps" style="border:1px dashed var(--line)">
+        <div class="fl ai jb fw g8">
+          <div><b>看完排队，下一步？</b><div class="mu mt4">还没拿号先算等待；已经有号就算几点能吃上。</div></div>
+        </div>
+        <div class="fl g8 fw mt12">
+          <button id="qtPickupForecastEntry" class="bt bt-w bt-s" onclick="openPickupForecastFromQueue()">⏱ 现在取号，几点能吃上</button>
+          <button id="qtTicketForecastEntry" class="bt bt-w bt-s" onclick="openTicketForecastFromQueue()">🎫 已有号码，算几点能吃上</button>
+          <button class="bt bt-w bt-s" onclick="enterAdvanced('ca')">📅 查未来可约时段（约未来）</button>
+        </div>
+      </div>
+      <details id="qtAutoTicketFold" class="adv mt16 advanced-only">
+      <summary><span class="setting-fold-title"><b>自动取号计划</b><span>会向寿司郎提交操作，需要时再展开。</span></span></summary>
+      <div class="qbox mt16">
+        <div class="fl ai jb fw g8"><label style="margin:0">取号计划 <span class="tag action">会执行操作</span></label><span class="mu">定时到点或一开放就自动远程取号，启用前会再次确认。</span></div>
+        <div class="fl g8 fw mt8">
+          <div class="fg"><label>门店</label><select id="ntStore"></select></div>
+          <div class="fg"><label>触发方式</label><select id="ntMode" onchange="onNtModeChange()"><option value="time">到点取号</option><option value="on_open">一开放就取号</option></select></div>
+          <div class="fg" id="ntTimeWrap"><label>几点取号</label><input type="time" id="ntTime"></div>
+          <div class="fg" style="align-self:flex-end"><button class="bt bt-o bt-s" onclick="saveNetTicketPlan(true)">启用</button></div>
+          <div class="fg" style="align-self:flex-end"><button class="bt bt-o bt-s" onclick="saveNetTicketPlan(false)">取消计划</button></div>
+          <div class="fg" style="align-self:flex-end"><button class="bt bt-w bt-s" onclick="recoverNetTicketStatus()">恢复当前排队号</button></div>
+        </div>
+        <div id="ntStatus" class="pick-out mt8"><span class="mu">选门店和触发方式后，可启用自动取号计划；取到的号会显示在「我的单据」。启用前会再次确认。</span></div>
+        <div class="fl ai g8 fw mt16" style="border-top:1px dashed var(--line);padding-top:12px"><span class="tag action">危险</span><button class="bt bt-o bt-s" onclick="cancelNetTicket()">取消排队号…</button><span class="mu">取消的是寿司郎小程序里的真实排队号，不可恢复；只想停止本工具请用「取消计划」。</span></div>
+      </div>
+      </details>
+    </div>
+  </section>
+
+  <section id="p-sn" class="hid advanced-page">
+    <div class="cd">
+      <div class="page-lead"><div><h2 class="ph">自动抢预约 <span class="pm" data-kind="ebi" data-size="32"></span></h2><p class="ph-sub"><span class="tag action">会执行操作</span> 抢的是未来预约。已放出的立即抢，没放出的可蹲点；启动前确认，抢到即停。</p></div></div>
+      <div id="snDecisionPanel" class="sn-decision mb16">
+        <div class="sn-decision-head">
+          <div><h3>先选你现在是哪种情况</h3><p>下面三条不会直接提交预约；真正执行前会再次确认。</p></div>
+          <span class="tag action">执行前会再次确认</span>
+        </div>
+        <div class="sn-decision-grid">
+          <button class="sn-decision-card action" onclick="scrollSnSection('snImmediateBox')" type="button">
+            <span>时段已经放出</span>
+            <b>按偏好马上抢</b>
+            <small>适合已经看到可预约时段，只想自动尝试符合偏好的第一个。</small>
+          </button>
+          <button class="sn-decision-card action" onclick="scrollSnSection('snScheduleBox')" type="button">
+            <span>还没放出</span>
+            <b>蹲开放瞬间</b>
+            <small>填日期、门店和时间窗，开放时自动尝试。</small>
+          </button>
+          <button class="sn-decision-card read" onclick="go('ca')" type="button">
+            <span>不确定有没有放出</span>
+            <b>先看可约日历</b>
+            <small>先查日期和时段；已满再回来蹲点。</small>
+          </button>
+        </div>
+      </div>
+      <div class="qbox mb16" id="snImmediateBox">
+        <div class="fl ai jb fw g8"><label style="margin:0">自动抢预约（已放出的时段）</label><span class="mu">按你的门店和时段偏好扫描可约日历，抢到第一个符合的未来预约就停止。</span></div>
+        <div class="fl g8 fw mt8"><button class="bt bt-r bt-s" onclick="sB()">按偏好抢预约</button><button class="bt bt-w bt-s" onclick="go('ca')">先看可约日历</button><button class="bt bt-w bt-s" onclick="expandSnPrefs()">改预约偏好</button></div>
+      </div>
+      <div class="qbox mb16" id="snScheduleBox">
+        <div class="fl ai jb fw g8"><label style="margin:0">蹲未来预约时段（还没放出）</label><div class="fl g8 fw"><button class="bt bt-w bt-s" onclick="addSn()">添加目标时段</button><button class="bt bt-r bt-s" onclick="saveSn()">保存计划</button><button class="bt bt-y bt-s" onclick="startSn()">启动蹲未来预约</button></div></div>
+        <div class="mu mt8">指定日期、门店、时间窗，开放瞬间自动尝试创建未来预约；抢到第一个就停。</div>
+        <div id="snRows" class="mt8"></div>
+        <div id="snPlan" class="mt16"><div class="empty">还没有蹲未来预约目标。点“添加目标时段”，填日期、门店和时间窗。</div></div>
+      </div>
+      <details class="adv mb16" id="snPrefs">
+        <summary>预约/取号偏好 · 人数与门店优先级（自动抢预约和远程取号都用它）</summary>
+        <div class="mt16">
+        <div class="fr mb16">
+          <div class="fg"><label>成人</label><input type="number" id="pa" min="0" max="10" value="2"></div>
+          <div class="fg"><label>儿童</label><input type="number" id="pc" min="0" max="10" value="0"></div>
+          <div class="fg"><label>桌型</label><select id="pt"><option value="T">桌位</option><option value="C">吧台</option></select></div>
+          <div class="fg"><label>预约用手机号（可选）</label><input type="tel" id="pphone" maxlength="11" placeholder="11 位完整号码；留空用通行证里的号码"></div>
+        </div>
+        <div class="fg"><label>添加门店（搜全国）</label><div class="fl g8 fw"><input id="storeSearch" placeholder="输入城市或门店名，如 北京 / 凯德" style="flex:1;min-width:200px" onkeydown="if(event.key==='Enter'){searchStores();return false}"><button class="bt bt-w bt-s" onclick="searchStores()">搜索</button></div><div id="storeSearchResults" class="mt8"></div></div>
+        <div class="fg"><label>预约/取号门店与优先级</label><button type="button" class="hint-btn" data-hint="自动抢预约 / 远程取号会按勾选门店的排序依次尝试。新加的门店若从没在小程序点过，建议更新通行证后先试一家确认可用。" onclick="toggleHint(this)" aria-label="门店优先级说明">ⓘ</button><div id="bookingStores" class="store-list"><span class="mu">用上方搜索添加，或获取通行证后自动带入</span></div></div>
+        <div class="fl ai g8 fw mt8"><button class="bt bt-r" onclick="sP()">保存全部偏好</button><span class="mu">人数、门店、时段是同一份偏好；在任意一个折叠里点保存，两边都会一起保存。</span></div>
+        </div>
+      </details>
+      <details class="adv mb16" id="snPrefsTime">
+        <summary>预约偏好 · 日期与时段策略</summary>
+        <div class="mt16">
+        <div class="preset-grid">
+          <button class="preset" onclick="applyPreset('weekday_dinner')">工作日晚餐</button>
+          <button class="preset" onclick="applyPreset('weekend_lunch')">周末午餐</button>
+          <button class="preset" onclick="applyPreset('weekend_dinner')">周末晚餐</button>
+          <button class="preset" onclick="applyPreset('any_available')">有时段就要</button>
+        </div>
+        <div class="fr mb16">
+          <div class="fg"><label>日期优先级</label><select id="ppm"><option value="date">按日期优先</option><option value="weekend_first">周末优先</option><option value="weekday_first">工作日优先</option></select></div>
+          <div class="fg"><label>时段策略</label><select id="pst"><option value="earliest">最早可约</option><option value="latest">最晚可约</option><option value="closest">接近目标时间</option></select></div>
+          <div class="fg"><label>目标时间（如 1930 = 19:30）</label><input type="text" id="ptm" placeholder="1930"></div>
+        </div>
+        <div class="fg"><label>工作日时段</label><div id="wd" class="tl"></div><span class="at" onclick="aT('wd')">添加时段</span></div>
+        <div class="fg"><label>周六时段</label><div id="sa" class="tl"></div><span class="at" onclick="aT('sa')">添加时段</span></div>
+        <div class="fg"><label>周日时段</label><div id="su" class="tl"></div><span class="at" onclick="aT('su')">添加时段</span></div>
+        <div class="fl ai g8 fw mt8"><button class="bt bt-r" onclick="sP()">保存全部偏好</button><span class="mu">人数、门店、时段是同一份偏好；在任意一个折叠里点保存，两边都会一起保存。</span></div>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section id="p-re" class="hid advanced-page">
+    <div class="cd"><h2 class="ph">我的单据 <span class="pm" data-kind="maki" data-size="32"></span></h2><p class="ph-sub mb16"><span class="tag auth">需要通行证 🎫</span> 这里只显示已经成功的预约或排队号；取消按钮会单独确认。</p><div id="rc"><div class="empty">加载中</div></div></div>
+  </section>
+
+  <section id="p-se" class="hid">
+    <div class="settings-grid">
+      <div class="cd settings-wide">
+        <div class="page-lead"><div><h2 class="ph">设置 <span class="pm" data-kind="tamago" data-size="32"></span></h2><p class="ph-sub">凭证 → 通知 → 数据 → 排障。红色要处理，黄色按需配。</p></div></div>
+        <div id="settingsQuickActions" class="settings-quick mt16">
+          <div class="settings-quick-head"><div><b>先选你要做什么</b><span>刚开始不用把设置全部看完；只处理当前要用的那一项。</span></div></div>
+          <div class="settings-quick-grid">
+            <button class="settings-quick-card read" onclick="go('qt')" type="button"><span>只看信息</span><b>不用配置，先看排队</b><small>看营业、等位和当前叫号，不需要通行证或通知。</small></button>
+            <button class="settings-quick-card auth" onclick="openAuthWizard()" type="button"><span>要约未来</span><b>获取通行证</b><small>抢未来预约、远程取号、读取单据前再获取。</small></button>
+            <button class="settings-quick-card read" onclick="focusNotifySettings()" type="button"><span>想被提醒</span><b>配置通知</b><small>叫号提醒、抢到预约后才会用到，填一次即可。</small></button>
+          </div>
+        </div>
+        <div id="settingsStatus" class="mt16"><div class="ci">状态加载中</div></div>
+        <div class="mode-settings mt16" id="uiModeSettings">
+          <div><b>界面模式</b><p class="mu mt8">简化版只保留必要看板；进阶版显示完整预约、取号、采集和维护功能。</p></div>
+          <div class="mode-switch" aria-label="设置界面模式">
+            <button type="button" onclick="setUIMode('simple')">简化版</button>
+            <button type="button" onclick="setUIMode('advanced')">进阶版</button>
+          </div>
+        </div>
+      </div>
+      <div class="sect-divider"><span class="sect-no">1</span><b>通行证</b><span class="mu">抢未来预约、远程取号、读取我的单据时才需要；看排队不用。</span></div>
+      <details class="cd setting-fold settings-wide" id="fold-auth">
+        <summary><span class="setting-fold-title"><b>寿司郎通行证</b><span>通行证不是排队号；只在抢未来预约、远程取号、读取我的单据时需要。它会被寿司郎定期回收，也可能被手机端重新打开小程序后顶掉。</span></span></summary>
+        <div class="setting-fold-body">
+        <div class="fl ai jb mb16 fw g8"><div class="cd-t" style="margin-bottom:0">通行证状态</div><div id="authPrimaryActions" class="fl g8 fw"><button class="bt bt-r bt-s" onclick="openAuthWizard()">获取通行证</button><button class="bt bt-o bt-s" onclick="resetAuthOnly(true)">重置通行证</button></div></div>
+        <details id="authTroubleshootFold" class="adv mt8"><summary>更多检查</summary><div class="fl g8 fw"><button class="bt bt-w bt-s" onclick="verifyAuthTicket()">验证通行证（取号测试）</button><button type="button" class="hint-btn" data-hint="找一家正在开放取号的门店真实取号、立即取消：能取到说明通行证仍生效，取不到就该重新获取。遇到 E010/error.server、401/403、远程取号失败或我的单据读不到时，先点「重置通行证」再重新获取——重置只清理本机保存的通行证，不会取消你已拿到的预约或排队号。" onclick="toggleHint(this)" aria-label="验证通行证说明">ⓘ</button><button class="bt bt-w bt-s" onclick="testAuthProbe()">测试基础接口</button><button class="bt bt-w bt-s" onclick="checkCert()">证书自检</button></div></details>
+        <div id="certCheckState" class="diag-detail mt8 hid"></div>
+        <div id="authVerifyState" class="diag-detail mt8 hid"></div>
+        <div id="mobileAuthState" class="diag-detail mt8">尚未加载</div>
+        </div>
+      </details>
+      <details class="cd setting-fold settings-wide advanced-only">
+        <summary><span class="setting-fold-title"><b>GitHub 登录与线上基准</b><span>GitHub 只用于认证线上排队基准服务，和寿司郎小程序凭证不是一回事。</span></span></summary>
+        <div class="setting-fold-body">
+        <div id="cloudState" class="diag-detail">尚未加载</div>
+        <div class="fl g8 fw mt16"><button class="bt bt-r bt-s" onclick="startCloudLogin()">用 GitHub 登录</button><button class="bt bt-w bt-s" onclick="testCloudAuth()">验证连接</button><button class="bt bt-o bt-s" onclick="logoutCloudAuth()">退出云端</button><button type="button" class="hint-btn" data-hint="登录后可以读取线上基准来补强排队压力和到店预测；不会取号、取消号，也不会把数据库凭证写入本机。" onclick="toggleHint(this)" aria-label="GitHub 登录说明">ⓘ</button></div>
+        <details class="btn-more mt16"><summary></summary><div class="fg mt8"><label>云端服务地址</label><button type="button" class="hint-btn" data-hint="仅自建或排障时需要。线上数据库凭证只应保存在云端服务 secrets 里。" onclick="toggleHint(this)" aria-label="云端地址说明">ⓘ</button><input type="url" id="cloudUrl" placeholder="https://sushiro-cloud.your-name.workers.dev"></div><div class="fl g8 fw mt8"><button class="bt bt-r bt-s" onclick="saveCloudAuth()">保存服务地址</button></div></details>
+        </div>
+      </details>
+      <div class="sect-divider"><span class="sect-no">2</span><b>通知</b><span class="mu">抢到预约、叫号提醒会用这里推送；至少配一个渠道。</span></div>
+      <details class="cd setting-fold" id="fold-notify">
+        <summary><span class="setting-fold-title"><b>通知渠道</b><span>配置飞书、Telegram、Bark 或 Server酱；抢到预约、叫号提醒会用这里推送。</span></span></summary>
+        <div class="setting-fold-body">
+        <div class="fg"><label>飞书 Webhook</label><input type="text" id="nf" placeholder="https://open.feishu.cn/..."></div>
+        <div class="fr"><div class="fg" style="flex:1"><label>Telegram Token</label><input type="text" id="ntt" placeholder="123456:ABC..."></div><div class="fg" style="flex:1"><label>Chat ID</label><input type="text" id="ntc" placeholder="-100..."></div></div>
+        <div class="fr"><div class="fg" style="flex:1"><label>Bark URL</label><input type="text" id="nbu" placeholder="https://api.day.app"></div><div class="fg" style="flex:1"><label>Bark Key</label><input type="text" id="nbk"></div></div>
+        <div class="fg"><label>Server 酱 Key</label><input type="text" id="ns" placeholder="SCT..."></div>
+        <div class="fl g8 fw mt8"><button class="bt bt-r" onclick="sN()">保存通知</button><button class="bt bt-w" onclick="tN('all')">保存并测试全部</button></div>
+        <details class="btn-more mt8"><summary></summary><div class="ps mt8">单渠道测试会先保存当前表单再发送。</div><div class="fl g8 fw mt8"><button class="bt bt-w bt-s" onclick="tN('feishu')">测试飞书</button><button class="bt bt-w bt-s" onclick="tN('telegram')">测试 Telegram</button><button class="bt bt-w bt-s" onclick="tN('bark')">测试 Bark</button><button class="bt bt-w bt-s" onclick="tN('serverchan')">测试 Server酱</button></div></details>
+        </div>
+      </details>
+      <div class="sect-divider advanced-only"><span class="sect-no">3</span><b>数据与预测</b><span class="mu">让「几点能吃上」更准；看历史规律反推更值得抢的时段。</span></div>
+      <details class="cd setting-fold settings-wide advanced-only" id="fold-sm" ontoggle="if(this.open)lSm()">
+        <summary><span class="setting-fold-title"><b>预测准确度 <span class="pm" data-kind="unagi" data-size="26"></span></b><span>提升“几点能吃上、几点出发”的判断；常用门店的公开排队曲线已默认自动记录，这里只在想更准时配置。</span></span></summary>
+        <div class="setting-fold-body">
+        <div class="fl g8 fw"><button class="bt bt-w bt-s" onclick="runSampleOnce()">收集一次</button><button class="bt bt-r bt-s" onclick="startSampling()">开启持续采集</button></div>
+        <div class="sample-grid mt16">
+          <label class="check"><input type="checkbox" id="spEnabled">开启本机持续采集</label>
+          <label class="check debug-only"><input type="checkbox" id="spAuto">应用启动后自动收集</label>
+          <div class="fg debug-only"><label>间隔秒数</label><input type="number" id="spInterval" min="60" step="60" value="300"></div>
+          <div class="fg debug-only"><label>开始</label><input type="time" id="spStart" value="10:00"></div>
+          <div class="fg debug-only"><label>结束</label><input type="time" id="spEnd" value="22:00"></div>
+        </div>
+        <div class="fg"><label>提升哪家店的预测</label><div id="samplingStores" class="chips"><span class="mu">加载中</span></div><div id="sampleStoreHint" class="ps mt8"></div></div>
+        <div class="fl g8 fw"><button class="bt bt-r" onclick="saveSampling()">保存预测配置</button><button class="bt bt-w" onclick="usePrefSamplingStores()">跟随预约偏好门店</button></div>
+        <div id="sampleState" class="sample-state"><div class="ci">尚未加载</div></div>
+        <div id="sampleResult" class="diag-detail hid"></div>
+        <div class="dash-title mt16">预测准不准（实测回测）</div>
+        <p class="ps">每次给出「几点能吃上」后，等你的号真被叫到，自动对账一次。下面是各店实测误差——样本越多越可信。</p>
+        <div id="accReport"><div class="empty">还没有可对账的样本。填号预测、等叫到后会自动积累。</div></div>
+        </div>
+      </details>
+      <details class="cd setting-fold settings-wide advanced-only" id="fold-in" ontoggle="if(this.open)lI()">
+        <summary><span class="setting-fold-title"><b>历史洞察 <span class="pm" data-kind="kappa" data-size="26"></span></b><span>按门店、星期、时段统计开放概率和售罄速度，反推更值得抢的目标。</span></span></summary>
+        <div class="setting-fold-body">
+        <div class="fl g8 fw mb16"><button class="bt bt-w bt-s" onclick="lI()">刷新</button></div>
+        <div id="ic"><div class="empty">加载中</div></div>
+        </div>
+      </details>
+      <div class="sect-divider advanced-only"><span class="sect-no">4</span><b>排障</b><span class="mu">状态异常、代理残留、看日志；平时不用动。</span></div>
+      <details class="cd setting-fold settings-wide advanced-only" id="fold-safe">
+        <summary><span class="setting-fold-title"><b>诊断与维护</b><span>状态异常、代理残留、需要复制诊断时打开。</span></span></summary>
+        <div class="setting-fold-body">
+        <div class="fl ai jb mb16 fw g8"><div class="cd-t" style="margin-bottom:0">本机诊断</div><div class="fl g8 fw"><button class="bt bt-w bt-s" onclick="lD()">刷新</button><button class="bt bt-w bt-s" onclick="copyDiag()">复制诊断</button><button class="bt bt-r bt-s" onclick="repairP()">修复代理</button><button class="bt bt-w bt-s" onclick="rST()">重置获取状态</button></div></div>
+        <div id="diagNext" class="diag-next warn"><h3>先处理这件事</h3><p>刷新诊断后会显示最值得先做的一步。</p></div>
+        <div id="dg" class="cg"><div class="ci">尚未加载</div></div>
+        <div id="ddetail" class="diag-detail hid"></div>
+        </div>
+      </details>
+      <details class="cd setting-fold settings-wide advanced-only" id="fold-lo" ontoggle="if(this.open)lL()">
+        <summary><span class="setting-fold-title"><b>运行日志 <span class="pm" data-kind="maguro" data-mood="sleep" data-size="26"></span></b><span>排障时看；平时不用展开。</span></span></summary>
+        <div class="setting-fold-body"><div class="lg" id="lv"></div></div>
+      </details>
+      <div class="sect-divider advanced-only"><span class="sect-no">5</span><b>进阶 / 集成</b><span class="mu">把排队数据接给 AI 助手；按需开启，平时用不到。</span></div>
+      <details class="cd setting-fold settings-wide advanced-only" id="fold-mcp" ontoggle="if(this.open)lMCP()">
+        <summary><span class="setting-fold-title"><b>MCP 助手 <span class="pm" data-kind="maguro" data-mood="happy" data-size="26"></span></b><span>让 AI（Claude Desktop/Cursor）帮你查排队、看预约、给到店建议。</span></span></summary>
+        <div class="setting-fold-body">
+          <div id="mcpCard"></div>
+        </div>
+      </details>
+      <div class="danger-zone settings-wide advanced-only">
+        <div class="danger-zone-head"><b>⚠ 危险操作</b><span class="mu">不可恢复，执行前会再次确认。与上方日常配置隔离。</span></div>
+        <div class="fl g8 fw mt8"><button class="bt bt-o bt-s" onclick="stopProcesses()">停止本应用进程</button><button class="bt bt-o bt-s" onclick="uninstallAll()">卸载清理</button></div>
+      </div>
+    </div>
+  </section>
+
+</main>
+<div class="belt" id="belt" aria-hidden="true"></div>
+<footer class="ft">由 <a href="https://github.com/Ryujoxys/sushiro-overdose">sushiro-overdose</a> 驱动 · 非官方工具，仅供学习</footer>
+
+<script>{{APP_JS}}</script>
+</body></html>

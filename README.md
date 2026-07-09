@@ -37,6 +37,14 @@
 
 快叫到了可以推一条通知（飞书 / Telegram / Bark / Server酱，能同时开多个），先找地方坐会儿，不用一直守着屏幕。
 
+### 小屏 / 窄窗口
+
+界面本质是本机 Web UI，桌面应用窗口或本机浏览器缩窄时也能用。[`v3.17.1`](docs/release-notes-3.17.1.md) 修了小屏顶部导航：切到「我的单据」「设置」这类靠右入口时，会自动把当前栏目滚到可视区域，不用手动猜自己在哪一页。
+
+<p align="center">
+  <img src="docs/screenshot-mobile-nav.jpg" width="280" alt="移动端顶部导航当前栏目可见" />
+</p>
+
 ## 下载
 
 去 [Latest Release](https://github.com/Ryujoxys/sushiro-overdose/releases/latest) 下对应平台的包，或一行命令装：

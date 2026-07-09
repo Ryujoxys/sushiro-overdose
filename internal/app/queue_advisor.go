@@ -734,20 +734,20 @@ func buildQueuePressureCurve(ctx context.Context, storeID, date string, now time
 	remotePoints := buildRemoteQueuePressureCurvePoints(storeID, date, dateType, baseline)
 	out.RemotePoints = len(remotePoints)
 
-	// 按本机点数选择数据来源，优先级：本机足够 → 混合 → 仅远端 → 仅本机 → 无数据。
-	// queuePressureCurveLocalPreferredPoints（8）是「本机可信」的阈值；不足 8 点时混入远端基准补全，
-	// 让新用户第一次打开就能看到曲线，而不是一片空白。
+	// 来源策略（GitHub→Worker→Turso 与本机采样并行）：
+	// 1) 两端都有：始终 merge。重叠时刻本机优先（见 queuePressureCurveSourceRank），
+	//    空档用线上基准填满，避免「本机已有若干点就把整条线上曲线扔掉」——用户会误以为没拿到线上数据。
+	// 2) 仅远端 / 仅本机 / 都无：原样返回。
+	// queuePressureCurveLocalPreferredPoints 只影响文案（本机是否已够密），不再作为丢弃远端的开关。
 	switch {
-	case len(localPoints) >= queuePressureCurveLocalPreferredPoints:
-		out.Points = localPoints
-		out.Source = "local"
-		if len(remotePoints) > 0 {
-			out.Message = "当前曲线使用本机实际采样；线上 Turso 基准已连接，本机样本不足时会自动兜底。"
-		}
 	case len(localPoints) > 0 && len(remotePoints) > 0:
 		out.Points = mergeQueuePressureCurvePoints(remotePoints, localPoints)
 		out.Source = "mixed"
-		out.Message = fmt.Sprintf("本机今天只有 %d 个采样点，已用线上 Turso 基准补全排队压力；带“本机采样”的点按实际数据覆盖，远端基准不等同实时叫号。", len(localPoints))
+		if len(localPoints) >= queuePressureCurveLocalPreferredPoints {
+			out.Message = fmt.Sprintf("已叠加线上 Turso 基准（经 GitHub/云端）与本机 %d 个采样点：重叠时刻以本机为准，其余时段用线上基准补全；远端基准是历史规律，不是实时叫号。", len(localPoints))
+		} else {
+			out.Message = fmt.Sprintf("本机今天只有 %d 个采样点，已用线上 Turso 基准补全排队压力；带“本机采样”的点按实际数据覆盖，远端基准不等同实时叫号。", len(localPoints))
+		}
 	case len(remotePoints) > 0:
 		out.Points = remotePoints
 		out.Source = "remote_baseline"
@@ -757,6 +757,14 @@ func buildQueuePressureCurve(ctx context.Context, storeID, date string, now time
 		out.Source = "local"
 		if baselineErr != nil {
 			out.Message = "线上 Turso 基准暂时不可用，当前只显示本机采样曲线。"
+		} else if baselineStatus.Used {
+			out.Message = "线上 Turso 基准已连接，但这家店今天时段暂无可用基准点，当前只显示本机采样。"
+		} else if baselineStatus.Configured && !baselineStatus.Authenticated {
+			out.Message = "GitHub 尚未登录或会话失效，当前只显示本机采样；登录后可叠加线上基准。"
+		} else if baselineStatus.Configured {
+			out.Message = "线上基准未参与本次曲线，当前只显示本机采样。"
+		} else {
+			out.Message = "未配置线上基准，当前只显示本机采样。"
 		}
 	default:
 		out.Source = "none"

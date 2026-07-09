@@ -28,3 +28,9 @@ mcp/.env
 mcp/venv/
 mcp/.venv/
 
+# 本地试跑痕迹（勿提交）
+.local-run.log
+.local-run.pid
+.local-run.url
+
+

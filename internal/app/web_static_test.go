@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// 前端契约守卫：web_static.go 里的 indexHTML 是一个内嵌 HTML/JS 字符串，go build
-// 只验证它是合法 Go 字符串、不校验内容。下面的测试对其做静态结构检查，让"重排丢
+// 前端契约守卫：indexHTML 由 webui/ 下 HTML/CSS/JS 在 init 时组装而成，go build
+// 只验证嵌入文件存在、不校验内容。下面的测试对其做静态结构检查，让"重排丢
 // id、删函数后 onclick 还在调、id 撞车、JS 语法错"这类回归在 go test 阶段就报红，
 // 而不是等用户打开页面才暴露。检查逻辑与 architecture_guard_test.go 同一风格（静态
 // 扫描源码字符串，零外部依赖）。
@@ -1647,5 +1647,31 @@ func TestSimpleModeHidesQDCloudEntry(t *testing.T) {
 	// renderDashboardDataSource 简化版应整体隐藏
 	if !strings.Contains(indexHTML, "if(currentUIMode()!=='advanced'){box.className='data-source mt16 hid'") {
 		t.Error("renderDashboardDataSource 未在简化版隐藏图表数据来源块")
+	}
+}
+
+// TestEmbeddedNavScrollUsesViewportGeometry 小屏顶部导航必须用相对视口几何
+// 把当前栏目滚进可视区；offsetLeft 在 flex 布局下可能相对错误的 offsetParent。
+func TestEmbeddedNavScrollUsesViewportGeometry(t *testing.T) {
+	js := extractEmbeddedScript(t)
+	if !strings.Contains(js, "function keepActiveTopNavVisible") {
+		t.Fatal("missing keepActiveTopNavVisible")
+	}
+	if !strings.Contains(js, "getBoundingClientRect") {
+		t.Fatal("keepActiveTopNavVisible should use getBoundingClientRect relative to .nav.top")
+	}
+	if strings.Contains(js, "a.offsetLeft") || strings.Contains(js, "offsetLeft,r=l+a.offsetWidth") {
+		t.Fatal("keepActiveTopNavVisible should not rely on element.offsetLeft against nav.scrollLeft")
+	}
+}
+
+// TestEmbeddedNotifySettingsFoldTarget 「设置通知」深链要落到可展开的通知卡。
+func TestEmbeddedNotifySettingsFoldTarget(t *testing.T) {
+	if !strings.Contains(indexHTML, `id="fold-notify"`) {
+		t.Fatal(`settings page missing id="fold-notify" for focusNotifySettings`)
+	}
+	js := extractEmbeddedScript(t)
+	if !strings.Contains(js, "fold-notify") {
+		t.Fatal("focusNotifySettings should open fold-notify")
 	}
 }

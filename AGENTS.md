@@ -154,6 +154,9 @@ main.go (默认启动 Web UI)
 | `.github/workflows/ci.yml` | 常规 CI：push/PR 运行测试、vet、gofmt、go mod tidy diff、安装脚本语法检查 |
 | `.goreleaser.yml` | GoReleaser v2 配置：多平台编译 + Mac Universal Binary |
 | `.github/workflows/release.yml` | GitHub Actions：tag 触发 → GoReleaser → Mac .app 打包 → 上传 Release |
+| `resource_windows_{amd64,arm64}.syso` | Windows PE 资源（图标 + 干净 application manifest）；`go build` 按 GOARCH 自动链接 |
+| `winres/winres.json` + `scripts/gen-windows-resources.sh` | 重新生成上述 syso 的源配置与脚本（发版前若改图标/清单必跑） |
+| `assets/windows/app.manifest` | Windows 清单策略说明（SxS：禁止 VC CRT / Common-Controls 依赖） |
 
 ---
 
@@ -358,6 +361,29 @@ git push origin v1.2.0
 | `*_windows_arm64.zip` | Windows ARM 高级用户 | 同上 |
 | `*_linux_amd64.tar.gz` | Linux 用户 | 解压后命令行运行 |
 | `*_linux_arm64.tar.gz` | Linux ARM 用户 | 同上 |
+
+### Windows 打包注意（并行配置 / SxS）
+
+用户侧报错「**应用程序无法启动，因为应用程序的并行配置不正确**」属于 Windows loader / SxS，发生在进程入口之前，与寿司郎业务逻辑无关。
+
+打包侧硬规则：
+
+1. **双击版**（`Sushiro-Overdose-*-windows-*.exe`）用  
+   `CGO_ENABLED=0` + `-H windowsgui` + 根目录 `resource_windows_{amd64,arm64}.syso`。
+2. **syso 必须**含：图标 + `asInvoker` + PerMonitorV2；**禁止**声明  
+   `Microsoft.VC*.CRT` 或 `Microsoft.Windows.Common-Controls`（纯 Go 不需要，声明了反而在坏 WinSxS 机器上直接起不来）。
+3. 改图标 / 清单后必须：
+
+```bash
+./scripts/gen-windows-resources.sh
+go test ./internal/app/ -run TestWindowsResourceSysoHasCleanManifest
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+  -ldflags "-s -w -H windowsgui -X main.Version=dev" \
+  -o /tmp/Sushiro-Overdose-dev-windows-amd64.exe .
+```
+
+4. Release CI 在上传 Windows 双击版前会跑 `TestWindowsResourceSysoHasCleanManifest`，并拒绝过小的 exe。
+5. 控制台 zip 版（GoReleaser 的 `sushiro-overdose_*_windows_*.zip`）**不**加 `-H windowsgui`，可作「双击版起不来」时的对照包。
 
 ### 热修复发布
 

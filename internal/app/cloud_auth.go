@@ -22,10 +22,12 @@ import (
 )
 
 const (
-	cloudAuthConfigFile           = "cloud_auth.json"
-	cloudAuthURLEnv               = "SUSHIRO_CLOUD_URL"
-	cloudAuthSessionTokenEnv      = "SUSHIRO_CLOUD_SESSION_TOKEN"
-	defaultCloudAuthBaseURL       = "https://sushiro-cloud.ryujo.online"
+	cloudAuthConfigFile      = "cloud_auth.json"
+	cloudAuthURLEnv          = "SUSHIRO_CLOUD_URL"
+	cloudAuthSessionTokenEnv = "SUSHIRO_CLOUD_SESSION_TOKEN"
+	// 默认用 Cloudflare workers.dev，避免自定义域名到期后线上基准/GitHub 登录全挂。
+	// Turso / GitHub OAuth 密钥只在 Worker secrets，不进本机、不进源码。
+	defaultCloudAuthBaseURL       = "https://sushiro-cloud.sushiro-ryujoxys.workers.dev"
 	cloudAuthBaselineProbeStoreID = "3006" // 健康探测固定用的门店号，只验证线上基准接口能否返回数据
 	cloudAuthTimeout              = 12 * time.Second
 	cloudOAuthStateTTL            = 10 * time.Minute // OAuth state 有效期：留出用户在浏览器走完 GitHub 登录的窗口，又不至于无限堆积

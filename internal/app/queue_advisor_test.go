@@ -1,7 +1,10 @@
 package app
 
+import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
+
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -274,6 +277,92 @@ func TestMergeQueuePressureCurvePointsPrefersLocal(t *testing.T) {
 	}
 	if points[0].Source != "local" || points[0].CalledNo != 140 {
 		t.Fatalf("local point should win: %+v", points[0])
+	}
+}
+
+// TestBuildQueuePressureCurveKeepsRemoteWhenLocalIsDense 回归：
+// 本机采样点 ≥ 8 时旧逻辑会整段丢掉线上基准，UI 只剩 local，用户会以为「线上数据没拿到」。
+// 修复后两端都有时应 source=mixed，且保留远端独有时段。
+func TestBuildQueuePressureCurveKeepsRemoteWhenLocalIsDense(t *testing.T) {
+	resetQueueBaselineRemoteCacheForTest(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(queueBaselineTursoURLEnv, "")
+	t.Setenv(queueBaselineTursoTokenEnv, "")
+	t.Setenv(queueBaselineTursoFallbackURL, "")
+	t.Setenv(queueBaselineTursoFallbackAuth, "")
+	t.Setenv(cloudAuthURLEnv, "")
+	t.Setenv(cloudAuthSessionTokenEnv, "")
+	if err := os.MkdirAll(AppDirPath(), 0o755); err != nil {
+		t.Fatalf("mkdir app dir: %v", err)
+	}
+
+	// Dense local samples for 3006 on 2026-06-08 (weekday, Sushiro TZ) afternoon only.
+	var b strings.Builder
+	for i := 0; i < 10; i++ {
+		// 12:00, 12:05, ...
+		minute := i * 5
+		ts := fmt.Sprintf("2026-06-08T12:%02d:00+08:00", minute)
+		fmt.Fprintf(&b, `{"collected_at":%q,"store_id":"3006","display_called_no":%d,"wait_minutes":30,"group_queues_count":10,"store_status":"OPEN","net_ticket_status":"ONLINE","online_open":true}`+"\n", ts, 500+i*3)
+	}
+	if err := os.WriteFile(queueObservationPath(), []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("write observations: %v", err)
+	}
+
+	// Cloud baseline returns morning buckets local does not have.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/queue/baseline/store" {
+			t.Fatalf("path = %s, want /api/queue/baseline/store", r.URL.Path)
+		}
+		wait := 40.0
+		groups := 15.0
+		called := 200.0
+		writeJSON(w, QueueBaselineExport{
+			Version:       1,
+			GeneratedAt:   "2026-06-08T10:00:00+08:00",
+			Source:        "turso-cloudflare",
+			BucketMinutes: 30,
+			DateTypes:     []string{"weekday"},
+			Stats:         QueueBaselineStats{StoreCount: 1, RollupCount: 2, LatestCount: 0},
+			Rollups: []QueueBaselineRollup{
+				{StoreID: 3006, DateType: "weekday", TimeBucket: "10:00", WaitTypicalMinutes: &wait, QueueGroupsTypical: &groups, CalledNoTypical: &called, SampleCount: 20, Confidence: "high"},
+				{StoreID: 3006, DateType: "weekday", TimeBucket: "11:00", WaitTypicalMinutes: &wait, QueueGroupsTypical: &groups, CalledNoTypical: &called, SampleCount: 20, Confidence: "high"},
+			},
+		})
+	}))
+	defer server.Close()
+	if err := SaveCloudAuthConfig(CloudAuthConfig{BaseURL: server.URL, SessionToken: "cloud-session", UserLogin: "octocat"}); err != nil {
+		t.Fatal(err)
+	}
+
+	loc := SushiroTimezone
+	now := time.Date(2026, 6, 8, 13, 0, 0, 0, loc)
+	curve := buildQueuePressureCurve(context.Background(), "3006", "2026-06-08", now)
+	if curve.Source != "mixed" {
+		t.Fatalf("source = %q want mixed (local dense must not drop remote); msg=%q local=%d remote=%d points=%d",
+			curve.Source, curve.Message, curve.LocalPoints, curve.RemotePoints, len(curve.Points))
+	}
+	if curve.LocalPoints < queuePressureCurveLocalPreferredPoints {
+		t.Fatalf("local_points = %d, want dense local >= %d", curve.LocalPoints, queuePressureCurveLocalPreferredPoints)
+	}
+	if curve.RemotePoints == 0 {
+		t.Fatal("remote_points = 0, cloud baseline should contribute points")
+	}
+	var hasRemote, hasLocal bool
+	for _, p := range curve.Points {
+		switch p.Source {
+		case "local":
+			hasLocal = true
+		case "remote_baseline", "remote_latest":
+			hasRemote = true
+		}
+	}
+	if !hasLocal || !hasRemote {
+		t.Fatalf("merged curve should keep both sources, hasLocal=%v hasRemote=%v points=%+v", hasLocal, hasRemote, curve.Points)
+	}
+	if !strings.Contains(curve.Message, "叠加") && !strings.Contains(curve.Message, "补全") {
+		t.Fatalf("message should explain overlay/fill: %q", curve.Message)
 	}
 }
 

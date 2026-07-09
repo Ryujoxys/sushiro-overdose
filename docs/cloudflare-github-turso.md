@@ -39,6 +39,18 @@ Worker 只暴露这些数据接口：
 
 用户本机采样会继续融合进本机主曲线。把用户采样上传到线上库需要先设计并迁移贡献表，本次不默认开启。
 
+## 当前默认地址（workers.dev）
+
+本仓库桌面端默认云端地址：
+
+```text
+https://sushiro-cloud.sushiro-ryujoxys.workers.dev
+```
+
+Turso / GitHub OAuth / SESSION 等密钥只配置在 Worker secrets，不写进源码、不下发到本机。
+
+自定义域（如 `sushiro-cloud.ryujo.online`）可选；域名到期时改用 workers.dev 并更新 GitHub OAuth 回调即可。
+
 ## GitHub OAuth App
 
 在 GitHub 创建 OAuth App：

@@ -3,16 +3,20 @@ main = "src/index.js"
 compatibility_date = "2026-06-08"
 workers_dev = true
 
-[[routes]]
-pattern = "sushiro-cloud.ryujo.online"
-custom_domain = true
+# 主入口：https://sushiro-cloud.sushiro-ryujoxys.workers.dev
+# 自定义域 ryujo.online 若到期可去掉下面 routes，不影响 workers.dev。
+# 需要过渡期可暂时保留：
+# [[routes]]
+# pattern = "sushiro-cloud.ryujo.online"
+# custom_domain = true
 
 [vars]
 SESSION_TTL_SECONDS = "2592000"
 # 必填（fail-closed）：留空时 Worker 会拒绝所有 GitHub 登录。
 # 用英文逗号分隔允许的 GitHub login，例如 "alice,bob"。生产请用 secret 覆盖：
 #   npx wrangler secret put ALLOWED_GITHUB_LOGINS
-ALLOWED_GITHUB_LOGINS = ""
+# 允许登录的 GitHub login（逗号分隔）。勿在公开 fork 里写别人的名单时可改回 secret。
+ALLOWED_GITHUB_LOGINS = "Ryujoxys"
 
 [secrets]
 required = [
