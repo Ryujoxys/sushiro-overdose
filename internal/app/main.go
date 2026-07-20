@@ -58,6 +58,7 @@ func printUsage() {
 	fmt.Println("  start          后台静默抢号")
 	fmt.Println("  status         查看运行状态")
 	fmt.Println("  exit           停止后台进程")
+	fmt.Println("  version        打印版本号并退出（-v / --version 同义）")
 	fmt.Println()
 	fmt.Println("预约:")
 	fmt.Println("  calendar       查看近 7 天可预约时段")
@@ -89,6 +90,10 @@ func Run() {
 	}
 	if len(args) == 1 && (args[0] == "diag-bundle" || args[0] == "bundle") {
 		cmdDiagBundle()
+		return
+	}
+	if len(args) == 1 && (args[0] == "version" || args[0] == "-v" || args[0] == "--version") {
+		cmdVersion()
 		return
 	}
 
@@ -143,6 +148,13 @@ func Run() {
 }
 
 // ---- CLI Commands ----
+
+// cmdVersion 只打印版本号就退出，不做任何 IO/目录副作用（排在 MkdirAll 之前）。
+// 用途：排障（"你装的是哪个版本？"）、打包/安装脚本校验产物、CI 里确认 ldflags 注入成功。
+// Version 未通过 ldflags 注入时为 "dev"（源码构建），这本身也是有用的诊断信息。
+func cmdVersion() {
+	fmt.Printf("寿司郎 Overdose v%s\n", Version)
+}
 
 func cmdForeground() {
 	printBanner()

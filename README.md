@@ -101,6 +101,7 @@ sushiro calendar        # 查可预约时段
 sushiro list            # 查当前预约
 sushiro cancel <id>     # 取消预约
 sushiro sample once     # 采集一次排队/时段数据
+sushiro version         # 打印版本号（-v / --version 同义）
 sushiro doctor          # 只读诊断
 sushiro repair-proxy    # 恢复系统代理
 sushiro uninstall       # 清理本地敏感数据和证书
