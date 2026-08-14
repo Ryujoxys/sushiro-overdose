@@ -15,8 +15,9 @@
 
 ```
 每 15 min（营业时段 10-22 点）：
-  stores?（全国压力）+ 每店 getStoreById?（叫号）→ queue_snapshots + store_latest
-每天 02:00：聚合 → store_bucket_rollups（含叫号三档 P20/P50/P80）+ called_intervals_rollups
+  stores?（全国压力）+ 每店 getStoreById?（叫号）
+  → 每店择优一帧写 queue_snapshots + store_latest（详情失败才用列表兜底）
+每天 02:00：分页聚合 → store_bucket_rollups（含叫号三档 P20/P50/P80）+ called_intervals_rollups
 每天 03:00：归档，删 60 天前的原始快照
 ```
 
@@ -122,7 +123,7 @@ journalctl -u collector -f
 |----|------|
 | `store_dimension` | 门店静态信息（116+ 家） |
 | `store_latest` | 每店最新一帧（含叫号） |
-| `queue_snapshots` | 原始逐帧快照（压力+叫号同表，`dq_source` 区分来源） |
+| `queue_snapshots` | 原始逐帧快照（每店每轮一行，`dq_source` 标记详情或列表兜底） |
 | `store_bucket_rollups` | 时段聚合（压力 P50/P80 + **叫号三档** P20/P50/P80）← worker 查它画图 |
 | `daily_store_bucket_rollups` | 按天细分的同结构 |
 | `called_intervals_rollups` | 叫号间隔/吞吐率（预测辅助） |
@@ -131,6 +132,15 @@ journalctl -u collector -f
 
 `store_bucket_rollups` 的表名和列名（含 `called_no_slow/typical/fast`）与桌面端
 Cloudflare Worker 期望完全兼容——**桌面端零改动就能读到新叫号数据**。
+
+## 读写量控制
+
+- 125 家店、每天 48 轮时，新增原始快照约 `125 × 48 = 6000` 行，不再同时写列表帧和详情帧。
+- `store_latest` 每轮更新，用于实时查询；`store_dimension` 仅字段变化或跨日时实际更新。
+- 夜间 30 天聚合按 `id` 分页读取，避免一次返回数十万行导致连接中断后整批重读。
+- rollup UPSERT 只有业务字段变化才更新；逐日表定时任务只刷新最新日期和缺行日期。
+- 聚合/归档成功状态写入 `collector_runs`，进程重启不会重复执行当天维护任务。
+- 每日维护只在 02:00 到营业开始前补跑，白天重启不会用聚合任务阻塞实时采集。
 
 ## 关键算法（移植自主项目 Go 代码，语义 1:1）
 

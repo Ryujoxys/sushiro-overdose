@@ -3,11 +3,8 @@ package app
 import (
 	. "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
-	"bufio"
 	"context"
-	"encoding/json"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -355,26 +352,7 @@ func normalizeQueueDashboardQuery(query QueueDashboardQuery) QueueDashboardQuery
 }
 
 func loadQueueBaselineRecords() []QueueBaselineRecord {
-	f, err := os.Open(queueBaselineRecordsPath())
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	out := []QueueBaselineRecord{}
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var record QueueBaselineRecord
-		if json.Unmarshal([]byte(line), &record) == nil {
-			normalizeQueueBaselineRecordForRead(&record)
-			out = append(out, record)
-		}
-	}
-	return out
+	return queueBaselineReadCache.load(queueBaselineRecordsPath(), normalizeQueueBaselineRecordForRead)
 }
 
 func normalizeQueueBaselineRecordForRead(record *QueueBaselineRecord) {

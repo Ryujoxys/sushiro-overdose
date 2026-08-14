@@ -1,13 +1,10 @@
 """一轮采集：stores?（全国压力）+ 每店 getStoreById?（叫号）→ 写 Turso。
 
 数据流：
-  1. list_stores → 全国门店压力快照（无叫号，写 dq_source='stores_list' 帧）
-  2. 对每店 get_store → 叫号（groupQueues），写 dq_source='store_detail' 帧
-  3. upsert store_latest（取单店帧优先，没有则列表帧；叫号列只单店帧有）
-  4. upsert store_dimension（门店静态信息）
-
-注意：同一家店一轮里会有两帧（列表帧 + 单店帧），这是有意的——列表帧覆盖全国压力，
-单店帧补充叫号。聚合层按 dq_source 区分取样本。
+  1. list_stores → 先生成全国门店压力兜底帧
+  2. 对每店 get_store → 详情成功时用带叫号的单店帧替换兜底帧
+  3. 每店每轮只写一条 queue_snapshots，避免压力与叫号重复占行
+  4. upsert store_latest；store_dimension 仅字段变化或跨日时实际更新
 """
 from __future__ import annotations
 
@@ -20,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import load_config, require_credential
 from .models import Snapshot, StoreInfo
 from .sushiro_client import SushiroClient
-from .turso import TursoClient
+from .turso import TursoClient, as_int
 
 log = logging.getLogger("collector.collect")
 
@@ -83,16 +80,6 @@ def collect_once(
         list_stores = [s for s in list_stores if s.store_id in wanted]
 
     collected_at = _fmt_dt()
-    snapshots: List[Snapshot] = []
-    store_by_id: Dict[int, StoreInfo] = {}
-
-    # 列表帧（无叫号）
-    for s in list_stores:
-        store_by_id[s.store_id] = s
-        snapshots.append(
-            Snapshot.from_store(s, collected_at, dq_source="stores_list", include_called=False)
-        )
-
     detail_ok = 0
     detail_fail = 0
     detail_results: Dict[int, Optional[StoreInfo]] = {}
@@ -112,30 +99,29 @@ def collect_once(
                     detail_fail += 1
                     log.warning("getStoreById %d 失败: %s", sid, e)
 
-        # 单店帧（带叫号）。单店接口可能没返回（关店/找不到）→ 跳过，列表帧已兜底
-        detail_at = _fmt_dt()
-        for sid, detail in detail_results.items():
-            if detail is None:
-                continue
-            # 合并：单店帧可能缺列表帧有的静态字段（如 city），从列表帧补
-            base = store_by_id.get(sid)
-            if base:
-                detail = _merge_store(base, detail)
-                store_by_id[sid] = detail
-            snapshots.append(
-                Snapshot.from_store(detail, detail_at, dq_source="store_detail", include_called=True)
-            )
+    detail_at = _fmt_dt()
+    snapshots, store_by_id = _select_snapshots(
+        list_stores, detail_results, collected_at, detail_at
+    )
 
     # 3 & 4. 写库
     _write_snapshots(turso, snapshots)
-    _upsert_store_latest(turso, list(store_by_id.values()), collected_at)
+    _upsert_store_latest(turso, list(store_by_id.values()), detail_at)
     _upsert_store_dimension(turso, list(store_by_id.values()), collected_at)
+    # 关店退役只在「无门店过滤的完整轮」做：过滤轮里"没见到"是配置使然，不是关店。
+    stores_retired = 0
+    unfiltered = store_id_filter is None and not coll_cfg.get("store_ids")
+    if unfiltered:
+        stores_retired = _retire_missing_stores(
+            turso, [s.store_id for s in list_stores]
+        )
 
     stats = {
         "stores_seen": len(list_stores),
         "snapshots_written": len(snapshots),
         "detail_ok": detail_ok,
         "detail_fail": detail_fail,
+        "stores_retired": stores_retired,
     }
     _record_run(
         turso,
@@ -149,6 +135,35 @@ def collect_once(
     )
     log.info("采集完成 run_id=%s %s", run_id, stats)
     return stats
+
+
+def _select_snapshots(
+    list_stores: List[StoreInfo],
+    detail_results: Dict[int, Optional[StoreInfo]],
+    list_at: str,
+    detail_at: str,
+) -> Tuple[List[Snapshot], Dict[int, StoreInfo]]:
+    """每店只保留一帧：详情成功则替换列表兜底帧。"""
+    store_by_id = {s.store_id: s for s in list_stores}
+    snapshot_by_id = {
+        s.store_id: Snapshot.from_store(
+            s, list_at, dq_source="stores_list", include_called=False
+        )
+        for s in list_stores
+    }
+
+    for sid, detail in detail_results.items():
+        if detail is None:
+            continue
+        base = store_by_id.get(sid)
+        if base:
+            detail = _merge_store(base, detail)
+        store_by_id[sid] = detail
+        snapshot_by_id[sid] = Snapshot.from_store(
+            detail, detail_at, dq_source="store_detail", include_called=True
+        )
+
+    return list(snapshot_by_id.values()), store_by_id
 
 
 def _merge_store(base: StoreInfo, detail: StoreInfo) -> StoreInfo:
@@ -176,7 +191,7 @@ def _write_snapshots(turso: TursoClient, snapshots: List[Snapshot]) -> None:
     if not snapshots:
         return
     sql = """
-    INSERT INTO queue_snapshots
+    INSERT OR IGNORE INTO queue_snapshots
       (collected_at, store_id, wait_minutes, group_queues_count, store_status,
        net_ticket_status, reservation_status, online_open, wait_time_counter,
        wait_time_cap, display_called_no, group_queues_json, dq_source,
@@ -189,7 +204,7 @@ def _write_snapshots(turso: TursoClient, snapshots: List[Snapshot]) -> None:
         batch = snapshots[i : i + BATCH]
         stmts = [(_snapshot_args(s)) for s in batch]
         # execute_many 接受 (sql, params) 但每条 sql 相同 → 用 args 列表形式
-        turso.execute_many([(sql, a) for a in stmts])
+        turso.execute_many([(sql, a) for a in stmts], retry_safe=True)
 
 
 def _snapshot_args(s: Snapshot) -> tuple:
@@ -250,7 +265,7 @@ def _upsert_store_latest(turso: TursoClient, stores: List[StoreInfo], collected_
                 s.wait_time_counter, s.wait_time_cap, called_no, gq_json, updated_at,
             )
         )
-    turso.execute_many([(sql, a) for a in args_list])
+    turso.execute_many([(sql, a) for a in args_list], retry_safe=True)
 
 
 def _upsert_store_dimension(turso: TursoClient, stores: List[StoreInfo], now_iso: str) -> None:
@@ -265,10 +280,25 @@ def _upsert_store_dimension(turso: TursoClient, stores: List[StoreInfo], now_iso
       name=excluded.name, city=excluded.city, area=excluded.area, address=excluded.address,
       latitude=COALESCE(excluded.latitude, store_dimension.latitude),
       longitude=COALESCE(excluded.longitude, store_dimension.longitude),
-      open_date=excluded.open_date,
+      open_date=COALESCE(excluded.open_date, store_dimension.open_date),
       tables_capacity=CASE WHEN excluded.tables_capacity>0 THEN excluded.tables_capacity ELSE store_dimension.tables_capacity END,
       counters_capacity=CASE WHEN excluded.counters_capacity>0 THEN excluded.counters_capacity ELSE store_dimension.counters_capacity END,
       last_seen_at=excluded.last_seen_at, is_active=1
+    WHERE
+      store_dimension.name IS NOT excluded.name
+      OR store_dimension.city IS NOT excluded.city
+      OR store_dimension.area IS NOT excluded.area
+      OR store_dimension.address IS NOT excluded.address
+      OR store_dimension.latitude IS NOT COALESCE(excluded.latitude, store_dimension.latitude)
+      OR store_dimension.longitude IS NOT COALESCE(excluded.longitude, store_dimension.longitude)
+      OR store_dimension.open_date IS NOT COALESCE(excluded.open_date, store_dimension.open_date)
+      OR store_dimension.tables_capacity IS NOT
+         CASE WHEN excluded.tables_capacity>0 THEN excluded.tables_capacity ELSE store_dimension.tables_capacity END
+      OR store_dimension.counters_capacity IS NOT
+         CASE WHEN excluded.counters_capacity>0 THEN excluded.counters_capacity ELSE store_dimension.counters_capacity END
+      OR store_dimension.is_active IS NOT 1
+      OR substr(COALESCE(store_dimension.last_seen_at, ''), 1, 10)
+         IS NOT substr(excluded.last_seen_at, 1, 10)
     """
     args_list = []
     for s in stores:
@@ -279,7 +309,39 @@ def _upsert_store_dimension(turso: TursoClient, stores: List[StoreInfo], now_iso
                 now_iso, now_iso,
             )
         )
-    turso.execute_many([(sql, a) for a in args_list])
+    turso.execute_many([(sql, a) for a in args_list], retry_safe=True)
+
+
+def _retire_missing_stores(turso: TursoClient, seen_ids: List[int]) -> int:
+    """把本轮列表里没见到的门店置 is_active=0（关店/下线）。
+
+    Worker 只导出 is_active=1 的门店；不退役的话，关店后会带着过期的
+    store_latest 永久暴露在导出里。安全护栏：
+    - 列表是完整全国响应（调用方保证无过滤）才可据此判定"没见到=关店"；
+    - 列表数量异常偏小（<30）时跳过——上游截断响应不该触发批量下线；
+    - 门店回归列表时 _upsert_store_dimension 的 is_active=1 分支会自动复活。
+    """
+    if len(seen_ids) < 30:
+        log.info("列表仅 %d 家（疑似截断），跳过关店退役", len(seen_ids))
+        return 0
+    placeholders = ",".join("?" for _ in seen_ids)
+    rows = turso.execute(
+        "SELECT store_id FROM store_dimension "
+        f"WHERE is_active = 1 AND store_id NOT IN ({placeholders})",
+        tuple(seen_ids),
+    )
+    if not rows:
+        return 0
+    retired = [as_int(r.get("store_id")) for r in rows]
+    retire_ph = ",".join("?" for _ in retired)
+    turso.execute(
+        f"UPDATE store_dimension SET is_active = 0 "
+        f"WHERE is_active = 1 AND store_id IN ({retire_ph})",
+        tuple(retired),
+        retry_safe=True,
+    )
+    log.warning("关店退役：%d 家门店置 is_active=0：%s", len(retired), retired)
+    return len(retired)
 
 
 def _record_run(
@@ -310,6 +372,7 @@ def _record_run(
                 run_id, started_at, finished_at, endpoint, stores_seen,
                 records_written, 1 if ok else 0, error_message, "public-profile-v1",
             ),
+            retry_safe=True,
         )
     except Exception as e:
         log.warning("写 collector_runs 失败（不影响采集）: %s", e)

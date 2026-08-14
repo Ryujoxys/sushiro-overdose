@@ -505,3 +505,44 @@ func TestBuildQueueTrendRecommendationsSkipsEmptyPoints(t *testing.T) {
 		t.Fatalf("recommendations len = %d, want 0", len(recommendations))
 	}
 }
+
+func TestQueueSessionBucketNormalizesToSushiroTimezone(t *testing.T) {
+	// 2026-05-16T10:00:00Z 与 18:00 CST 是同一时刻。桶键按 CST 语义定义，
+	// UTC 机器上不能把周六晚餐高峰劈成"周六 10:00"。
+	session := QueueSession{
+		StoreID:  "001",
+		TakenAt:  "2026-05-16T10:00:00Z",
+		TicketNo: 100, DisplayCalledNoAtTake: 80, CalledNoWhenUserCalled: 100,
+		ActualWaitMinutes: 30, PartySize: 2, TableType: "T",
+	}
+	bucket, ok := queueSessionBucket(session)
+	if !ok {
+		t.Fatal("expected bucket to be usable")
+	}
+	if bucket.timeBucket != "18:00" {
+		t.Fatalf("timeBucket = %s, want 18:00 (CST)", bucket.timeBucket)
+	}
+	if bucket.weekday != 6 {
+		t.Fatalf("weekday = %d, want 6 (Saturday in CST)", bucket.weekday)
+	}
+}
+
+func TestQueueTrendWeekendWindowBoundaries(t *testing.T) {
+	cst := SushiroTimezone
+	cases := []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{"周五16:29 仍是工作日节奏", time.Date(2026, 8, 14, 16, 29, 0, 0, cst), false},
+		{"周五16:30 进入周末窗口", time.Date(2026, 8, 14, 16, 30, 0, 0, cst), true},
+		{"周六全天周末", time.Date(2026, 8, 15, 9, 0, 0, 0, cst), true},
+		{"周日21:59 仍周末", time.Date(2026, 8, 16, 21, 59, 0, 0, cst), true},
+		{"周日22:00 回落工作日", time.Date(2026, 8, 16, 22, 0, 0, 0, cst), false},
+	}
+	for _, tc := range cases {
+		if got := queueTrendWeekendWindow(tc.at); got != tc.want {
+			t.Errorf("%s: weekendWindow = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

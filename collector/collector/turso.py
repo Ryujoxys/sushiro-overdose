@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import gzip
+import http.client
 import json
 import logging
 import urllib.error
@@ -61,23 +63,36 @@ class TursoClient:
         # Turso 基于 host 路由，必须显式设 Host 头（从 URL 取）
         # self._url 已是 https://host/v2/pipeline，urllib 默认 Host 正确，无需额外处理。
 
-    def execute(self, sql: str, params: Optional[Sequence[Any]] = None) -> List[Dict[str, Any]]:
+    def execute(
+        self,
+        sql: str,
+        params: Optional[Sequence[Any]] = None,
+        *,
+        retry_safe: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
         """执行单条 SQL，返回 rows（每行 {col: value}）。DDL/INSERT 返回空 list。"""
-        return self.execute_many([(sql, params)])
+        return self.execute_many([(sql, params)], retry_safe=retry_safe)
 
     def execute_many(
-        self, statements: Sequence[tuple]
+        self,
+        statements: Sequence[tuple],
+        *,
+        retry_safe: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """批量执行。statements 是 [(sql, params), ...] 或 [(sql), ...]。
 
         返回最后一条语句的 rows（采集器场景：批量 INSERT 后通常不需要结果）。
+        只读 SQL 默认可重试；写 SQL 默认不重试，避免服务端已提交但客户端丢响应时重复写。
+        调用方确认 SQL 幂等后可显式传 retry_safe=True。
         """
         requests_body = []
+        sql_texts = []
         for stmt in statements:
             if isinstance(stmt, str):
                 sql, params = stmt, None
             else:
                 sql, params = stmt[0], (stmt[1] if len(stmt) > 1 else None)
+            sql_texts.append(sql)
             entry: Dict[str, Any] = {
                 "type": "execute",
                 "stmt": {"sql": sql, "want_rows": True},
@@ -87,12 +102,16 @@ class TursoClient:
             requests_body.append(entry)
 
         body = json.dumps({"requests": requests_body}).encode("utf-8")
+        if retry_safe is None:
+            retry_safe = all(_is_read_only_sql(sql) for sql in sql_texts)
+        attempts = 5 if retry_safe else 1
+
         # Turso 偶发 SSL EOF / 连接重置，指数退避重试缓解（瞬态错误）
         import time as _time
 
         last_exc = None
         raw = None
-        for attempt in range(5):
+        for attempt in range(attempts):
             req = urllib.request.Request(
                 self._url,
                 data=body,
@@ -100,17 +119,21 @@ class TursoClient:
                 headers={
                     "authorization": f"Bearer {self._token}",
                     "content-type": "application/json",
+                    "accept-encoding": "gzip",
                     "x-libsql-client-version": CLIENT_VERSION,
                     "connection": "close",  # 避免复用坏连接
                 },
             )
             try:
                 with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                    raw = resp.read().decode("utf-8")
+                    raw_bytes = resp.read()
+                    if (resp.headers.get("content-encoding") or "").lower() == "gzip":
+                        raw_bytes = gzip.decompress(raw_bytes)
+                    raw = raw_bytes.decode("utf-8")
                 break
             except urllib.error.HTTPError as e:
                 # 5xx 可能是瞬态限流，重试；4xx 是业务错误（含 401），不重试
-                if 500 <= e.code < 600 and attempt < 4:
+                if retry_safe and 500 <= e.code < 600 and attempt < attempts - 1:
                     detail = e.read().decode("utf-8", "replace")[:200]
                     last_exc = TursoError(f"Turso HTTP {e.code}: {detail}")
                     log.debug("Turso %d（attempt %d，重试）", e.code, attempt + 1)
@@ -118,15 +141,26 @@ class TursoClient:
                     continue
                 detail = e.read().decode("utf-8", "replace")[:400]
                 raise TursoError(f"Turso HTTP {e.code}: {detail}") from None
-            except (urllib.error.URLError, OSError) as e:
+            except (
+                urllib.error.URLError,
+                http.client.IncompleteRead,
+                http.client.RemoteDisconnected,
+                OSError,
+            ) as e:
                 last_exc = e
                 wait = 0.5 * (2 ** attempt)  # 0.5, 1, 2, 4, 8 秒
+                if not retry_safe:
+                    raise TursoError(
+                        f"Turso 写请求响应失败，提交状态未知且未自动重试: {e}"
+                    ) from e
                 log.debug("Turso 网络错误（attempt %d，%0.1fs 后重试）: %s", attempt + 1, wait, e)
-                if attempt < 4:
+                if attempt < attempts - 1:
                     _time.sleep(wait)
                 continue
         if raw is None:
-            raise TursoError(f"Turso 网络错误（重试 5 次仍失败）: {last_exc}") from last_exc
+            raise TursoError(
+                f"Turso 网络错误（重试 {attempts} 次仍失败）: {last_exc}"
+            ) from last_exc
 
         try:
             data = json.loads(raw)
@@ -152,6 +186,11 @@ class TursoClient:
         if last_error:
             raise TursoError(last_error)
         return rows_out
+
+
+def _is_read_only_sql(sql: str) -> bool:
+    head = (sql or "").lstrip().upper()
+    return head.startswith(("SELECT", "PRAGMA", "EXPLAIN"))
 
 
 def _encode_args(params: Sequence[Any]) -> List[Dict[str, Any]]:

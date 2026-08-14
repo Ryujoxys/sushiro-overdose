@@ -12,7 +12,10 @@ const REQUIRED_SECRETS = [
 ];
 
 const DATE_TYPES = ["weekday", "workday", "weekend", "holiday"];
-const DEFAULT_BUCKET_MINUTES = 10;
+// collector 的 rollup time_bucket 是 30 分钟粒度（HH:00 / HH:30，见
+// collector/datetype.py）。此值会被桌面端 mergeQueueBaselineExports 用来覆盖
+// 默认桶宽，报错会导致基准曲线桶口径与实际数据错位，必须与 collector 一致。
+const DEFAULT_BUCKET_MINUTES = 30;
 
 export default {
   async fetch(request, env) {

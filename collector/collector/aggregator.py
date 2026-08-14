@@ -26,6 +26,7 @@ from .turso import TursoClient, as_int
 log = logging.getLogger("collector.aggregate")
 
 WRITE_BATCH = 200
+READ_PAGE = 5000
 
 
 def _load_holiday_sets(turso: TursoClient) -> Tuple[set, set]:
@@ -39,26 +40,17 @@ def _load_holiday_sets(turso: TursoClient) -> Tuple[set, set]:
     return holidays, workdays
 
 
-def aggregate_all(turso: TursoClient, days: Optional[int] = None) -> Dict[str, int]:
-    """全量聚合。days=N 只聚合最近 N 天（None=全部）。"""
+def aggregate_all(
+    turso: TursoClient,
+    days: Optional[int] = None,
+    *,
+    incremental_daily: bool = False,
+) -> Dict[str, int]:
+    """聚合快照。days=N 限制窗口；incremental_daily 只刷新最新或缺行日期。"""
     holidays, workdays = _load_holiday_sets(turso)
     log.info("节假日配置：holiday=%d workday=%d", len(holidays), len(workdays))
 
-    where = ""
-    if days:
-        rows = turso.execute("SELECT MAX(collected_at) AS mx FROM queue_snapshots")
-        mx = rows[0].get("mx") if rows else None
-        if mx:
-            cutoff = parse_iso_cst(mx) - timedelta(days=days)
-            where = f"WHERE collected_at >= '{cutoff.strftime('%Y-%m-%dT%H:%M:%S+08:00')}'"
-
-    sql = (
-        f"SELECT collected_at, store_id, wait_minutes, group_queues_count, "
-        f"store_status, net_ticket_status, online_open, wait_time_cap, "
-        f"display_called_no, dq_source, dq_anomaly FROM queue_snapshots {where} "
-        f"ORDER BY store_id, collected_at"
-    )
-    rows = turso.execute(sql)
+    rows = _load_snapshot_rows(turso, days)
     log.info("读入 %d 条快照聚合", len(rows))
 
     parsed = [_parse_row(r) for r in rows]
@@ -67,16 +59,118 @@ def aggregate_all(turso: TursoClient, days: Optional[int] = None) -> Dict[str, i
     rollups = _build_bucket_rollups(parsed, holidays, workdays)
     daily = _build_daily_rollups(parsed, holidays, workdays)
     intervals = _build_called_intervals(parsed, holidays, workdays)
+    daily_to_write = (
+        _select_daily_writes(turso, daily) if incremental_daily else daily
+    )
 
     _write_bucket_rollups(turso, rollups)
-    _write_daily_rollups(turso, daily)
+    _write_daily_rollups(turso, daily_to_write)
     _write_intervals(turso, intervals)
 
     log.info(
-        "✅ 聚合完成：rollups=%d daily=%d intervals=%d",
-        len(rollups), len(daily), len(intervals),
+        "✅ 聚合完成：rollups=%d daily=%d/%d intervals=%d",
+        len(rollups), len(daily_to_write), len(daily), len(intervals),
     )
-    return {"rollups": len(rollups), "daily": len(daily), "intervals": len(intervals)}
+    return {
+        "rollups": len(rollups),
+        "daily": len(daily_to_write),
+        "intervals": len(intervals),
+    }
+
+
+def _load_snapshot_rows(
+    turso: TursoClient, days: Optional[int]
+) -> List[Dict[str, Any]]:
+    """按 id 做 keyset 分页，避免大结果响应中断后整批重读。"""
+    bounds = turso.execute(
+        "SELECT MAX(id) AS max_id, MAX(collected_at) AS mx FROM queue_snapshots"
+    )
+    if not bounds:
+        return []
+    max_id = as_int(bounds[0].get("max_id"))
+    mx = bounds[0].get("mx")
+    if max_id <= 0 or not mx:
+        return []
+
+    cutoff = ""
+    last_id = 0
+    if days:
+        cutoff_dt = parse_iso_cst(mx) - timedelta(days=days)
+        cutoff = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        first = turso.execute(
+            "SELECT MIN(id) AS min_id FROM queue_snapshots WHERE collected_at >= ?",
+            (cutoff,),
+        )
+        min_id = as_int(first[0].get("min_id")) if first else 0
+        if min_id <= 0:
+            return []
+        last_id = min_id - 1
+
+    out: List[Dict[str, Any]] = []
+    pages = 0
+    while last_id < max_id:
+        where = "id > ? AND id <= ?"
+        params: List[Any] = [last_id, max_id]
+        if cutoff:
+            where += " AND collected_at >= ?"
+            params.append(cutoff)
+        params.append(READ_PAGE)
+        page = turso.execute(
+            "SELECT id, collected_at, store_id, wait_minutes, group_queues_count, "
+            "store_status, net_ticket_status, online_open, wait_time_cap, "
+            "display_called_no, dq_source, dq_anomaly "
+            f"FROM queue_snapshots WHERE {where} ORDER BY id LIMIT ?",
+            tuple(params),
+        )
+        if not page:
+            break
+        out.extend(page)
+        next_id = as_int(page[-1].get("id"))
+        if next_id <= last_id:
+            raise RuntimeError("queue_snapshots 分页游标未前进")
+        last_id = next_id
+        pages += 1
+        if pages % 20 == 0:
+            log.info("聚合分页读取：%d 条", len(out))
+        if len(page) < READ_PAGE:
+            break
+    return out
+
+
+def _select_daily_writes(turso: TursoClient, daily: List[dict]) -> List[dict]:
+    """历史日不重写；最新日和库中缺行的日期需要刷新。"""
+    if not daily:
+        return []
+    expected: Dict[str, int] = defaultdict(int)
+    for row in daily:
+        expected[row["snapshot_date"]] += 1
+    min_date = min(expected)
+    max_date = max(expected)
+    existing_rows = turso.execute(
+        "SELECT snapshot_date, COUNT(*) AS c "
+        "FROM daily_store_bucket_rollups "
+        "WHERE snapshot_date >= ? AND snapshot_date <= ? "
+        "GROUP BY snapshot_date",
+        (min_date, max_date),
+    )
+    existing = {
+        str(row.get("snapshot_date")): as_int(row.get("c"))
+        for row in existing_rows
+    }
+    refresh_dates = {
+        date_key
+        for date_key, count in expected.items()
+        if date_key == max_date or existing.get(date_key, 0) != count
+    }
+    selected = [row for row in daily if row["snapshot_date"] in refresh_dates]
+    log.info(
+        "daily 增量写入：刷新 %d/%d 天、%d/%d 行",
+        len(refresh_dates),
+        len(expected),
+        len(selected),
+        len(daily),
+    )
+    return selected
 
 
 # 寿司郎 wait_time_cap 恒为 180（系统硬封顶），wait 超过它就是接口异常脏数据。
@@ -141,7 +235,7 @@ def _build_bucket_rollups(
         grouped[(store_id, date_type, weekday, bucket)].append(p)
 
     out: List[dict] = []
-    now_iso = parsed[-1]["dt"].isoformat() if parsed else ""
+    now_iso = max(p["dt"] for p in parsed).isoformat() if parsed else ""
     updated_at = (now_iso or "")[:19] + "+08:00" if now_iso else ""
     for (store_id, date_type, weekday, bucket), frames in grouped.items():
         n = len(frames)
@@ -316,6 +410,22 @@ def _write_bucket_rollups(turso: TursoClient, rollups: List[dict]) -> None:
       called_no_fast=excluded.called_no_fast,
       dq_anomaly_rate=excluded.dq_anomaly_rate,
       confidence=excluded.confidence, updated_at=excluded.updated_at
+    WHERE
+      store_bucket_rollups.sample_count IS NOT excluded.sample_count
+      OR store_bucket_rollups.open_rate IS NOT excluded.open_rate
+      OR store_bucket_rollups.online_open_rate IS NOT excluded.online_open_rate
+      OR store_bucket_rollups.busy_rate IS NOT excluded.busy_rate
+      OR store_bucket_rollups.wait_typical_minutes IS NOT excluded.wait_typical_minutes
+      OR store_bucket_rollups.wait_safe_minutes IS NOT excluded.wait_safe_minutes
+      OR store_bucket_rollups.wait_max_minutes IS NOT excluded.wait_max_minutes
+      OR store_bucket_rollups.queue_groups_typical IS NOT excluded.queue_groups_typical
+      OR store_bucket_rollups.queue_groups_safe IS NOT excluded.queue_groups_safe
+      OR store_bucket_rollups.called_sample_count IS NOT excluded.called_sample_count
+      OR store_bucket_rollups.called_no_slow IS NOT excluded.called_no_slow
+      OR store_bucket_rollups.called_no_typical IS NOT excluded.called_no_typical
+      OR store_bucket_rollups.called_no_fast IS NOT excluded.called_no_fast
+      OR store_bucket_rollups.dq_anomaly_rate IS NOT excluded.dq_anomaly_rate
+      OR store_bucket_rollups.confidence IS NOT excluded.confidence
     """
     args = [
         (
@@ -345,10 +455,42 @@ def _write_daily_rollups(turso: TursoClient, daily: List[dict]) -> None:
        confidence, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(snapshot_date, store_id, time_bucket) DO UPDATE SET
-      busy_rate=excluded.busy_rate, wait_typical_minutes=excluded.wait_typical_minutes,
+      date_type=excluded.date_type, weekday=excluded.weekday,
+      sample_count=excluded.sample_count, open_count=excluded.open_count,
+      online_open_count=excluded.online_open_count, busy_count=excluded.busy_count,
+      open_rate=excluded.open_rate, online_open_rate=excluded.online_open_rate,
+      busy_rate=excluded.busy_rate,
+      wait_typical_minutes=excluded.wait_typical_minutes,
+      wait_safe_minutes=excluded.wait_safe_minutes,
+      wait_max_minutes=excluded.wait_max_minutes,
       queue_groups_typical=excluded.queue_groups_typical,
-      called_no_typical=excluded.called_no_typical, confidence=excluded.confidence,
+      queue_groups_safe=excluded.queue_groups_safe,
+      called_sample_count=excluded.called_sample_count,
+      called_no_slow=excluded.called_no_slow,
+      called_no_typical=excluded.called_no_typical,
+      called_no_fast=excluded.called_no_fast,
+      confidence=excluded.confidence,
       updated_at=excluded.updated_at
+    WHERE
+      daily_store_bucket_rollups.date_type IS NOT excluded.date_type
+      OR daily_store_bucket_rollups.weekday IS NOT excluded.weekday
+      OR daily_store_bucket_rollups.sample_count IS NOT excluded.sample_count
+      OR daily_store_bucket_rollups.open_count IS NOT excluded.open_count
+      OR daily_store_bucket_rollups.online_open_count IS NOT excluded.online_open_count
+      OR daily_store_bucket_rollups.busy_count IS NOT excluded.busy_count
+      OR daily_store_bucket_rollups.open_rate IS NOT excluded.open_rate
+      OR daily_store_bucket_rollups.online_open_rate IS NOT excluded.online_open_rate
+      OR daily_store_bucket_rollups.busy_rate IS NOT excluded.busy_rate
+      OR daily_store_bucket_rollups.wait_typical_minutes IS NOT excluded.wait_typical_minutes
+      OR daily_store_bucket_rollups.wait_safe_minutes IS NOT excluded.wait_safe_minutes
+      OR daily_store_bucket_rollups.wait_max_minutes IS NOT excluded.wait_max_minutes
+      OR daily_store_bucket_rollups.queue_groups_typical IS NOT excluded.queue_groups_typical
+      OR daily_store_bucket_rollups.queue_groups_safe IS NOT excluded.queue_groups_safe
+      OR daily_store_bucket_rollups.called_sample_count IS NOT excluded.called_sample_count
+      OR daily_store_bucket_rollups.called_no_slow IS NOT excluded.called_no_slow
+      OR daily_store_bucket_rollups.called_no_typical IS NOT excluded.called_no_typical
+      OR daily_store_bucket_rollups.called_no_fast IS NOT excluded.called_no_fast
+      OR daily_store_bucket_rollups.confidence IS NOT excluded.confidence
     """
     args = [
         (
@@ -385,9 +527,14 @@ def _write_intervals(turso: TursoClient, intervals: List[dict]) -> None:
       delta_typical=excluded.delta_typical,
       throughput_per_hour=excluded.throughput_per_hour,
       capacity_utilization=excluded.capacity_utilization, updated_at=excluded.updated_at
+    WHERE
+      called_intervals_rollups.pair_count IS NOT excluded.pair_count
+      OR called_intervals_rollups.interval_typical_seconds IS NOT excluded.interval_typical_seconds
+      OR called_intervals_rollups.delta_typical IS NOT excluded.delta_typical
+      OR called_intervals_rollups.throughput_per_hour IS NOT excluded.throughput_per_hour
+      OR called_intervals_rollups.capacity_utilization IS NOT excluded.capacity_utilization
     """
     args = []
-    now_iso = intervals[0].get("updated_at") or ""
     from .collector import _fmt_dt
     updated = _fmt_dt()
     for it in intervals:
@@ -406,4 +553,4 @@ def _write_intervals(turso: TursoClient, intervals: List[dict]) -> None:
 def _batch_write(turso: TursoClient, sql: str, args: List[tuple]) -> None:
     for i in range(0, len(args), WRITE_BATCH):
         batch = args[i : i + WRITE_BATCH]
-        turso.execute_many([(sql, a) for a in batch])
+        turso.execute_many([(sql, a) for a in batch], retry_safe=True)

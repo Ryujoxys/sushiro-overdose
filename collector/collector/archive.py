@@ -1,6 +1,6 @@
 """归档：删除超过保留期的原始 queue_snapshots（已聚合进 rollups）。
 
-原始快照会无限增长（每 15min × 118 店 ≈ 每天约 11000 行），必须定期裁剪。
+原始快照会持续增长（每 15min × 125 店 ≈ 每天约 6000 行），必须定期裁剪。
 保留期默认 60 天，足够聚合统计 + 回溯近期异常。更老的靠 daily_store_bucket_rollups。
 """
 from __future__ import annotations
@@ -29,19 +29,29 @@ def archive_old(turso: TursoClient, retention_days: int = 60) -> Dict[str, int]:
     cutoff_dt = parse_iso_cst(mx) - timedelta(days=retention_days)
     cutoff = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
-    # 先统计要删多少
-    cnt_rows = turso.execute(
-        "SELECT COUNT(*) AS c FROM queue_snapshots WHERE collected_at < ?", (cutoff,)
+    # 先走 collected_at 索引看最早一帧；保留期内无旧数据时不做全表 COUNT。
+    min_rows = turso.execute(
+        "SELECT MIN(collected_at) AS mn FROM queue_snapshots"
     )
-    to_delete = as_int(cnt_rows[0].get("c")) if cnt_rows else 0
+    mn = min_rows[0].get("mn") if min_rows else None
+    to_delete = 0
+    if mn and mn < cutoff:
+        cnt_rows = turso.execute(
+            "SELECT COUNT(*) AS c FROM queue_snapshots WHERE collected_at < ?",
+            (cutoff,),
+        )
+        to_delete = as_int(cnt_rows[0].get("c")) if cnt_rows else 0
 
-    # 删除（分批避免单次过大事务；这里直接删，量级可控）
-    turso.execute("DELETE FROM queue_snapshots WHERE collected_at < ?", (cutoff,))
+    if to_delete:
+        turso.execute(
+            "DELETE FROM queue_snapshots WHERE collected_at < ?",
+            (cutoff,),
+            retry_safe=True,
+        )
+    # 精确剩余量只用于日志，却需要扫描整张原始表；-1 表示本轮主动跳过该昂贵计数。
+    remaining = -1
 
-    remain_rows = turso.execute("SELECT COUNT(*) AS c FROM queue_snapshots")
-    remaining = as_int(remain_rows[0].get("c")) if remain_rows else 0
-
-    log.info("归档：删除 %d 行（< %s），剩余 %d 行", to_delete, cutoff, remaining)
+    log.info("归档：删除 %d 行（< %s），剩余量未全表计数", to_delete, cutoff)
 
     # 写归档日志
     _record_archive(turso, to_delete, remaining, retention_days, cutoff)
@@ -57,7 +67,10 @@ def _record_archive(
       (archive_date, snapshots, rollups_written, global_rollups,
        raw_deleted, raw_remaining, retention_days, prune_before, ok,
        error_message, created_at, updated_at)
-    VALUES (?, ?, 0, 0, ?, ?, ?, ?, 1, '', ?, ?)
+    SELECT ?, ?, 0, 0, ?, ?, ?, ?, 1, '', ?, ?
+    WHERE NOT EXISTS (
+      SELECT 1 FROM archive_runs WHERE archive_date = ?
+    )
     """
     from datetime import datetime
     try:
@@ -65,8 +78,9 @@ def _record_archive(
             sql,
             (
                 now[:10], deleted, deleted, remaining, retention, cutoff,
-                now, now,
+                now, now, now[:10],
             ),
+            retry_safe=True,
         )
     except Exception as e:
         log.warning("写 archive_runs 失败（不影响归档）: %s", e)

@@ -164,8 +164,61 @@ func refreshNetTicketRoutineLocked(now time.Time) NetTicketRoutineResponse {
 	if routineSkipRefresh(routine, now, today) {
 		return NetTicketRoutineResponse{Routine: routine, Plan: plan}
 	}
+	// 快路径：今天的取号窗口已经推算过且仍未终结（armed/needs_notify）——窗口结论
+	// 不随 tick 变化，不需要每 20s 重跑 buildQueueMealPlan（它要读全量趋势文件、
+	// 可能打远端基准，秒级耗时），既浪费请求又拉长 netTicketMu 持锁时间，
+	// 把用户手动取号/改计划卡在后面。armed 只需判断是否到提醒时刻。
+	if routine.PlannedDate == today {
+		if advanced, ok := advanceRoutineArmedToday(routine, now, today); ok {
+			return NetTicketRoutineResponse{Routine: advanced, Plan: plan}
+		}
+		// needs_notify 且通知渠道仍未配置：结论不变，跳过重算。
+		// 配置渠道是用户操作，配好后下一个 tick 会重新推算。
+		if routine.Status == netTicketRoutineStatusNeedsNotify && !routineNotifyConfigured() {
+			return NetTicketRoutineResponse{Routine: routine, Plan: plan}
+		}
+	}
 	routine, plan = planNetTicketRoutineReminderForTodayLocked(routine, plan, now)
 	return NetTicketRoutineResponse{Routine: routine, Plan: plan}
+}
+
+// advanceRoutineArmedToday 是 armed 状态的 tick 快路径：今天的取号窗口已经落盘在
+// routine 字段里（PlannedPickupTime / PlannedPickupEndTime / NotifyBeforeMinutes），
+// 只用这些已存的结论推进状态机，不重跑 buildQueueMealPlan。
+// 返回 ok=false 表示快路径不适用（状态不是 armed，或存的窗口解析不了），调用方走慢路径重算。
+func advanceRoutineArmedToday(routine NetTicketRoutine, now time.Time, today string) (NetTicketRoutine, bool) {
+	if routine.Status != netTicketRoutineStatusArmed || strings.TrimSpace(routine.PlannedPickupTime) == "" {
+		return routine, false
+	}
+	start, ok := parseHHMM(routine.PlannedPickupTime, now)
+	if !ok {
+		return routine, false
+	}
+	end, ok := parseHHMM(DefaultString(routine.PlannedPickupEndTime, routine.PlannedPickupTime), now)
+	if !ok || end.Before(start) {
+		end = start
+	}
+	// 判定顺序与 planNetTicketRoutineReminderForTodayLocked 保持一致：
+	// 过窗口末端 → missed；到提醒时刻 → 发提醒并置 notified；否则保持 armed。
+	if now.After(end) {
+		routine.Status = netTicketRoutineStatusMissed
+		routine.LastError = "今天推算出的取号提醒窗口已过，Routine 明天再提醒。"
+		routine.LastPlannedAt = now.Format(time.RFC3339)
+		_ = SaveNetTicketRoutine(routine)
+		return routine, true
+	}
+	reminderAt := start.Add(-time.Duration(routine.NotifyBeforeMinutes) * time.Minute)
+	if !now.Before(reminderAt) {
+		sendRoutineTakeTicketReminder(context.Background(), routine)
+		routine.LastReminderDate = today
+		routine.Status = netTicketRoutineStatusNotified
+		routine.LastError = ""
+		routine.LastPlannedAt = now.Format(time.RFC3339)
+		_ = SaveNetTicketRoutine(routine)
+		return routine, true
+	}
+	// 未到提醒时刻：状态无变化，不落盘（armed 每 tick 都进来，重复写盘没有意义）。
+	return routine, true
 }
 
 // planNetTicketRoutineReminderForTodayLocked 推算今天的取号提醒计划，并按当前时刻决定状态机的下一个状态。

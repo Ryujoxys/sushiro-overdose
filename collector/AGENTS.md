@@ -90,7 +90,7 @@ venv/bin/python -m collector.main migrate-old
 venv/bin/python -m collector.main run-once
 ```
 
-**验证**：输出 `{'stores_seen': 1xx, 'snapshots_written': 2xx, 'detail_ok': 1xx, ...}`。营业时段（10-22 点）`detail_ok` 应接近门店数；非营业时段门店关闭、叫号为 0 属正常。
+**验证**：输出 `{'stores_seen': 1xx, 'snapshots_written': 1xx, 'detail_ok': 1xx, ...}`。每店每轮只落一帧；营业时段（10-22 点）`detail_ok` 应接近门店数，详情失败时由列表帧兜底。
 
 ### 9.（可选）立即聚合一次
 
@@ -170,9 +170,9 @@ sudo systemctl enable --now collector
 
 ## 关键设计（LLM 理解上下文用）
 
-- **叫号 vs 压力同表分层**：`queue_snapshots` 用 `dq_source`（`stores_list` / `store_detail`）+ `display_called_no IS NULL` 区分"没取叫号"vs"取了无堂食叫号"。
+- **每店每轮一帧**：详情成功写 `store_detail`，失败才写 `stores_list` 兜底；历史存量仍可能同时存在两种来源。
 - **为什么调两个接口**：`stores?`（批量，全国压力，无叫号）+ `getStoreById?`（单店，叫号 groupQueues）。旧库只调前者所以零叫号。
-- **聚合只读 30 天**：`aggregate_all(days=30)`，读量恒定不随历史爆炸。
+- **聚合只读 30 天**：按 `id` 分页读取，daily 定时任务只写最新/缺行日期，避免超大响应和历史行重写。
 - **脏数据过滤**：wait>180（cap）/groups>200 丢弃（接口异常值）。
 - **schema 兼容桌面端**：表名/列名（含 `called_no_slow/typical/fast`）与桌面端 Cloudflare Worker 一致，桌面端零改动读新库。
 

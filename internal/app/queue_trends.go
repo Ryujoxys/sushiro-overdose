@@ -287,6 +287,12 @@ func appendQueueObservation(observation QueueObservation) error {
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		return err
 	}
+	// 周期性裁剪：每 queueJSONLTrimInterval 次追加检查一次行数上限，
+	// 防止长期运行无限膨胀拖慢所有 loader。
+	queueObservationWriteCounter++
+	if queueObservationWriteCounter%queueJSONLTrimInterval == 0 {
+		trimJSONLFileLocked(queueObservationPath(), queueObservationMaxLines, time.Now())
+	}
 	// 叫号推进了 → 回填可能已被叫到的开放预测，积累「预测 vs 实际」回测样本。
 	// 放在写盘成功之后、best-effort：失败不影响观测写入。
 	if observation.DisplayCalledNo > 0 {
@@ -464,7 +470,14 @@ func BuildQueueTrendsWithContext(ctx context.Context, query QueueTrendQuery, now
 
 	for _, session := range sessions {
 		takenAt, ok := parseRFC3339Local(session.TakenAt)
-		if !ok || !queueTrendMatches(query, takenAt, storeFilter, session.StoreID, holidays, workdays) {
+		if !ok {
+			continue
+		}
+		// 归一化到寿司郎门店时区（UTC+8）再切日期/日型/桶：桶键按 CST 营业时间定义，
+		// 机器本地时区不同（如 UTC 容器）会把同一时刻劈到不同日期桶。与下方叫号推进
+		// 第二遍、queue_advisor.go buildLocalQueuePressureCurvePoints 的做法保持一致。
+		takenAt = takenAt.In(SushiroTimezone)
+		if !queueTrendMatches(query, takenAt, storeFilter, session.StoreID, holidays, workdays) {
 			continue
 		}
 		updateLatest(&summary.LastSessionAt, takenAt)
@@ -622,7 +635,12 @@ func addQueueObservationsToTrend(series map[string]*queueTrendAccumulator, summa
 		})
 		for _, observation := range storeObservations {
 			at, ok := parseRFC3339Local(queueObservationCollectedAt(observation))
-			if !ok || !queueTrendMatches(query, at, storeFilter, storeID, holidays, workdays) {
+			if !ok {
+				continue
+			}
+			// 同 session 循环：先归一到 CST 再匹配/分桶，等待样本和叫号推进才落在同一桶。
+			at = at.In(SushiroTimezone)
+			if !queueTrendMatches(query, at, storeFilter, storeID, holidays, workdays) {
 				continue
 			}
 			if observation.WaitMinutes > 0 {
@@ -1187,6 +1205,8 @@ func queueSessionBucket(session QueueSession) (queueLocalBucket, bool) {
 	if !ok {
 		return queueLocalBucket{}, false
 	}
+	// weekday/半小时桶按 CST 语义定义，先归一（同 BuildQueueTrendsWithContext）。
+	takenAt = takenAt.In(SushiroTimezone)
 	if _, ok := queueSessionWaitMinutes(session); !ok && !session.ExpiredOrMissed {
 		return queueLocalBucket{}, false
 	}
@@ -1251,26 +1271,7 @@ func loadQueueSessions() []QueueSession {
 }
 
 func loadQueueObservations() []QueueObservation {
-	f, err := os.Open(queueObservationPath())
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	out := []QueueObservation{}
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var observation QueueObservation
-		if json.Unmarshal([]byte(line), &observation) == nil {
-			normalizeQueueObservationForRead(&observation)
-			out = append(out, observation)
-		}
-	}
-	return out
+	return queueObservationsReadCache.load(queueObservationPath(), normalizeQueueObservationForRead)
 }
 
 func loadQueueHolidayDates() (map[string]bool, map[string]bool, bool) {

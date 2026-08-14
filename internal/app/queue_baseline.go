@@ -369,6 +369,11 @@ func appendQueueBaselineRecords(records []QueueBaselineRecord) error {
 			return err
 		}
 	}
+	// 周期性裁剪：基准采集每店每 5 分钟追加一批，需要与 observations 同样的行数上限。
+	queueBaselineWriteCounter++
+	if queueBaselineWriteCounter%queueJSONLTrimInterval == 0 {
+		trimJSONLFileLocked(queueBaselineRecordsPath(), queueBaselineMaxLines, time.Now())
+	}
 	return nil
 }
 

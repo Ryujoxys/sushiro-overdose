@@ -389,3 +389,94 @@ func appendRoutineHistoryForTest(t *testing.T, observedAt time.Time) {
 		t.Fatalf("appendQueueObservation() error = %v", err)
 	}
 }
+
+func TestAdvanceRoutineArmedTodayStaysArmedBeforeReminder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cst := SushiroTimezone
+	routine := NetTicketRoutine{
+		Status: netTicketRoutineStatusArmed, PlannedDate: "2026-06-09",
+		PlannedPickupTime: "12:00", PlannedPickupEndTime: "12:30",
+		NotifyBeforeMinutes: 10,
+	}
+	// 11:00 < 提醒时刻 11:50：保持 armed，且不写盘改状态。
+	advanced, ok := advanceRoutineArmedToday(routine, time.Date(2026, 6, 9, 11, 0, 0, 0, cst), "2026-06-09")
+	if !ok || advanced.Status != netTicketRoutineStatusArmed || advanced.LastReminderDate != "" {
+		t.Fatalf("advance = %+v ok=%v, want armed/未提醒", advanced, ok)
+	}
+}
+
+func TestAdvanceRoutineArmedTodayNotifiesAtReminderTime(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	saveRoutineNotifyForTest(t)
+	cst := SushiroTimezone
+	routine := NetTicketRoutine{
+		Status: netTicketRoutineStatusArmed, PlannedDate: "2026-06-09",
+		PlannedPickupTime: "12:00", PlannedPickupEndTime: "12:30",
+		NotifyBeforeMinutes: 10,
+	}
+	// 11:55 已过提醒时刻 11:50、未过窗口末端：发提醒并置 notified。
+	advanced, ok := advanceRoutineArmedToday(routine, time.Date(2026, 6, 9, 11, 55, 0, 0, cst), "2026-06-09")
+	if !ok || advanced.Status != netTicketRoutineStatusNotified || advanced.LastReminderDate != "2026-06-09" {
+		t.Fatalf("advance = %+v ok=%v, want notified/已记提醒日期", advanced, ok)
+	}
+}
+
+func TestAdvanceRoutineArmedTodayMissesPastWindowEnd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cst := SushiroTimezone
+	routine := NetTicketRoutine{
+		Status: netTicketRoutineStatusArmed, PlannedDate: "2026-06-09",
+		PlannedPickupTime: "12:00", PlannedPickupEndTime: "12:30",
+		NotifyBeforeMinutes: 10,
+	}
+	// 12:31 已过窗口末端：置 missed，不再补发提醒。
+	advanced, ok := advanceRoutineArmedToday(routine, time.Date(2026, 6, 9, 12, 31, 0, 0, cst), "2026-06-09")
+	if !ok || advanced.Status != netTicketRoutineStatusMissed || advanced.LastReminderDate != "" {
+		t.Fatalf("advance = %+v ok=%v, want missed/未发提醒", advanced, ok)
+	}
+}
+
+func TestAdvanceRoutineArmedTodayFallsBackForNonArmed(t *testing.T) {
+	// 非 armed / 窗口缺失：快路径不适用（ok=false），由调用方走慢路径重算。
+	for _, routine := range []NetTicketRoutine{
+		{Status: netTicketRoutineStatusIdle, PlannedDate: "2026-06-09", PlannedPickupTime: "12:00"},
+		{Status: netTicketRoutineStatusArmed, PlannedDate: "2026-06-09", PlannedPickupTime: ""},
+		{Status: netTicketRoutineStatusArmed, PlannedDate: "2026-06-09", PlannedPickupTime: "垃圾"},
+	} {
+		if _, ok := advanceRoutineArmedToday(routine, time.Date(2026, 6, 9, 9, 0, 0, 0, SushiroTimezone), "2026-06-09"); ok {
+			t.Fatalf("routine %+v 不应走快路径", routine)
+		}
+	}
+}
+
+func TestRefreshNetTicketRoutineArmedTickUsesStoredWindow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	saveRoutineNotifyForTest(t)
+	cst := SushiroTimezone
+	now := time.Date(2026, 6, 9, 11, 0, 0, 0, cst)
+	// 已推算过的 armed Routine 落盘（无历史观测样本也成立——快路径不得依赖重算）。
+	if err := SaveNetTicketRoutine(NetTicketRoutine{
+		Enabled: true, StoreID: "9999", TargetMealTime: "1300",
+		Status: netTicketRoutineStatusArmed, PlannedDate: "2026-06-09",
+		PlannedPickupTime: "12:00", PlannedPickupEndTime: "12:30",
+		ReminderTime: "11:50", NotifyBeforeMinutes: 10,
+		LastPlannedAt: now.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp := refreshNetTicketRoutineLocked(now)
+	if resp.Routine.Status != netTicketRoutineStatusArmed {
+		t.Fatalf("status = %q, want armed（快路径只判时刻，不该重算）; err=%q", resp.Routine.Status, resp.Routine.LastError)
+	}
+	if resp.Routine.PlannedPickupTime != "12:00" {
+		t.Fatalf("planned pickup = %q, want 保留已存窗口 12:00", resp.Routine.PlannedPickupTime)
+	}
+}
