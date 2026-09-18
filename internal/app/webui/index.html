@@ -74,9 +74,10 @@
   <section id="page-settings" aria-labelledby="settings-title" hidden>
     <div class="page-heading"><div><h1 id="settings-title">设置</h1><p id="version"></p></div></div>
     <div class="settings-grid">
-      <section class="card"><h2>数据在本机</h2><p class="muted">不需要 GitHub 登录，不连接共享数据库。</p><code id="data-path">正在读取…</code><a class="button secondary" href="/api/records/export?days=365">导出近一年记录</a><p class="caption">导出自己的公开门店快照，不含内置历史、账号凭证或个人号码。</p></section>
+      <section class="card"><h2>数据在本机</h2><p class="muted">记录保存在这台电脑，随时可以导出。</p><code id="data-path">正在读取…</code><a class="button secondary" href="/api/records/export?days=365">导出近一年记录</a><p class="caption">只导出自己的门店记录，不含内置历史和账号凭证。</p></section>
       <section class="card"><h2>手动取号账号</h2><p id="account-state" class="muted">还未读取</p><div class="actions"><button class="button secondary" data-action="connect-account">连接账号</button><button class="button quiet" data-action="reset-account">断开账号</button></div><p class="caption">只记录数据，不需要连接账号。</p></section>
       <section class="card"><h2>遇到问题</h2><div class="actions"><button class="button secondary" data-action="repair-proxy">恢复系统代理</button><a class="button secondary" href="/api/diagnostics/bundle">导出诊断包</a></div><p class="caption">恢复代理不会删除记录。</p></section>
+      <details class="card license-card"><summary>开源许可</summary><pre>{{OPEN_SOURCE_NOTICES}}</pre></details>
     </div>
   </section>
 </main>

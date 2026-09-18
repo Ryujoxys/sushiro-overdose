@@ -4,6 +4,13 @@ import vm from 'node:vm';
 
 const root=new URL('../internal/app/webui/',import.meta.url);
 const source=fs.readFileSync(new URL('app.js',root),'utf8')+'\n'+fs.readFileSync(new URL('record_chart.js',root),'utf8')+'\n'+fs.readFileSync(new URL('auth_ticket.js',root),'utf8');
+{
+  const bindings={app:{DesktopBridge:{}}};
+  const browserGlobal=vm.createContext({go:bindings});
+  browserGlobal.window=browserGlobal;
+  vm.runInContext(source,browserGlobal);
+  assert.equal(browserGlobal.go,bindings,'page globals overwrote native Go bindings');
+}
 function fixture() {
   const nodes=new Map(),calls=[];
   function node(id) {
@@ -132,4 +139,23 @@ function fixture() {
  await f.run('reviewTicket()');await f.run('confirmTicket()');await f.run('loadLive()');
  assert.equal(f.node('take-ticket').disabled,true,'live refresh allowed resubmission of uncertain ticket');
 }
-console.log('Web UI behavior: passed (read-only entry, explicit auth, one-shot ticket, unknown result, stale search, auth cleanup).');
+{
+ const f=fixture(),calls=[];
+ f.ctx.window.go={app:{DesktopBridge:{Request:async(...args)=>{calls.push(args);return {status:200,body:'{"ok":true}'};}}}};
+ assert.equal((await f.run("api('/api/records/settings',{include_history:false},{timeout:20000})")).ok,true);
+ assert.deepEqual(calls,[['POST','/api/records/settings','{"include_history":false}',20000]]);
+ assert.equal(f.calls.length,0,'native request fell through to browser fetch');
+ f.ctx.window.go.app.DesktopBridge.Request=async()=>({status:409,body:'{"error":"请先查询已有号码"}'});
+ await assert.rejects(()=>f.run("api('/api/queue/ticket',{})"),e=>e.status===409&&e.message==='请先查询已有号码');
+ f.ctx.window.go.app.DesktopBridge.Request=async()=>{throw '本地服务未连接';};
+ await assert.rejects(()=>f.run("api('/api/status')"),/本地服务未连接/);
+}
+{
+ const f=fixture();let prevented=false,saved=0;
+ f.ctx.window.go={app:{DesktopBridge:{Export:async resource=>{assert.equal(resource,'/api/records/export?days=all');saved++;return false;}}}};
+ f.ctx.downloadEvent={target:{closest:()=>({getAttribute:()=>'/api/records/export?days=all'})},preventDefault(){prevented=true;}};
+ f.run('handleDesktopDownload(downloadEvent)');
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(prevented,true);assert.equal(saved,1);assert.equal(f.node('toast').textContent,'','cancelled export reported success');
+}
+console.log('Web UI behavior: passed (browser/native API, native export, explicit auth, one-shot ticket, unknown result, stale search, auth cleanup).');

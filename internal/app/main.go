@@ -51,7 +51,8 @@ func printBanner() {
 
 func printUsage() {
 	fmt.Println("用法: sushiro [命令]")
-	fmt.Println("  web            打开本地界面（默认）")
+	fmt.Println("  无参数         打开应用窗口（桌面版）或本地界面")
+	fmt.Println("  web            使用浏览器打开本地界面")
 	fmt.Println("  collect        排队记录服务（status|start|stop|run|autostart）")
 	fmt.Println("  status         查看记录状态")
 	fmt.Println("  doctor         只读诊断")
@@ -90,12 +91,18 @@ func Run() {
 		cmdCollect(args[1:])
 		return
 	}
+	if len(args) == 0 {
+		cmdDesktop()
+		return
+	}
+	if len(args) == 1 && args[0] == "web" {
+		cmdWeb()
+		return
+	}
 	os.MkdirAll(AppDirPath(), 0o755)
 	MigrateOldConfig()
 
-	if len(args) == 0 || (len(args) == 1 && args[0] == "web") {
-		cmdWeb()
-	} else if len(args) == 1 && (args[0] == "cli" || args[0] == "run" || args[0] == "-f" || args[0] == "--foreground") {
+	if len(args) == 1 && (args[0] == "cli" || args[0] == "run" || args[0] == "-f" || args[0] == "--foreground") {
 		cmdForeground()
 	} else if len(args) == 1 && (args[0] == "start" || args[0] == "-d" || args[0] == "--daemon") {
 		fmt.Println(retiredAutomationMessage)

@@ -1,6 +1,25 @@
 # sushiro-overdose 架构分层
 
-项目零外部依赖（纯 Go 标准库），单二进制发布。代码按职责拆分到 `internal/` 下的若干包，根目录只保留 `main.go` 作为入口。
+业务核心使用 Go 标准库，原生桌面适配层使用固定版本 Wails v2。页面和历史包编译内嵌，用户无需安装 Node.js 或数据库。代码按职责拆分到 `internal/`，根目录只保留 `main.go` 入口。
+
+## 桌面与服务
+
+```text
+原生窗口（macOS WebKit / Windows WebView2）
+  -> DesktopBridge：受限 API、系统保存框
+  -> 回环 HTTP 服务：既有 handler + Host / Origin / CSRF 防护
+  -> Go 业务逻辑、个人 JSONL、固定离线历史包
+
+独立采集子进程 -> 公开接口 -> 个人 JSONL / 本机模型
+```
+
+`desktop_native.go` 仅在 `desktop` 构建标签和 macOS/Windows 下编译。`desktop_browser.go` 保留 CLI/浏览器版本；显式 `web` 命令始终使用浏览器。DMG 和双击 EXE 是原生版，压缩包是 CLI/浏览器版。
+
+`desktop_instance.go` 在初始化前获取 OS 文件锁。同一数据目录的重复启动只通过随机令牌唤起已有窗口，不迁移凭证、不清理代理、不再启动采集。`desktop_session.json` 权限为 0600，退出删除；锁文件保留，进程退出自动释放 OS 锁。Windows WebView 缓存在 `~/.sushiro/webview/`。
+
+`web.go` 将路由与服务生命周期分开，直接持有已绑定的回环监听器，再打开窗口。桌面桥仅接受白名单中的相对 API 路径，不跟随跳转、不走系统 HTTP 代理，有大小和超时限制。Wails 只向内置页面开放绑定，HTTP 安全边界没有放宽。
+
+关闭窗口停止界面服务和认证代理，不停止用户已开启的独立采集服务。后台是否运行由页面状态明确显示；暂停记录仍由用户显式选择。导出只支持个人记录及脱敏诊断包，保存路径必须来自系统对话框，取消不写文件。
 
 ## 包结构
 

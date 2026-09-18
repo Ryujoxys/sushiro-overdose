@@ -2,6 +2,7 @@ package app
 
 import (
 	"embed"
+	"html"
 	"strings"
 )
 
@@ -12,7 +13,7 @@ import (
 //
 // Edit webui/* for UI changes — do not re-introduce a monolithic string blob here.
 
-//go:embed webui/index.html webui/app.css webui/app.js webui/record_chart.js webui/auth_ticket.js webui/logo.b64
+//go:embed webui/index.html webui/app.css webui/app.js webui/record_chart.js webui/auth_ticket.js webui/logo.b64 webui/third-party-notices.txt
 var webuiFS embed.FS
 
 // indexHTML is the full document served at GET /. Built once at init from webui/.
@@ -53,10 +54,15 @@ func mustAssembleIndexHTML() string {
 }
 
 // assembleIndexHTML injects CSS, JS, and logo into the HTML template placeholders.
-func assembleIndexHTML(html, css, js, logoBase64 string) string {
-	out := html
+func assembleIndexHTML(document, css, js, logoBase64 string) string {
+	out := document
 	out = strings.ReplaceAll(out, "{{APP_CSS}}", css)
 	out = strings.ReplaceAll(out, "{{APP_JS}}", js)
 	out = strings.ReplaceAll(out, "{{LOGO_BASE64}}", logoBase64)
+	notices, err := webuiFS.ReadFile("webui/third-party-notices.txt")
+	if err != nil {
+		panic("webui: read third-party notices: " + err.Error())
+	}
+	out = strings.ReplaceAll(out, "{{OPEN_SOURCE_NOTICES}}", html.EscapeString(string(notices)))
 	return out
 }

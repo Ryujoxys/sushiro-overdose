@@ -36,13 +36,13 @@ async function confirmTicket() {
   });
 }
 function showTicketUncertain(message) {
-  go('queue');const box=el('ticket-result');box.hidden=false;
+  navigatePage('queue');const box=el('ticket-result');box.hidden=false;
   box.innerHTML='<h2>取号结果还未确认</h2><p class="muted">'+escapeHTML(message)+'</p><p class="caption">先查询已有号码，不要重复取号。也可以在官方小程序核对。</p><button class="button primary" data-action="query-ticket">查询已有号码</button>';
   box.focus();el('take-ticket').disabled=true;
 }
 function showTicket(result) {
   state.ticketUncertain=false;
-  go('queue');
+  navigatePage('queue');
   const ticket=result.ticket||{},number=ticket.number;
   if(!number){state.ticketUncertain=true;showTicketUncertain('官方没有返回明确号码，请在小程序核对。');return;}
   const id=String(ticket.monitored_store_id||ticket.store_id||ticket.storeId||'');

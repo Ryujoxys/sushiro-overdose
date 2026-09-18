@@ -8,8 +8,7 @@ import (
 
 // ListenOnAvailableLocalPort 在 127.0.0.1 上从 preferred 端口开始顺序探测，
 // 返回第一个能成功 listen 的端口（同时返回已建立的 listener，调用方可直接用）。
-// 端口探测存在竞态：listen 成功到调用方真正接收连接之间，端口可能被别的进程抢占，
-// 因此返回成功不代表后续 bind 一定成功，调用方仍需处理 bind 错误。
+// 调用方应直接使用返回的 listener，不要关闭后重新 bind；持有监听器可避免端口抢占竞态。
 func ListenOnAvailableLocalPort(preferred, attempts int) (net.Listener, int, error) {
 	return ListenOnAvailableHostPort("127.0.0.1", preferred, attempts)
 }

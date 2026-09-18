@@ -24,25 +24,33 @@ import (
 )
 
 // defaultWebPort 是 Web UI 的起始端口。用高位端口（39871）避开 8080/8081/3000/5000
-// 等常见开发工具端口；若被占会自动递增到下一个可用端口（见 findAvailablePort）。
+// 等常见开发工具端口；若被占会自动递增到下一个可用端口。
 const defaultWebPort = 39871
 
-// cmdWeb 启动本地 Web UI：注册全部 HTTP 路由、选定可用端口、装上安全中间件、
-// 拉起后台采集/调度协程，最后阻塞在 server.ListenAndServe 上。
-// 设计上只监听 127.0.0.1（loopback），不对外暴露，配合 webSecurityMiddleware 做请求准入。
 func cmdWeb() {
 	printBanner()
-
-	// checkStaleProxy：上次进程异常退出（崩溃/被杀）来不及清理系统代理时，这里兜底清掉，
-	// 否则系统仍指向已关闭的代理端口，会导致整机联网异常。
-	if checkStaleProxy() {
-		fmt.Println("已清除上次异常退出的系统代理设置")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	backend, err := startWebBackend(ctx, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
 	}
+	defer backend.Close()
+	fmt.Printf("本地界面：%s\n按 Ctrl+C 退出界面，独立后台记录不受影响。\n", backend.URL)
+	if err := OpenBrowser(backend.URL); err != nil {
+		fmt.Fprintf(os.Stderr, "无法自动打开，请访问 %s\n", backend.URL)
+	}
+	select {
+	case <-ctx.Done():
+	case err := <-backend.done:
+		if err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}
+}
 
-	setNotifier(configuredNotifiers())
-	// 进程级 CSRF token：每次启动重新生成，旧页面里的 token 会失效（需刷新页面）。
-	setWebCSRFToken(newWebCSRFToken())
-
+func newWebMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Static
@@ -130,65 +138,81 @@ func cmdWeb() {
 
 	// SSE
 	mux.HandleFunc("/api/events", handleEvents)
+	return mux
+}
 
-	port := findAvailablePort(defaultWebPort)
+type webBackend struct {
+	URL    string
+	ctx    context.Context
+	cancel context.CancelFunc
+	server *http.Server
+	done   chan error
+	once   sync.Once
+}
+
+func startWebBackend(parent context.Context, activation http.HandlerFunc) (*webBackend, error) {
+	listener, err := listenLocalWeb(defaultWebPort)
+	if err != nil {
+		return nil, fmt.Errorf("无法启动本地界面：%w", err)
+	}
+	if err := os.MkdirAll(AppDirPath(), 0o700); err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("无法创建数据目录：%w", err)
+	}
+	MigrateOldConfig()
+	if checkStaleProxy() {
+		fmt.Println("已清除上次异常退出的系统代理设置")
+	}
+	setNotifier(configuredNotifiers())
+	setWebCSRFToken(newWebCSRFToken())
+	mux := newWebMux()
+	if activation != nil {
+		mux.HandleFunc("/desktop/activate", activation)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	port := listener.Addr().(*net.TCPAddr).Port
 	SetActiveWebPort(port)
-	// 只绑定 loopback：本 UI 只服务本机浏览器/应用窗口，绝不对外网卡监听，
-	// 从网络层就杜绝局域网内其他设备直接访问（手机抓包另有 0.0.0.0 代理，与此无关）。
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	server := &http.Server{
-		Addr:    addr,
-		Handler: webSecurityMiddleware(mux),
-		// 超时设置：抵御慢速攻击/异常连接挂死导致的 goroutine 泄漏。
-		// 注意不设 WriteTimeout —— SSE (/api/events) 是长连接，WriteTimeout 会掐断它；
-		// ReadHeaderTimeout 是安全相关的底线（慢速 header 让连接挂死），必须设。
+		Handler:           webSecurityMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// Prepare settings for calendar/stores APIs if config exists
+	backend := &webBackend{URL: "http://" + listener.Addr().String(), ctx: ctx, cancel: cancel, server: server, done: make(chan error, 1)}
 	tokens, ok := tryLoadConfig()
 	if ok {
-		prefs := LoadPreferences()
-		settings := tokens.ToSettingsWithPrefs(prefs)
-		setWebSettings(settings)
+		setWebSettings(tokens.ToSettingsWithPrefs(LoadPreferences()))
+	} else {
+		clearWebSettings()
 	}
 	queueBaselineCollector.Start(ctx)
+	go func() { backend.done <- server.Serve(listener) }()
+	return backend, nil
+}
 
-	go func() {
-		<-ctx.Done()
+func (b *webBackend) Close() {
+	b.once.Do(func() {
+		b.cancel()
 		engine.Stop()
 		sampler.Stop()
 		mobileUACapture.stop()
 		mobileAuthCapture.stop("")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
-
-	url := fmt.Sprintf("http://%s", addr)
-	fmt.Printf("应用窗口启动于 %s\n", url)
-	fmt.Println("会优先打开独立应用窗口；无法打开时回退到默认浏览器。按 Ctrl+C 退出")
-
-	_ = OpenBrowser(url)
-
-	if err := server.ListenAndServe(); err != http.ErrServerClosed {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+		if err := b.server.Shutdown(shutdownCtx); err != nil {
+			b.server.Close()
+		}
+	})
 }
 
-// findAvailablePort 从 preferred（defaultWebPort）开始向上最多探 100 个端口，
-// 返回第一个能 bind 的。都占满时退回 preferred（随后 ListenAndServe 会以真实错误失败），
-// 避免「端口被占直接 fatal」让用户毫无排查线索。
-func findAvailablePort(preferred int) int {
-	if port, ok := FirstAvailableLocalPort(preferred, 100); ok {
-		return port
+// Keep the listener: probing then reopening the port races another application.
+func listenLocalWeb(preferred int) (net.Listener, error) {
+	attempts := 100
+	if preferred == 0 {
+		attempts = 1
 	}
-	return preferred
+	listener, _, err := ListenOnAvailableLocalPort(preferred, attempts)
+	return listener, err
 }
 
 var (

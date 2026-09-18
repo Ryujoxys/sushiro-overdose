@@ -21,6 +21,15 @@ function ticketOptions(adult,child,table) {
   return {adult:a,child:c,table_type:table};
 }
 async function api(path,body,options={}) {
+  const bridge=window.go?.app?.DesktopBridge;
+  if(bridge){
+    try {
+      const response=await bridge.Request(body===undefined?'GET':'POST',path,body===undefined?'':JSON.stringify(body),options.timeout||15000);
+      const data=JSON.parse(response.body);
+      if(response.status<200||response.status>=300||data.error){const error=new Error(data.error||'请求失败，请重试。');error.status=response.status;throw error;}
+      return data;
+    }catch(error){throw typeof error==='string'?new Error(error):error;}
+  }
   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),options.timeout||15000);
   try {
     const headers={Accept:'application/json'};
@@ -34,15 +43,25 @@ async function api(path,body,options={}) {
     throw error;
   } finally { clearTimeout(timer); }
 }
+function handleDesktopDownload(event) {
+  const bridge=window.go?.app?.DesktopBridge;
+  if(!bridge)return;
+  const link=event.target.closest('a[href]');
+  if(!link)return;
+  const resource=link.getAttribute('href');
+  if(!/^\/api\/(records\/export|diagnostics\/bundle)(\?|$)/.test(resource))return;
+  event.preventDefault();
+  guard('export',async()=>{if(await bridge.Export(resource))toast('已保存');});
+}
 let toastTimer;
 function toast(message) { el('toast').textContent=message;el('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{el('toast').hidden=true;},5000); }
 async function guard(key,run) {
   if(state.busy.has(key))return;
   state.busy.add(key);
-  try {return await run();} catch(e){toast(e.message||'操作失败，请重试。');} finally{state.busy.delete(key);}
+  try {return await run();} catch(e){toast(typeof e==='string'?e:e.message||'操作失败，请重试。');} finally{state.busy.delete(key);}
 }
 function showError(id,error) { const box=el(id);box.hidden=!error;box.textContent=error?.message||String(error||''); }
-function go(page) {
+function navigatePage(page) {
   if(!['records','queue','settings'].includes(page))page='records';
   state.page=page;
   document.querySelectorAll('[id^="page-"]').forEach(n=>{n.hidden=n.id!=='page-'+page;});
@@ -220,6 +239,8 @@ async function loadStatus(){
 }
 function init() {
   initRecordChart();
+  document.addEventListener('click',handleDesktopDownload);
+  window.runtime?.EventsOn?.('desktop:busy',()=>toast('正在完成操作，请稍候再关闭。'));
   const actions={
     refresh:refreshRecords,'pick-records':()=>openStorePicker('records'),'pick-queue':()=>openStorePicker('queue'),
     'retry-stores':searchStores,'save-stores':savePickedStores,'close-store':()=>{state.searchRevision++;el('store-dialog').close();},
@@ -231,7 +252,7 @@ function init() {
     'repair-proxy':()=>guard('repair',async()=>{if(await confirmDialog('恢复系统代理','会停止当前认证并恢复本应用修改过的代理。')){await api('/api/repair-proxy',{});toast('代理已恢复');}})
   };
   document.addEventListener('click',event=>{const button=event.target.closest('[data-action]');if(button&&!button.disabled&&actions[button.dataset.action])Promise.resolve(actions[button.dataset.action](button)).catch(e=>toast(e.message));const answer=event.target.closest('[data-answer]');if(answer)finishConfirm(answer.dataset.answer==='yes');});
-  window.addEventListener('hashchange',()=>go(location.hash.slice(1)));
+  window.addEventListener('hashchange',()=>navigatePage(location.hash.slice(1)));
   let resizeTimer;
   window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(state.page==='records'&&state.records)renderAnalysis();},150);});
   el('store-search').addEventListener('input',()=>{state.searchRevision++;clearTimeout(searchTimer);searchTimer=setTimeout(searchStores,250);});
@@ -246,6 +267,6 @@ function init() {
   el('auth-dialog').addEventListener('cancel',event=>{event.preventDefault();closeAuth();});
   el('ticket-dialog').addEventListener('cancel',event=>{if(state.busy.has('ticket'))event.preventDefault();});
   el('confirm-dialog').addEventListener('cancel',event=>{event.preventDefault();finishConfirm(false);});
-  refreshRecords();go(location.hash.slice(1));loadStatus().catch(()=>{el('account-state').textContent='状态暂时读取失败，连接时会重试。';});
+  refreshRecords();navigatePage(location.hash.slice(1));loadStatus().catch(()=>{el('account-state').textContent='状态暂时读取失败，连接时会重试。';});
   setInterval(()=>{if(!document.hidden&&state.page==='records'&&!state.busy.size&&!el('store-dialog').open)refreshRecords();},30000);
 }

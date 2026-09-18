@@ -21,3 +21,4 @@ dialog{width:min(560px,calc(100% - 32px));max-height:calc(100dvh - 48px);overflo
 
 .legend.called-range span:last-child:before{height:10px;background:#B81C22;opacity:.2}.chart-annotation{font-family:var(--font)}
 .skip-link:not(:focus){clip-path:inset(50%);width:1px;height:1px;overflow:hidden}
+.license-card pre{max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin-top:16px}

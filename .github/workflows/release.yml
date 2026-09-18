@@ -18,7 +18,36 @@ permissions:
   contents: write
 
 jobs:
+  windows-loader:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+      - name: Verify native Windows executable can start
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          CGO_ENABLED: '0'
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+(\.[0-9]+)?$') { throw 'Invalid release tag' }
+          $version = $env:RELEASE_TAG.Substring(1)
+          $exe = Join-Path $env:RUNNER_TEMP 'sushiro-native.exe'
+          $output = Join-Path $env:RUNNER_TEMP 'sushiro-version.txt'
+          go build -tags desktop,production,wv2runtime.browser -ldflags "-s -w -H windowsgui -X main.Version=$version" -o $exe .
+          if ($LASTEXITCODE -ne 0) { throw 'Native build failed' }
+          # Version exits before opening windows, reading credentials or sending notifications.
+          $process = Start-Process -FilePath $exe -ArgumentList 'version' -Wait -PassThru -RedirectStandardOutput $output
+          if ($process.ExitCode -ne 0) { throw "Windows loader failed: $($process.ExitCode)" }
+          $text = Get-Content $output -Raw -Encoding utf8
+          if (-not $text.Contains("v$version")) { throw "Unexpected version: $text" }
+          Write-Output $text
+
   goreleaser:
+    needs: windows-loader
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,7 +57,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: false
 
       - name: Validate release tag
@@ -77,7 +106,7 @@ jobs:
           fi
 
       - name: Check shell syntax
-        run: bash -n install/install.sh scripts/bundle-macos.sh scripts/gen-windows-resources.sh
+        run: bash -n install/install.sh scripts/bundle-macos.sh scripts/gen-windows-resources.sh scripts/build-desktop.sh
 
       - name: Verify Windows PE resources (SxS-safe manifest)
         run: go test ./internal/app/ -count=1 -run TestWindowsResourceSysoHasCleanManifest
@@ -100,15 +129,8 @@ jobs:
           MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
         run: |
           VERSION="${{ steps.release.outputs.version }}"
-          BINARY="dist/sushiro_darwin_all/sushiro"
-          if [ ! -f "$BINARY" ]; then
-            BINARY=$(find dist -name 'sushiro' -path '*darwin_all*' | head -1)
-          fi
-          if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
-            echo "Darwin binary not found in dist/"
-            find dist -maxdepth 3 -type f | sort
-            exit 1
-          fi
+          bash scripts/build-desktop.sh "$VERSION" dist
+          BINARY="dist/native/sushiro"
           lipo "$BINARY" -verify_arch x86_64 arm64
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh "$BINARY" "$VERSION" dist/
@@ -128,17 +150,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.release.outputs.version }}"
-          mkdir -p dist/direct
-          # Pure Go, no CGO: must not require Visual C++ redistributable.
-          # -H windowsgui: no console window for double-click users.
-          # Resources (icon + asInvoker/PerMonitorV2 manifest, no comctl/VC SxS)
-          # come from resource_windows_{amd64,arm64}.syso at repo root.
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
-            -ldflags "-s -w -H windowsgui -X main.Version=${VERSION}" \
-            -o "dist/direct/Sushiro-Overdose-${VERSION}-windows-amd64.exe" .
-          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build \
-            -ldflags "-s -w -H windowsgui -X main.Version=${VERSION}" \
-            -o "dist/direct/Sushiro-Overdose-${VERSION}-windows-arm64.exe" .
+          # Native EXEs were built with the DMG. Keep the SxS-safe root resources.
           if ! ls dist/direct/*.exe >/dev/null 2>&1; then
             echo "No Windows executables found in dist/"
             find dist -maxdepth 3 -type f | sort

@@ -10,7 +10,17 @@
 
 ## 开发检查
 
-需要 Go 1.23+。Go 端只用标准库，页面和历史包内嵌，不需要前端打包。
+需要 Go 1.25+。业务核心只用标准库；原生桌面适配使用固定版本 Wails v2。页面和历史包内嵌，不需要前端打包或 Wails CLI。
+
+普通 `go build -o sushiro .` 生成 CLI/浏览器版。macOS 和 Windows 原生版：
+
+```bash
+go build -tags desktop,production -o sushiro .
+```
+
+macOS 需要 Xcode Command Line Tools 和 CGO，运行系统最低 macOS 12；Windows 使用 WebView2。发布构建在 macOS 执行 `bash scripts/build-desktop.sh 4.0.1 dist`，同时产出 Universal 原生二进制及两种 Windows GUI EXE。Windows 发布标签包含 `wv2runtime.browser`，缺少运行时时引导用户到微软官网安装。
+
+依赖升级后，在 macOS 执行 `node scripts/generate-third-party-notices.mjs` 更新内嵌许可；用户在「设置 → 开源许可」查看。README 截图可用隔离预览配合 `node scripts/capture-readme.mjs` 生成，只读取界面，不启动采集或认证。
 
 ```bash
 gofmt -l .
@@ -18,6 +28,8 @@ go vet ./...
 go test -race ./...
 go build ./...
 node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs cloudflare/sushiro-cloud/test/retired.test.mjs
+# macOS / Windows：不打开窗口的原生适配检查
+go test -tags desktop,production ./internal/app -run 'TestDesktop|TestLocalWeb|TestWindowsResource'
 ```
 
 MCP 适配测试可在 `mcp/` 中运行 `python3 -m unittest discover -s tests -v`。
@@ -51,6 +63,8 @@ SUSHIRO_DATA_HOME="$(mktemp -d /tmp/sushiro-data.XXXXXX)" /tmp/sushiro-preview w
 
 维护者先完成本地检查，编写 `docs/release-notes-<版本>.md`，同步 Windows 资源版本，重新生成 syso，再提交和推送 tag。
 
-v4.0 对外显示为「v4.0 · lite正式版」。tag 和下载文件保持一致：`v4.0` 对应 `4.0`，不把部分安装包改成 `4.0.0`。
+版本名称固定为「lite正式版」。v4.0 系列修复使用 `v4.0.x`，本次为 `v4.0.1`；安装包版本与 tag 去掉 v 后完全一致。
 
 发布工作流先创建草稿，确认各平台安装包与完整 SHA-256 校验表均已上传，再公开发布。不要手动把未完成的草稿设为 Latest。
+
+Release 页面仅保留最新正式版。新版本完全公开并验证下载后，维护者再删除旧 Release 及附件；保留所有 Git tag 和源代码历史。不要在新版本构建完成前清理旧下载。

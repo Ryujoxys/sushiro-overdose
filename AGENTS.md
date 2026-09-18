@@ -13,9 +13,11 @@ v4.0 的版本名称为「lite正式版」，在应用设置、CLI 和发布标�
 
 默认主流程：选门店 → 开始记录 → 查看自己的排队规律。手动取号独立保留：选店、必要时认证、显式确认、提交一次。所有狙击、定时取号、循环预约与每日自动计划均已移除；旧接口返回 410，旧计划不执行，历史数据保留。“想几点吃”仅提供只读建议。
 
-**技术栈**：Go 1.23，Go 端零外部依赖（纯标准库），已按职责拆到 `internal/`，根目录只保留入口。可选 MCP 为独立 Python 模块。
+**技术栈**：Go 1.25，业务核心使用标准库，原生桌面适配层使用固定版本 Wails v2；页面仍为内嵌 HTML/CSS/JS。代码按职责拆到 `internal/`，可选 MCP 为独立 Python 模块。架构例外见 `specs/014-local-desktop/plan.md`。
 
-**目标平台**：macOS (amd64/arm64 Universal)、Windows (amd64/arm64)、Linux (amd64/arm64)。
+**目标平台**：原生窗口支持 macOS 12+ (amd64/arm64 Universal)、Windows 10/11 (amd64/arm64，需 WebView2)；CLI/浏览器版另支持 Linux (amd64/arm64)。
+
+后续修复使用 `v4.0.x`，当前为 `v4.0.1`。新版本附件和校验表完整公开后，Release 页面只保留最新正式版，Git tag 和代码历史全部保留。
 
 ---
 
@@ -25,8 +27,9 @@ v4.0 的版本名称为「lite正式版」，在应用设置、CLI 和发布标�
 用户双击运行
     │
     ▼
-main.go (默认启动 Web UI)
+main.go (桌面版默认启动原生窗口)
     │
+    ├── internal/app/desktop_*.go 原生窗口、受限桥接、单实例
     ├── internal/app/web.go  HTTP 服务器 127.0.0.1:39871
     │   ├── web_*.go         REST API + SSE
     │   └── web_static.go    嵌入 webui/index.html、app.css、auth_ticket.js、record_chart.js、app.js
@@ -38,10 +41,13 @@ main.go (默认启动 Web UI)
     └── CLI 子命令 (collect/status/doctor/...)
 ```
 
-### 两种使用模式
+### 使用模式
 
-1. **Web UI 模式（默认）**：无参数运行 → 启动 HTTP 服务 → 优先打开独立应用窗口，失败时回退默认浏览器
+1. **桌面模式（DMG/双击 EXE 默认）**：无参数运行 → 获取数据目录 OS 锁 → 启动本机服务 → Wails 原生窗口。重复启动仅唤起已有窗口。关闭窗口清理认证和界面服务，不停止独立记录进程。导出使用系统保存对话框。
 2. **记录服务模式**：`sushiro collect run` → 前台公开记录；`collect start` → 独立后台记录
+3. **浏览器模式**：显式 `sushiro web` 或不带 `desktop` 构建标签的压缩包使用浏览器。
+
+`desktop_native.go` 按 `desktop && (darwin || windows)` 编译；`desktop_bridge.go` 白名单转发本机 API，不跟随跳转、不访问外部 URL；`desktop_instance.go` 管理 OS 锁和 0600 的临时唤起令牌。不得放宽既有 HTTP Host、Origin、CSRF 校验，不对外部页面开放原生绑定。
 
 ---
 
@@ -350,7 +356,7 @@ git push origin v1.2.0
 
 # 3. GitHub Actions 自动执行以下流程：
 #    a. checkout 代码
-#    b. setup Go 1.23
+#    b. setup Go 1.25
 #    c. GoReleaser 编译所有平台（含 Mac Universal Binary）
 #    d. 创建 GitHub Release 并上传所有 archive
 #    e. 运行 scripts/bundle-macos.sh 创建 Mac .app 并封装 DMG
@@ -375,7 +381,7 @@ git push origin v1.2.0
 | 文件 | 目标用户 | 使用方式 |
 |------|---------|---------|
 | `*_darwin_all.tar.gz` | Mac 高级用户 | 解压后命令行运行 |
-| `Sushiro-Overdose-*-macOS.dmg` | Mac 普通用户 | 双击打开，拖到 Applications 后运行，独立窗口优先 |
+| `Sushiro-Overdose-*-macOS.dmg` | Mac 普通用户 | 拖到 Applications 后打开原生窗口 |
 | `Sushiro-Overdose-*-windows-amd64.exe` | Windows 用户 | 下载后双击运行，GUI 子系统无终端黑框 |
 | `Sushiro-Overdose-*-windows-arm64.exe` | Windows ARM 用户 | 下载后双击运行，GUI 子系统无终端黑框 |
 | `*_windows_amd64.zip` | Windows 高级用户 | 解压后命令行运行 |
@@ -390,7 +396,7 @@ git push origin v1.2.0
 打包侧硬规则：
 
 1. **双击版**（`Sushiro-Overdose-*-windows-*.exe`）用  
-   `CGO_ENABLED=0` + `-H windowsgui` + 根目录 `resource_windows_{amd64,arm64}.syso`。
+   `CGO_ENABLED=0` + `-tags desktop,production,wv2runtime.browser` + `-H windowsgui` + 根目录 `resource_windows_{amd64,arm64}.syso`。
 2. **syso 必须**含：图标 + `asInvoker` + PerMonitorV2；**禁止**声明  
    `Microsoft.VC*.CRT` 或 `Microsoft.Windows.Common-Controls`（纯 Go 不需要，声明了反而在坏 WinSxS 机器上直接起不来）。
 3. 改图标 / 清单后必须：
@@ -399,6 +405,7 @@ git push origin v1.2.0
 ./scripts/gen-windows-resources.sh
 go test ./internal/app/ -run TestWindowsResourceSysoHasCleanManifest
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+  -tags desktop,production,wv2runtime.browser \
   -ldflags "-s -w -H windowsgui -X main.Version=dev" \
   -o /tmp/Sushiro-Overdose-dev-windows-amd64.exe .
 ```
@@ -419,16 +426,9 @@ git push origin v1.2.1
 # CI 自动发布
 ```
 
-### 删除错误的 Release
+### 清理旧 Release
 
-```bash
-# 删除远程 tag
-git push origin :refs/tags/v1.2.0
-# 在 GitHub Release 页面手动删除对应 Release
-# 修复后重新打 tag
-git tag v1.2.0
-git push origin v1.2.0
-```
+先验证最新正式版的全部附件和校验值，再用 `gh release delete <旧标签> --yes` 删除旧 Release 页面及附件。不使用 `--cleanup-tag`，不删除或移动已发布 tag。发布出错时修复后发下一个 v4.0.x，不覆盖用户已经下载过的版本。
 
 ---
 
@@ -449,7 +449,7 @@ Sushiro Overdose.app/
     └── Resources/           (预留给图标 .icns)
 ```
 
-用户双击 .app → macOS 执行 `Contents/MacOS/sushiro` → 启动 Web UI → 优先打开独立应用窗口，失败时回退默认浏览器。
+用户双击 .app → macOS 执行 `Contents/MacOS/sushiro` → 原生窗口和本机服务。打包输入必须是 `scripts/build-desktop.sh` 产出的 Universal 原生二进制，不是 GoReleaser 的 CLI 二进制。
 
 如需添加应用图标，将 `.icns` 文件放入 `Resources/` 并在 `Info.plist` 中添加 `CFBundleIconFile`。
 
@@ -467,13 +467,15 @@ Sushiro Overdose.app/
 
 单二进制分发是核心优势。用户下载一个文件就能运行主程序，无需安装 Node.js、npm 等。HTML/CSS/JS 在 `internal/app/webui/` 中维护，通过 `web_static.go` 嵌入二进制。
 
-### 为什么零外部 Go 依赖？
+### 为什么业务核心保持标准库？
 
 - 编译速度快
-- 二进制体积小（约 8-10MB）
-- 无供应链攻击风险
+- 不需要 Node.js 或数据库运行时
+- 减少业务核心的依赖面；桌面层的固定版本依赖仍需审核和维护
 - Go 标准库的 `crypto/tls`、`net/http` 已足够实现 MITM 代理
 - 代理只对寿司郎 API 域名做 TLS 解密；其他 HTTPS 域名保持 CONNECT 透传，不读取或解密内容
+
+Wails 是原生窗口适配层的明确例外，不再宣称整个程序零外部依赖。`go build .` 仍可构建不包含原生 WebView 的 CLI/浏览器版。原生打包用 `bash scripts/build-desktop.sh <版本> <输出目录>`；macOS 需要 CGO/Xcode SDK，Windows 使用 `CGO_ENABLED=0` 和 `desktop,production,wv2runtime.browser` 标签。
 
 ### 配置文件为什么在 ~/.sushiro/？
 
