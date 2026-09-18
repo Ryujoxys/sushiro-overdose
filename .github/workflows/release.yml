@@ -109,7 +109,7 @@ jobs:
             find dist -maxdepth 3 -type f | sort
             exit 1
           fi
-          lipo -verify_arch x86_64 arm64 "$BINARY"
+          lipo "$BINARY" -verify_arch x86_64 arm64
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh "$BINARY" "$VERSION" dist/
 
