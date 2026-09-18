@@ -14,10 +14,12 @@ const healthCheckInterval = 5 * time.Minute
 
 // startHealthCheck runs a background goroutine that periodically verifies
 // token validity by calling GetTimeslots. On auth failure it notifies and stops.
-func startHealthCheck(ctx context.Context, client *Client, storeIDs []string) chan struct{} {
-	stop := make(chan struct{})
+func startHealthCheck(ctx context.Context, client *Client, storeIDs []string) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(healthCheckInterval)
 		defer ticker.Stop()
 
@@ -25,11 +27,12 @@ func startHealthCheck(ctx context.Context, client *Client, storeIDs []string) ch
 			select {
 			case <-ctx.Done():
 				return
-			case <-stop:
-				return
 			case <-ticker.C:
 				for _, storeID := range storeIDs {
 					_, err := client.GetTimeslots(ctx, storeID)
+					if ctx.Err() != nil {
+						return
+					}
 					if err != nil {
 						if isAuthError(err) {
 							noteAuthResult(err) // 凭证失败则标记 stale
@@ -43,12 +46,12 @@ func startHealthCheck(ctx context.Context, client *Client, storeIDs []string) ch
 						}
 						break
 					}
-					markAuthHealthy() // GetTimeslots 成功 → 凭证有效
-					break             // one success is enough
+					// Query-token success does not verify ReservationAuth.
+					break // one success is enough
 				}
 			}
 		}
 	}()
 
-	return stop
+	return func() { cancel(); <-done }
 }

@@ -4,10 +4,87 @@ package platform
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestDarwinKeychainResolutionDoesNotGuessFromHome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom login.keychain-db")
+	if err := os.WriteFile(path, []byte("test keychain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct {
+		name, output string
+		commandError error
+		valid        bool
+	}{
+		{name: "quoted path", output: "    \"" + path + "\"\n", valid: true},
+		{name: "command failed", output: "A default keychain could not be found.", commandError: errors.New("exit status 1")},
+		{name: "empty output"},
+		{name: "relative path", output: "login.keychain-db"},
+		{name: "missing file", output: filepath.Join(dir, "missing.keychain-db")},
+		{name: "directory", output: dir},
+		{name: "multiple lines", output: path + "\nother"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveDarwinUserKeychain(func(name string, args ...string) (string, error) {
+				if name != "security" || !reflect.DeepEqual(args, []string{"default-keychain", "-d", "user"}) {
+					t.Fatalf("unexpected keychain command: %s %v", name, args)
+				}
+				return tc.output, tc.commandError
+			}, os.Stat)
+			if tc.valid {
+				if err != nil || got != path {
+					t.Fatalf("got %q, %v", got, err)
+				}
+			} else if got != "" || !errors.Is(err, ErrUserKeychainUnavailable) {
+				t.Fatalf("invalid keychain did not fail closed: %q, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestDarwinCertInstallStopsBeforeMutationWhenKeychainUnavailable(t *testing.T) {
+	err := darwinInstallCert("/preview/ca.crt", func() (string, error) {
+		return "", ErrUserKeychainUnavailable
+	}, func(name string, args ...string) (string, error) {
+		t.Fatalf("certificate command ran without a keychain: %s %v", name, args)
+		return "", nil
+	})
+	if !errors.Is(err, ErrUserKeychainUnavailable) {
+		t.Fatalf("wrong error: %v", err)
+	}
+}
+
+func TestDarwinCertInstallUsesOnlyResolvedUserKeychain(t *testing.T) {
+	for _, failAdd := range []bool{false, true} {
+		var commands [][]string
+		err := darwinInstallCert("/preview/ca.crt", func() (string, error) {
+			return "/real-user/custom.keychain-db", nil
+		}, func(name string, args ...string) (string, error) {
+			commands = append(commands, append([]string{name}, args...))
+			if failAdd {
+				return "denied", errors.New("exit status 1")
+			}
+			return "", nil
+		})
+		want := [][]string{
+			{"security", "add-certificates", "-k", "/real-user/custom.keychain-db", "/preview/ca.crt"},
+			{"security", "add-trusted-cert", "-r", "trustRoot", "-k", "/real-user/custom.keychain-db", "/preview/ca.crt"},
+		}
+		if failAdd {
+			want = want[:1]
+		}
+		if (err != nil) != failAdd || !reflect.DeepEqual(commands, want) {
+			t.Fatalf("failAdd=%v: commands=%v, error=%v", failAdd, commands, err)
+		}
+	}
+}
 
 func TestDarwinSetSystemProxyCommandsUsePACWhenWebPortAvailable(t *testing.T) {
 	commands := darwinSetSystemProxyCommands([]string{"Wi-Fi"}, 8080, 52123)

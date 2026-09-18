@@ -48,7 +48,7 @@ func getAuthHealth() AuthHealthJSON {
 	return out
 }
 
-// markAuthHealthy：一次凭证请求成功，或刚重新捕获/导入凭证后调用。清除 stale 与通知去重。
+// markAuthHealthy 只用于实际认证请求成功，不用于仅保存凭证字段。
 // 顺手做一次「年龄接近历史寿命」的被动柔性提醒判断（maybeSoftWarnAuthAge 内部自有去重）。
 func markAuthHealthy() {
 	authHealth.mu.Lock()
@@ -70,6 +70,15 @@ func resetAuthHealth() {
 	authHealth.checkedAt = time.Time{}
 	authHealth.notified = false
 	authHealth.mu.Unlock()
+}
+
+func markAuthUnverified() {
+	authHealth.mu.Lock()
+	defer authHealth.mu.Unlock()
+	authHealth.status = authHealthUnknown
+	authHealth.reason = "凭证字段已保存，认证有效性尚未验证"
+	authHealth.checkedAt = time.Time{}
+	authHealth.notified = false
 }
 
 // markAuthStale：官方判定凭证失败时调用。仅在 ok/unknown→stale 跃迁时推一次通知。

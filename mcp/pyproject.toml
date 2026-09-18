@@ -1,11 +1,10 @@
 [project]
 name = "sushiro-mcp"
 version = "0.1.0"
-description = "sushiro-overdose MCP server — 让 AI 教用户用、查排队数据、给到店建议、联动桌面端"
+description = "寿司郎本机排队数据查询与到店建议，不代替用户取号"
 requires-python = ">=3.9"
 dependencies = [
     "mcp>=1.2.0",
-    "libsql>=0.0.34",
     "httpx>=0.27.0",
 ]
 

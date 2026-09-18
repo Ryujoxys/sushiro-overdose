@@ -113,6 +113,9 @@ func LocalConfigPath() string {
 // 历史迁移：早期版本把抓包配置写在当前目录的 .sushiro_local.json，现在统一迁到用户主目录。
 // 仅当目标不存在时迁移，避免覆盖新位置已有的更新配置。
 func MigrateOldConfig() {
+	if HasCustomDataHome() {
+		return
+	}
 	oldPath := ".sushiro_local.json"
 	if _, err := os.Stat(oldPath); err != nil {
 		return
@@ -310,7 +313,7 @@ func (t *CapturedTokens) ToSettingsWithPrefs(prefs UserPreferences) Settings {
 	defer t.mu.Unlock()
 
 	timezone := "Asia/Shanghai"
-	location, _ := time.LoadLocation(timezone)
+	location := SushiroTimezone
 
 	storeIDs := t.StoreIDs
 	if len(prefs.SelectedStores) > 0 {

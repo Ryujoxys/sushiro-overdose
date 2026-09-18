@@ -191,6 +191,7 @@ func TestQueueAlertCalledReachTieredTitle(t *testing.T) {
 }
 
 func TestEvaluateQueueAlertsKeepsRuleAndDedupsAfterFire(t *testing.T) {
+	desktopBefore := notificationCountForTest("desktop")
 	t.Setenv("HOME", t.TempDir())
 	cfg := normalizeQueueAlertConfig(QueueAlertConfig{Rules: []QueueAlertRule{
 		{StoreID: "3006", StoreName: "太阳宫凯德店", Type: queueAlertCalledReach, TargetNo: 1078, NotifyAtNo: 1050, Enabled: true},
@@ -201,6 +202,9 @@ func TestEvaluateQueueAlertsKeepsRuleAndDedupsAfterFire(t *testing.T) {
 	}
 
 	evaluateQueueAlerts(context.Background(), QueueObservation{StoreID: "3006", DisplayCalledNo: 1051}, "太阳宫凯德店")
+	if notificationCountForTest("desktop") != desktopBefore+1 {
+		t.Fatal("first threshold should reach the in-memory notifier once")
+	}
 
 	// S7 修复：触发后规则不再被物理删除——用户原始 notify_at_nos 配置必须保留，
 	// 去重完全交给 state 的 FiredOnce。
@@ -220,6 +224,9 @@ func TestEvaluateQueueAlertsKeepsRuleAndDedupsAfterFire(t *testing.T) {
 	st2 := loadQueueAlertState()[cfg.Rules[0].key()]
 	if !st2.FiredOnce {
 		t.Fatal("FiredOnce 应保持 true，不应被重置导致重复触发")
+	}
+	if notificationCountForTest("desktop") != desktopBefore+1 {
+		t.Fatal("the same rule must not send another notification")
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -161,7 +162,7 @@ Description=Sushiro Overdose sampler
 
 [Service]
 Type=simple
-ExecStart=` + exe + ` --sampler-daemon-child
+ExecStart="` + strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(exe, "%", "%%"), "\\", "\\\\"), "\"", "\\\"") + `" --queue-collector-child
 Restart=on-failure
 
 [Install]

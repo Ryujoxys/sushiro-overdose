@@ -136,28 +136,29 @@ func isCertTrusted() (bool, error) {
 }
 
 func installCert() error {
-	dir := CertDirPath()
-	certPath := filepath.Join(dir, "ca.crt")
+	return darwinInstallCert(filepath.Join(CertDirPath(), "ca.crt"), defaultUserKeychain, runCmd)
+}
 
-	keychain, err := defaultUserKeychain()
+func darwinInstallCert(certPath string, resolveKeychain func() (string, error), runner darwinCommandRunner) error {
+	keychain, err := resolveKeychain()
 	if err != nil {
 		return err
 	}
 
-	out, err := exec.Command("security", "add-certificates", "-k", keychain, certPath).CombinedOutput()
-	if err != nil && !isAlreadyExistsOutput(out) {
-		return fmt.Errorf("add-certificates: %w: %s", err, strings.TrimSpace(string(out)))
+	out, err := runner("security", "add-certificates", "-k", keychain, certPath)
+	if err != nil && !isAlreadyExistsOutput([]byte(out)) {
+		return fmt.Errorf("add-certificates: %w: %s", err, strings.TrimSpace(out))
 	}
 
-	out, err = exec.Command("security", "add-trusted-cert", "-r", "trustRoot", "-k", keychain, certPath).CombinedOutput()
+	out, err = runner("security", "add-trusted-cert", "-r", "trustRoot", "-k", keychain, certPath)
 	if err != nil {
-		low := strings.ToLower(string(out))
+		low := strings.ToLower(out)
 		// keychain 锁定时 security 报 "User interaction is not allowed" 或 "authfailed"。
 		// 给出明确关键词，engine.classifyCertError 据此归为 cert_locked 并提示解锁。
 		if strings.Contains(low, "user interaction is not allowed") || strings.Contains(low, "authfailed") {
-			return fmt.Errorf("add-trusted-cert: keychain locked (User interaction is not allowed): %w: %s；请在终端运行 security unlock-keychain 解锁钥匙串后重试", err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("add-trusted-cert: keychain locked (User interaction is not allowed): %w: %s；请在终端运行 security unlock-keychain 解锁钥匙串后重试", err, strings.TrimSpace(out))
 		}
-		return fmt.Errorf("add-trusted-cert: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("add-trusted-cert: %w: %s", err, strings.TrimSpace(out))
 	}
 	return nil
 }
@@ -179,19 +180,26 @@ func uninstallCert() error {
 }
 
 func defaultUserKeychain() (string, error) {
-	out, err := exec.Command("security", "default-keychain", "-d", "user").CombinedOutput()
-	if err == nil {
-		keychain := strings.Trim(strings.TrimSpace(string(out)), `"`)
-		if keychain != "" {
-			return keychain, nil
-		}
-	}
+	return resolveDarwinUserKeychain(runCmd, os.Stat)
+}
 
-	home, homeErr := os.UserHomeDir()
-	if homeErr != nil {
-		return "", fmt.Errorf("resolve user keychain: %w", homeErr)
+func resolveDarwinUserKeychain(runner darwinCommandRunner, stat func(string) (os.FileInfo, error)) (string, error) {
+	out, err := runner("security", "default-keychain", "-d", "user")
+	if err != nil {
+		return "", fmt.Errorf("%w: default-keychain: %v: %s", ErrUserKeychainUnavailable, err, strings.TrimSpace(out))
 	}
-	return filepath.Join(home, "Library/Keychains/login.keychain-db"), nil
+	keychain := strings.Trim(strings.TrimSpace(out), `"`)
+	if !filepath.IsAbs(keychain) || strings.ContainsAny(keychain, "\r\n\x00") {
+		return "", fmt.Errorf("%w: default-keychain returned an invalid path", ErrUserKeychainUnavailable)
+	}
+	info, err := stat(keychain)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s: %v", ErrUserKeychainUnavailable, keychain, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%w: %s is a directory", ErrUserKeychainUnavailable, keychain)
+	}
+	return keychain, nil
 }
 
 func isAlreadyExistsOutput(out []byte) bool {
@@ -368,7 +376,7 @@ func installSamplingAutoStart() error {
   <key>ProgramArguments</key>
   <array>
     <string>` + xmlEscape(exe) + `</string>
-    <string>--sampler-daemon-child</string>
+    <string>--queue-collector-child</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>` + xmlEscape(SamplingLogPath()) + `</string>

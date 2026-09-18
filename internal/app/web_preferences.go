@@ -74,7 +74,7 @@ func handleNotifyConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "保存失败: "+err.Error())
 			return
 		}
-		setNotifier(BuildNotifierFromConfig())
+		setNotifier(configuredNotifiers())
 		writeJSON(w, map[string]any{"ok": true})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "GET or POST")

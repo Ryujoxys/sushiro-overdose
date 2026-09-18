@@ -7,8 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+var stateMu sync.Mutex
 
 // State 是持久化到 ~/.sushiro/.sushiro_state.json 的运行态。
 //
@@ -42,10 +45,31 @@ func LoadState(path string) (State, error) {
 	return state, nil
 }
 
-// SaveState 用「写临时文件 + 原子 rename」的方式落盘 State，避免写到一半进程挂掉导致状态文件损坏。
-// 约定：tempPath = path + ".tmp"，先全量写临时文件，再 rename 到目标路径——rename 在同文件系统内是原子的。
-// 因此 .tmp 必须和目标在同一目录（这里就是同目录拼接），跨文件系统 rename 会退化为非原子拷贝。
+// SaveState replaces a whole snapshot. Slot updates must use UpdateState.
 func SaveState(path string, state State) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return saveStateUnlocked(path, state)
+}
+
+// UpdateState serializes read-modify-write within this process and preserves
+// unreadable state rather than silently replacing the other ticket slot.
+func UpdateState(path string, update func(*State)) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	state, err := LoadState(path)
+	if err != nil {
+		return err
+	}
+	update(&state)
+	if state.ActiveReservation == nil && state.ActiveNetTicket == nil {
+		return clearStateUnlocked(path)
+	}
+	state.SavedAt = time.Now().Format(time.RFC3339)
+	return saveStateUnlocked(path, state)
+}
+
+func saveStateUnlocked(path string, state State) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
@@ -53,18 +77,17 @@ func SaveState(path string, state State) error {
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
-	tempPath := path + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0o644); err != nil {
-		return fmt.Errorf("write temp state: %w", err)
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("replace state: %w", err)
-	}
-	return nil
+	return AtomicWriteFile(path, data, 0o600)
 }
 
 // ClearState 删除状态文件（如取消预约/取号后）。文件本就不存在不算错误，幂等。
 func ClearState(path string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	return clearStateUnlocked(path)
+}
+
+func clearStateUnlocked(path string) error {
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove state: %w", err)

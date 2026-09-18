@@ -43,12 +43,12 @@ type QueueBaselineRecord struct {
 	APIProfileVersion string `json:"api_profile_version"`
 
 	// Legacy local fields. New records use collected_at/wait_minutes so the
-	// local JSONL has the same shape as Turso snapshots/latest rows.
+	// local JSONL uses the public snapshot contract shared by future providers.
 	Timestamp string `json:"ts,omitempty"`
 	Wait      int    `json:"wait,omitempty"`
 }
 
-// QueueBaselineExport 是远端公开「全国基准」JSON 的协议结构。它只包含门店维度
+// QueueBaselineExport 是本地与未来服务端共用的版本化 JSON 协议。它只包含门店维度
 // 和聚合后的半小时基准，不包含用户票号、手机号、凭证参数或个人取号记录。
 type QueueBaselineExport struct {
 	Version       int                   `json:"version"`
@@ -124,7 +124,7 @@ type QueueBaselineLatest struct {
 //   - OpenRate/OnlineOpenRate/BusyRate：开门率/在线取号开放率/繁忙率(有排队占比)。
 //   - WaitTypicalMinutes/WaitSafeMinutes：等待分钟的典型值(约 P50)和安全值(偏保守，约 P80)。
 //   - QueueGroupsTypical/Safe：同上，但单位是排队桌数。
-//   - CalledNoSlow/Typical/Fast：叫号速度的三档分位(慢/典型/快)，反映叫号推进节奏。
+//   - CalledNoSlow/Typical/Fast：公开叫号号码的三档分位，不是每分钟叫号速度。
 //   - Confidence：聚合可信度(high/medium/low)，由样本量决定。
 //
 // 指针字段为 nil 表示该店该时段缺这类样本（如叫号字段在旧 schema 里不存在）。
@@ -151,7 +151,7 @@ type QueueBaselineRollup struct {
 }
 
 // QueueBaselineConfig 控制本地公开排队基准采集：周期性快照用户选定门店的
-// 实时等位/状态并落盘。全国数据只从线上 Turso 读取，本地不再全量落全国。
+// 实时等位/状态并落盘。不连接线上数据库，不上传本机数据。
 type QueueBaselineConfig struct {
 	Enabled             bool     `json:"enabled"`
 	IntervalMinutes     int      `json:"interval_minutes"`
@@ -183,9 +183,9 @@ func NormalizeQueueBaselineConfig(cfg QueueBaselineConfig) QueueBaselineConfig {
 }
 
 func LoadQueueBaselineConfig() QueueBaselineConfig {
-	// 默认开启：走公开接口、不需要通行证、只采集常用门店并写本机。
-	// 这是“只读用户第一次打开就有曲线可看”的前提（用户可在「现在去吃」高级区关闭）。
-	def := QueueBaselineConfig{Enabled: true, IntervalMinutes: queueBaselineDefaultMinutes, UsePreferenceStores: true}
+	// Selecting a store is not consent to continuous collection. Preserve saved
+	// intent, but leave missing or damaged configurations disabled.
+	def := QueueBaselineConfig{IntervalMinutes: queueBaselineDefaultMinutes, UsePreferenceStores: true}
 	data, err := os.ReadFile(queueBaselinePath())
 	if err != nil {
 		return def
@@ -204,13 +204,17 @@ func SaveQueueBaselineConfig(cfg QueueBaselineConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(queueBaselinePath(), data, 0o600)
+	return AtomicWriteFile(queueBaselinePath(), data, 0o600)
 }
 
 type QueueBaselineCollector struct {
-	mu      sync.Mutex
-	running bool
-	lastAt  time.Time
+	mu           sync.Mutex
+	running      bool
+	lastAt       time.Time
+	lastError    string
+	pausedReason string
+	collect      func(context.Context, QueueBaselineConfig) (int, error)
+	done         chan struct{}
 }
 
 var queueBaselineCollector = &QueueBaselineCollector{}
@@ -223,11 +227,15 @@ func (c *QueueBaselineCollector) Start(ctx context.Context) {
 		return
 	}
 	c.running = true
+	c.done = make(chan struct{})
+	done := c.done
 	c.mu.Unlock()
 
 	go func() {
+		defer func() { c.mu.Lock(); c.running = false; close(done); c.mu.Unlock() }()
 		t := time.NewTicker(queueBaselineTickSeconds * time.Second)
 		defer t.Stop()
+		c.tick(ctx)
 		for {
 			select {
 			case <-ctx.Done():
@@ -239,27 +247,70 @@ func (c *QueueBaselineCollector) Start(ctx context.Context) {
 	}()
 }
 
+func (c *QueueBaselineCollector) wait() {
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 // tick 以固定 base cadence(30s) 轮询，但只在达到配置间隔时才真正采集，支持运行时热改开关/间隔。
-// 取数失败时不更新 lastAt，这样下一个 30s 周期会立即重试，而不是等满一个间隔——
-// 对「间隔设很大但首次失败」的场景更友好。
+// A wholly failed round is retried on the next tick; partial success waits for the
+// configured interval to avoid repeatedly requesting already collected stores.
 func (c *QueueBaselineCollector) tick(ctx context.Context) {
-	cfg := LoadQueueBaselineConfig()
-	if !cfg.Enabled {
-		return
-	}
+	c.collectTick(ctx)
+}
+
+type PublicQueueCollectionStatus struct {
+	Enabled         bool     `json:"enabled"`
+	Running         bool     `json:"running"`
+	LastAt          string   `json:"last_at,omitempty"`
+	LastError       string   `json:"last_error,omitempty"`
+	PausedReason    string   `json:"paused_reason,omitempty"`
+	StoreIDs        []string `json:"store_ids"`
+	IntervalSeconds int      `json:"interval_seconds"`
+}
+
+func (c *QueueBaselineCollector) status() PublicQueueCollectionStatus {
+	s := sharedQueueCollectionStatus(time.Now())
 	c.mu.Lock()
-	// due：从未采过(lastAt 零值)或距上次采集已达配置间隔。
-	due := c.lastAt.IsZero() || time.Since(c.lastAt) >= time.Duration(cfg.IntervalMinutes)*time.Minute
-	c.mu.Unlock()
-	if !due {
-		return
+	defer c.mu.Unlock()
+	if c.lastError != "" && s.LastError == "" {
+		s.LastError = c.lastError
 	}
-	if _, err := collectQueueBaselineWithConfig(ctx, cfg); err != nil {
-		return // 取数失败下个周期再试，不更新 lastAt
+	return s
+}
+
+func publicQueueCollectionBlockedReason() string {
+	if !netTicketMu.TryLock() {
+		return "正在处理取号，公开采集暂时避让"
 	}
-	c.mu.Lock()
-	c.lastAt = time.Now()
-	c.mu.Unlock()
+	netTicketMu.Unlock()
+	if isMainFlowRunning() {
+		return "主流程正在运行，公开采集暂时避让"
+	}
+	if mobileAuthCapture.isActive() {
+		return "手机捕获正在运行，公开采集暂时避让"
+	}
+	if active, _ := externalMainFlowActive(); active {
+		return "另一个主流程正在运行，公开采集暂时避让"
+	}
+	if isRunning() {
+		return "后台抢号正在运行，公开采集暂时避让"
+	}
+	return ""
+}
+
+func queueAlertStoreIDs() []string {
+	var ids []string
+	for _, rule := range LoadQueueAlertConfig().Rules {
+		if rule.Enabled {
+			ids = append(ids, rule.StoreID)
+		}
+	}
+	return UniqueNonEmptyStrings(ids)
 }
 
 // collectQueueBaseline 拉取本地选定门店快照并落盘，返回写入条数。
@@ -268,19 +319,30 @@ func collectQueueBaseline(ctx context.Context) (int, error) {
 }
 
 // collectQueueBaselineWithConfig 拉取本地选定门店的公开快照并落盘，返回写入条数。
-// 单店失败不中断整体（记 lastErr、continue），只有全部失败才返回错误。
+// 单店失败不中断整体，保留已采集数据并返回错误，状态页不隐藏部分失败。
 // 注意双重写入：每店快照既写基准记录(queue_baseline.jsonl)，又顺手写一份排队观测
 // (queue_observations.jsonl)——因为公开快照含当前叫号，能让叫号/到店预测在无通行证时也积累曲线。
 func collectQueueBaselineWithConfig(ctx context.Context, cfg QueueBaselineConfig) (int, error) {
+	return collectQueueBaselineWithClient(ctx, cfg, NewQueueLiveClient())
+}
+
+func collectQueueBaselineWithClient(ctx context.Context, cfg QueueBaselineConfig, client *QueueLiveClient) (int, error) {
 	storeIDs := queueBaselineStoreIDs(cfg)
 	if len(storeIDs) == 0 {
 		return 0, fmt.Errorf("暂无本地基准门店")
 	}
-	client := NewQueueLiveClient()
 	now := time.Now().Format(time.RFC3339)
 	records := make([]QueueBaselineRecord, 0, len(storeIDs))
 	var lastErr error
 	for _, storeID := range storeIDs {
+		if reason := publicQueueCollectionBlockedReason(); reason != "" {
+			lastErr = fmt.Errorf("%s", reason)
+			break
+		}
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+			break
+		}
 		s, err := client.GetStore(ctx, storeID)
 		if err != nil {
 			lastErr = err
@@ -289,7 +351,12 @@ func collectQueueBaselineWithConfig(ctx context.Context, cfg QueueBaselineConfig
 		records = append(records, queueBaselineRecordFromStore(s, now))
 		// 公开快照同样包含当前叫号：顺手写入排队观测，让叫号预测和到店预测
 		// 无需通行证也能积累本机曲线（与凭证态采样写入同一份观测文件）。
-		_ = appendQueueObservation(queueObservationFromLiveStore(s, time.Now()))
+		observation := queueObservationFromLiveStore(s, time.Now())
+		if err := appendQueueObservation(observation); err != nil {
+			lastErr = err
+			continue
+		}
+		evaluateQueueAlerts(ctx, observation, s.Name)
 	}
 	if len(records) == 0 && lastErr != nil {
 		return 0, lastErr
@@ -297,22 +364,20 @@ func collectQueueBaselineWithConfig(ctx context.Context, cfg QueueBaselineConfig
 	if err := appendQueueBaselineRecords(records); err != nil {
 		return 0, err
 	}
-	return len(records), nil
+	return len(records), lastErr
 }
 
 func queueBaselineStoreIDs(cfg QueueBaselineConfig) []string {
 	cfg = NormalizeQueueBaselineConfig(cfg)
-	if len(cfg.StoreIDs) > 0 {
-		return cfg.StoreIDs
+	ids := append([]string(nil), cfg.StoreIDs...)
+	if len(ids) == 0 && cfg.UsePreferenceStores {
+		prefs := LoadPreferences()
+		ids = prefs.SelectedStores
+		if len(ids) == 0 {
+			ids = prefs.StorePriority
+		}
 	}
-	if !cfg.UsePreferenceStores {
-		return nil
-	}
-	prefs := LoadPreferences()
-	if len(prefs.SelectedStores) > 0 {
-		return UniqueNonEmptyStrings(prefs.SelectedStores)
-	}
-	return UniqueNonEmptyStrings(prefs.StorePriority)
+	return UniqueNonEmptyStrings(append(ids, queueAlertStoreIDs()...))
 }
 
 func queueBaselineRecordFromStore(s QueueLiveStore, collectedAt string) QueueBaselineRecord {
@@ -349,6 +414,11 @@ var queueBaselineRecordsMu sync.Mutex
 func appendQueueBaselineRecords(records []QueueBaselineRecord) error {
 	queueBaselineRecordsMu.Lock()
 	defer queueBaselineRecordsMu.Unlock()
+	lock, err := lockQueueDataFile(queueBaselineRecordsPath())
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 
 	if len(records) == 0 {
 		return nil
@@ -414,7 +484,8 @@ func handleQueueBaseline(w http.ResponseWriter, r *http.Request) {
 			"store_ids":             cfg.StoreIDs,
 			"use_preference_stores": cfg.UsePreferenceStores,
 			"effective_store_ids":   queueBaselineStoreIDs(cfg),
-			"remote":                queueBaselineRemoteStatus(),
+			"remote":                localQueueBaselineStatus(),
+			"state":                 queueBaselineCollector.status(),
 		})
 	case http.MethodPost:
 		var body QueueBaselineConfig

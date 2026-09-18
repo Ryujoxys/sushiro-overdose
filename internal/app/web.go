@@ -4,8 +4,6 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/platform"
 
 import . "github.com/Ryujoxys/sushiro-overdose/internal/api"
 
-import . "github.com/Ryujoxys/sushiro-overdose/internal/notify"
-
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
@@ -41,7 +39,7 @@ func cmdWeb() {
 		fmt.Println("已清除上次异常退出的系统代理设置")
 	}
 
-	setNotifier(BuildNotifierFromConfig())
+	setNotifier(configuredNotifiers())
 	// 进程级 CSRF token：每次启动重新生成，旧页面里的 token 会失效（需刷新页面）。
 	setWebCSRFToken(newWebCSRFToken())
 
@@ -74,11 +72,7 @@ func cmdWeb() {
 	mux.HandleFunc("/api/queue/alerts/status", handleQueueAlertStatus)
 	mux.HandleFunc("/api/queue/areas", handleQueueLiveAreas)
 	mux.HandleFunc("/api/queue/baseline", handleQueueBaseline)
-	mux.HandleFunc("/api/cloud/auth", handleCloudAuth)
-	mux.HandleFunc("/api/cloud/auth/start", handleCloudAuthStart)
-	mux.HandleFunc("/api/cloud/auth/callback", handleCloudAuthCallback)
-	mux.HandleFunc("/api/cloud/auth/logout", handleCloudAuthLogout)
-	mux.HandleFunc("/api/cloud/auth/test", handleCloudAuthTest)
+	registerRetiredCloudRoutes(mux)
 	mux.HandleFunc("/api/update", handleUpdateCheck)
 	mux.HandleFunc("/api/stores", handleStores)
 
@@ -91,8 +85,7 @@ func cmdWeb() {
 	mux.HandleFunc("/api/queue/ticket", handleQueueTicket)
 	mux.HandleFunc("/api/queue/ticket/status", handleQueueTicketStatus)
 	mux.HandleFunc("/api/queue/ticket/cancel", handleCancelNetTicket)
-	mux.HandleFunc("/api/queue/ticket/plan", handleNetTicketPlan)
-	mux.HandleFunc("/api/queue/ticket/routine", handleNetTicketRoutine)
+	registerRetiredAutomationRoutes(mux)
 
 	// Preferences
 	mux.HandleFunc("/api/preferences", handlePreferences)
@@ -117,14 +110,9 @@ func cmdWeb() {
 	// Engine control
 	mux.HandleFunc("/api/engine/state", handleEngineState)
 	mux.HandleFunc("/api/engine/capture", handleEngineCapture)
-	mux.HandleFunc("/api/engine/booking", handleEngineBooking)
 	mux.HandleFunc("/api/engine/stop", handleEngineStop)
 	mux.HandleFunc("/api/engine/reset", handleEngineReset)
 	mux.HandleFunc("/api/engine/logs", handleEngineLogs)
-
-	// Sniper
-	mux.HandleFunc("/api/sniper/start", handleSniperStart)
-	mux.HandleFunc("/api/sniper/plan", handleSniperPlan)
 
 	// Background sampling
 	mux.HandleFunc("/api/sampling", handleSampling)
@@ -132,6 +120,10 @@ func cmdWeb() {
 	mux.HandleFunc("/api/sampling/stop", handleSamplingStop)
 	mux.HandleFunc("/api/sampling/once", handleSamplingOnce)
 	mux.HandleFunc("/api/sampling/autostart", handleSamplingAutoStart)
+	mux.HandleFunc("/api/queue/service", handlePublicQueueService)
+	mux.HandleFunc("/api/records", handleLocalRecords)
+	mux.HandleFunc("/api/records/settings", handleRecordViewSettings)
+	mux.HandleFunc("/api/records/export", handleLocalRecordsExport)
 
 	mux.HandleFunc("/api/mcp", handleMCP)
 	mux.HandleFunc("/api/mcp/autostart", handleMCPAutostart)
@@ -164,8 +156,6 @@ func cmdWeb() {
 		settings := tokens.ToSettingsWithPrefs(prefs)
 		setWebSettings(settings)
 	}
-	sampler.StartIfAuto(ctx)
-	netTicketSched.Start(ctx)
 	queueBaselineCollector.Start(ctx)
 
 	go func() {

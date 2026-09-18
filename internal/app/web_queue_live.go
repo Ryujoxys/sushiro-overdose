@@ -135,7 +135,7 @@ func handleQueuePlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if meal := strings.TrimSpace(q.Get("target_meal")); meal != "" {
-		writeJSON(w, buildQueueMealPlan(r.Context(), storeID, meal, atoiDefault(q.Get("travel_minutes"), 0), now, true))
+		writeJSON(w, buildQueueMealPlan(r.Context(), storeID, meal, 0, now, false))
 		return
 	}
 	writeError(w, http.StatusBadRequest, "缺少 pickup 或 target_meal 参数")

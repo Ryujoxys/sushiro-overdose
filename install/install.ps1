@@ -124,7 +124,7 @@ try {
     $Shortcut.TargetPath = $ShortcutTarget
     $Shortcut.WorkingDirectory = $InstallDir
     $Shortcut.IconLocation = "$ShortcutTarget,0"
-    $Shortcut.Description = "寿司郎 Overdose - 全自动抢号工具"
+    $Shortcut.Description = "寿司郎 Overdose - 本地排队记录与手动取号"
     $Shortcut.Save()
     Write-Host "已创建桌面快捷方式: Sushiro Overdose.lnk" -ForegroundColor Yellow
 } catch {

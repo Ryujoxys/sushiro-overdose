@@ -7,6 +7,7 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/proxy"
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -61,54 +62,24 @@ func setSystemProxy(port int) error {
 	return setWindowsManualProxy(port)
 }
 
-func setWindowsPACProxy(ProxyPort, webPort int) error {
-	pacURL := fmt.Sprintf("http://127.0.0.1:%d/proxy.pac?proxy=%d", webPort, ProxyPort)
-	proxyOverride := windowsProxyOverride()
-	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-	_ = runHiddenWindowsCommand("reg", "delete", key, "/v", "ProxyServer", "/f")
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"); err != nil {
-		return fmt.Errorf("写入 ProxyEnable 失败: %w", err)
-	}
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "AutoConfigURL", "/t", "REG_SZ", "/d", pacURL, "/f"); err != nil {
-		return fmt.Errorf("写入 AutoConfigURL 失败: %w", err)
-	}
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "AutoDetect", "/t", "REG_DWORD", "/d", "0", "/f"); err != nil {
-		return fmt.Errorf("写入 AutoDetect 失败: %w", err)
-	}
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", proxyOverride, "/f"); err != nil {
-		return fmt.Errorf("写入 ProxyOverride 失败: %w", err)
-	}
-	if err := setWinHTTPAutoProxy(pacURL, proxyOverride); err != nil {
-		LogMessage(time.Now(), "WinHTTP PAC 代理设置跳过: "+err.Error())
-	}
-
-	refreshProxySettings()
-	blockSushiroQUIC()
-	LogMessage(time.Now(), fmt.Sprintf("Windows PAC 代理已设置: 仅 %s 走 127.0.0.1:%d，其它域名直连", SushiroHost, ProxyPort))
-	return nil
+func setWindowsPACProxy(proxyPort, webPort int) error {
+	pacURL := fmt.Sprintf("http://127.0.0.1:%d/proxy.pac?proxy=%d", webPort, proxyPort)
+	return setWindowsProxyValues([][3]string{
+		{"ProxyEnable", "REG_DWORD", "0"},
+		{"AutoConfigURL", "REG_SZ", pacURL},
+		{"AutoDetect", "REG_DWORD", "0"},
+		{"ProxyOverride", "REG_SZ", windowsProxyOverride()},
+	}, "ProxyServer")
 }
 
 func setWindowsManualProxy(port int) error {
-	ProxyServer := fmt.Sprintf("http=127.0.0.1:%d;https=127.0.0.1:%d", port, port)
-	proxyOverride := windowsProxyOverride()
-	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-	_ = runHiddenWindowsCommand("reg", "delete", key, "/v", "AutoConfigURL", "/f")
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "1", "/f"); err != nil {
-		return fmt.Errorf("写入 ProxyEnable 失败: %w", err)
-	}
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "ProxyServer", "/t", "REG_SZ", "/d", ProxyServer, "/f"); err != nil {
-		return fmt.Errorf("写入 ProxyServer 失败: %w", err)
-	}
-	if err := runHiddenWindowsCommand("reg", "add", key, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", proxyOverride, "/f"); err != nil {
-		return fmt.Errorf("写入 ProxyOverride 失败: %w", err)
-	}
-	if err := setWinHTTPProxy(ProxyServer, proxyOverride); err != nil {
-		LogMessage(time.Now(), "WinHTTP 代理设置跳过: "+err.Error())
-	}
-
-	refreshProxySettings()
-	blockSushiroQUIC()
-	return nil
+	proxy := fmt.Sprintf("http=127.0.0.1:%d;https=127.0.0.1:%d", port, port)
+	return setWindowsProxyValues([][3]string{
+		{"ProxyEnable", "REG_DWORD", "1"},
+		{"ProxyServer", "REG_SZ", proxy},
+		{"AutoDetect", "REG_DWORD", "0"},
+		{"ProxyOverride", "REG_SZ", windowsProxyOverride()},
+	}, "AutoConfigURL")
 }
 
 func windowsProxyOverride() string {
@@ -153,15 +124,25 @@ func windowsProxyOverride() string {
 }
 
 func clearSystemProxy() error {
-	key := `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
-	err := runHiddenWindowsCommand("reg", "add", key, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f")
-	_ = runHiddenWindowsCommand("reg", "delete", key, "/v", "AutoConfigURL", "/f")
-	if resetErr := clearWinHTTPProxy(); resetErr != nil {
-		LogMessage(time.Now(), "WinHTTP 代理清理跳过: "+resetErr.Error())
+	err := restoreProxyTransaction(windowsProxySnapshotPath(), restoreWindowsProxy)
+	if os.IsNotExist(err) {
+		if data, markerErr := os.ReadFile(filepath.Join(AppDirPath(), "proxy_active.json")); markerErr == nil {
+			var marker struct {
+				RecoveryVersion int `json:"recovery_version"`
+			}
+			if json.Unmarshal(data, &marker) == nil && marker.RecoveryVersion >= 2 {
+				unblockSushiroQUIC()
+				return nil // No mutation started, or the transaction already rolled back.
+			}
+			return fmt.Errorf("未找到原代理备份；请在 Windows 代理设置中检查旧版残留，未改动当前配置")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 	unblockSushiroQUIC()
-	refreshProxySettings()
-	return err
+	return nil
 }
 
 // blockSushiroQUIC 屏蔽到寿司郎域名的出站 QUIC(UDP 443)，逼微信的 Chromium/XWeb
@@ -210,24 +191,6 @@ func resolveSushiroIPs() []string {
 		}
 	}
 	return out
-}
-
-func setWinHTTPProxy(ProxyServer, proxyOverride string) error {
-	return runHiddenWindowsCommand("netsh", "winhttp", "set", "proxy", "proxy-server="+ProxyServer, "bypass-list="+proxyOverride)
-}
-
-func setWinHTTPAutoProxy(pacURL, proxyOverride string) error {
-	settings := fmt.Sprintf(`{"Proxy":"","ProxyBypass":%q,"AutoconfigUrl":%q,"AutoDetect":false}`, proxyOverride, pacURL)
-	if err := runHiddenWindowsCommand("netsh", "winhttp", "set", "advproxy", "setting-scope=user", "settings="+settings); err == nil {
-		return nil
-	} else if importErr := runHiddenWindowsCommand("netsh", "winhttp", "import", "proxy", "source=ie"); importErr != nil {
-		return fmt.Errorf("advproxy=%w; import=%w", err, importErr)
-	}
-	return nil
-}
-
-func clearWinHTTPProxy() error {
-	return runHiddenWindowsCommand("netsh", "winhttp", "reset", "proxy")
 }
 
 func runHiddenWindowsCommand(name string, args ...string) error {
@@ -622,7 +585,7 @@ func installSamplingAutoStart() error {
 	if err != nil {
 		return err
 	}
-	value := `"` + exe + `" --sampler-daemon-child`
+	value := `"` + exe + `" --queue-collector-child`
 	cmd := exec.Command("reg", "add", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "SushiroOverdoseSampler", "/t", "REG_SZ", "/d", value, "/f")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Run()
@@ -634,8 +597,8 @@ func removeSamplingAutoStart() error {
 	// reg delete 在键/值不存在时也会非零退出（exit code 1）。
 	// 这里把「值不存在」视为已移除成功（幂等），其余真实失败原样上抛，
 	// 避免用户被告知「已移除」但注册表项还在、开机仍拉起旧进程。
-	if err := cmd.Run(); err != nil {
-		if isRegMissingValue(cmd, err) {
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if isRegMissingValue(output, err) {
 			return nil
 		}
 		return err
@@ -645,10 +608,10 @@ func removeSamplingAutoStart() error {
 
 // isRegMissingValue 判断 reg delete 的失败是不是「值/键本身就不存在」。
 // reg.exe 这类失败通常输出含 "Unable to find" 或 "was not found"。
-func isRegMissingValue(_ *exec.Cmd, err error) bool {
-	if ee, ok := err.(*exec.ExitError); ok {
-		msg := string(ee.Stderr)
-		if strings.Contains(msg, "not find") || strings.Contains(msg, "was not found") ||
+func isRegMissingValue(output []byte, err error) bool {
+	if _, ok := err.(*exec.ExitError); ok {
+		msg := strings.ToLower(string(output))
+		if strings.Contains(msg, "not find") || strings.Contains(msg, "was not found") || strings.Contains(msg, "unable to find") ||
 			strings.Contains(msg, "找不到") || strings.Contains(msg, "不存在") {
 			return true
 		}
@@ -688,8 +651,8 @@ func installMCPAutoStart() error {
 func removeMCPAutoStart() error {
 	cmd := exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "SushiroOverdoseMCP", "/f")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Run(); err != nil {
-		if isRegMissingValue(cmd, err) {
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if isRegMissingValue(output, err) {
 			return nil
 		}
 		return err

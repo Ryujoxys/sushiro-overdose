@@ -729,55 +729,13 @@ func buildQueuePressureCurve(ctx context.Context, storeID, date string, now time
 	localPoints := buildLocalQueuePressureCurvePoints(storeID, date)
 	out.LocalPoints = len(localPoints)
 
-	baseline, baselineStatus, baselineErr := loadRemoteQueuePressureBaseline(ctx, storeID, now)
-	out.Baseline = baselineStatus
-	remotePoints := buildRemoteQueuePressureCurvePoints(storeID, date, dateType, baseline)
-	out.RemotePoints = len(remotePoints)
-
-	// 来源策略（GitHub→Worker→Turso 与本机采样并行）：
-	// 1) 两端都有：始终 merge。重叠时刻本机优先（见 queuePressureCurveSourceRank），
-	//    空档用线上基准填满，避免「本机已有若干点就把整条线上曲线扔掉」——用户会误以为没拿到线上数据。
-	// 2) 仅远端 / 仅本机 / 都无：原样返回。
-	// queuePressureCurveLocalPreferredPoints 只影响文案（本机是否已够密），不再作为丢弃远端的开关。
-	switch {
-	case len(localPoints) > 0 && len(remotePoints) > 0:
-		out.Points = mergeQueuePressureCurvePoints(remotePoints, localPoints)
-		out.Source = "mixed"
-		if len(localPoints) >= queuePressureCurveLocalPreferredPoints {
-			out.Message = fmt.Sprintf("已叠加线上 Turso 基准（经 GitHub/云端）与本机 %d 个采样点：重叠时刻以本机为准，其余时段用线上基准补全；远端基准是历史规律，不是实时叫号。", len(localPoints))
-		} else {
-			out.Message = fmt.Sprintf("本机今天只有 %d 个采样点，已用线上 Turso 基准补全排队压力；带“本机采样”的点按实际数据覆盖，远端基准不等同实时叫号。", len(localPoints))
-		}
-	case len(remotePoints) > 0:
-		out.Points = remotePoints
-		out.Source = "remote_baseline"
-		out.Message = "本机今天还没有足够采样，当前使用线上 Turso 基准的排队压力；实时叫号判断仍以上方官方当前状态为准。"
-	case len(localPoints) > 0:
-		out.Points = localPoints
-		out.Source = "local"
-		if baselineErr != nil {
-			out.Message = "线上 Turso 基准暂时不可用，当前只显示本机采样曲线。"
-		} else if baselineStatus.Used {
-			out.Message = "线上 Turso 基准已连接，但这家店今天时段暂无可用基准点，当前只显示本机采样。"
-		} else if baselineStatus.Configured && !baselineStatus.Authenticated {
-			out.Message = "GitHub 尚未登录或会话失效，当前只显示本机采样；登录后可叠加线上基准。"
-		} else if baselineStatus.Configured {
-			out.Message = "线上基准未参与本次曲线，当前只显示本机采样。"
-		} else {
-			out.Message = "未配置线上基准，当前只显示本机采样。"
-		}
-	default:
+	out.Baseline = localQueueBaselineStatus()
+	out.Points = localPoints
+	out.Source = "local"
+	out.Message = "当前只显示本机采样曲线；历史不足时不会用线上数据补齐。"
+	if len(localPoints) == 0 {
 		out.Source = "none"
 		out.Message = "还没有这家店今天的本机采样曲线。开启本机数据收集后会逐步补齐。"
-		if baselineErr != nil {
-			out.Message += " 线上 Turso 基准暂时不可用。"
-		} else if baselineStatus.Used {
-			out.Message += " 线上 Turso 基准已连接，但这家店暂时没有可用基准数据。"
-		} else if baselineStatus.Configured && !baselineStatus.Used {
-			out.Message += " 线上 Turso 基准未返回可用数据。"
-		} else if !baselineStatus.Configured {
-			out.Message += " 未配置线上 Turso 基准。"
-		}
 	}
 	return out
 }

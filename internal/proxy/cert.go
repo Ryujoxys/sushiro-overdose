@@ -16,13 +16,14 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Ryujoxys/sushiro-overdose/internal/core"
 )
 
 // CertDirPath 返回本代理 CA 证书的存放目录（~/.sushiro-proxy）。
 // CA 证书与私钥都放这里，需要用户把 ca.crt 装进系统/浏览器信任库后，MITM 签发的叶子证书才会被客户端接受。
 func CertDirPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".sushiro-proxy")
+	return filepath.Join(core.DataHomeDir(), ".sushiro-proxy")
 }
 
 // LoadOrGenerateCA 优先复用已存在且仍在有效期内的本地 CA；否则新生成一对 CA 证书/私钥并落盘。

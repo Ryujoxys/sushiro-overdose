@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to publish, for example v1.2.0'
+        description: 'Release tag to publish, for example v4.0 or v4.0.1'
         required: true
 
 concurrency:
@@ -34,20 +34,22 @@ jobs:
       - name: Validate release tag
         id: release
         shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          TAG="${{ github.event.inputs.tag }}"
+          TAG="$INPUT_TAG"
           if [ -z "$TAG" ]; then
             TAG="${GITHUB_REF_NAME}"
           fi
-          if [[ "$TAG" != v* ]]; then
-            echo "Release tag must start with v: $TAG"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Expected a stable release tag, such as v4.0 or v4.0.1: $TAG"
             exit 1
           fi
+          NOTES="docs/release-notes-${TAG#v}.md"
+          test -s "$NOTES"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Run tests
-        run: go test ./...
+          echo "notes=$NOTES" >> "$GITHUB_OUTPUT"
 
       - name: Run vet
         run: go vet ./...
@@ -75,14 +77,17 @@ jobs:
           fi
 
       - name: Check shell syntax
-        run: bash -n install/install.sh scripts/bundle-macos.sh
+        run: bash -n install/install.sh scripts/bundle-macos.sh scripts/gen-windows-resources.sh
+
+      - name: Verify Windows PE resources (SxS-safe manifest)
+        run: go test ./internal/app/ -count=1 -run TestWindowsResourceSysoHasCleanManifest
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
+          version: 'v2.18.2'
+          args: release --clean --release-notes ${{ steps.release.outputs.notes }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ steps.release.outputs.tag }}
@@ -97,13 +102,14 @@ jobs:
           VERSION="${{ steps.release.outputs.version }}"
           BINARY="dist/sushiro_darwin_all/sushiro"
           if [ ! -f "$BINARY" ]; then
-            BINARY=$(find dist -name 'sushiro' -path '*darwin*' | head -1)
+            BINARY=$(find dist -name 'sushiro' -path '*darwin_all*' | head -1)
           fi
           if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
             echo "Darwin binary not found in dist/"
             find dist -maxdepth 3 -type f | sort
             exit 1
           fi
+          lipo -verify_arch x86_64 arm64 "$BINARY"
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh "$BINARY" "$VERSION" dist/
 
@@ -115,15 +121,6 @@ jobs:
           gh release upload "${{ steps.release.outputs.tag }}" \
             "dist/Sushiro-Overdose-${VERSION}-macOS.dmg" \
             --clobber
-
-      - name: Verify Windows PE resources (SxS-safe manifest)
-        shell: bash
-        run: |
-          # Fail the release early if resource_windows_*.syso lost the clean
-          # application manifest or picked up VC/comctl SxS dependencies.
-          # Symptom on user PCs: "应用程序无法启动，因为应用程序的并行配置不正确".
-          # Regenerate with: ./scripts/gen-windows-resources.sh
-          go test ./internal/app/ -count=1 -run TestWindowsResourceSysoHasCleanManifest
 
       - name: Upload click-to-run Windows executables
         shell: bash
@@ -157,3 +154,40 @@ jobs:
             fi
           done
           gh release upload "${{ steps.release.outputs.tag }}" dist/direct/*.exe --clobber
+
+      - name: Check all artifacts and publish the completed release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_NOTES: ${{ steps.release.outputs.notes }}
+        run: |
+          # Keep the release in draft until the DMG and both click-to-run EXEs exist.
+          EXPECTED=(
+            "sushiro-overdose_${RELEASE_VERSION}_darwin_all.tar.gz"
+            "sushiro-overdose_${RELEASE_VERSION}_linux_amd64.tar.gz"
+            "sushiro-overdose_${RELEASE_VERSION}_linux_arm64.tar.gz"
+            "sushiro-overdose_${RELEASE_VERSION}_windows_amd64.zip"
+            "sushiro-overdose_${RELEASE_VERSION}_windows_arm64.zip"
+            "Sushiro-Overdose-${RELEASE_VERSION}-macOS.dmg"
+            "Sushiro-Overdose-${RELEASE_VERSION}-windows-amd64.exe"
+            "Sushiro-Overdose-${RELEASE_VERSION}-windows-arm64.exe"
+          )
+          ASSETS="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          for name in "${EXPECTED[@]}"; do
+            if ! printf '%s\n' "$ASSETS" | grep -Fxq "$name"; then
+              echo "Missing release asset: $name" >&2
+              exit 1
+            fi
+          done
+          (
+            cd dist
+            shasum -a 256 *.tar.gz *.zip *.dmg > checksums.txt
+            cd direct
+            shasum -a 256 *.exe >> ../checksums.txt
+          )
+          test "$(wc -l < dist/checksums.txt | tr -d ' ')" = 8
+          gh release upload "$RELEASE_TAG" dist/checksums.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest \
+            --title "$RELEASE_TAG · lite正式版" --notes-file "$RELEASE_NOTES"

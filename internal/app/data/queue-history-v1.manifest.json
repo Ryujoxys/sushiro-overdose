@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "public-history-2026-09-06",
+  "timezone": "Asia/Shanghai",
+  "bucket_minutes": 30,
+  "source": "maintainer_snapshot",
+  "exported_at": "2026-09-18T03:48:36.744Z",
+  "first_at": "2026-06-17T10:20:07+08:00",
+  "cutoff_at": "2026-09-06T21:30:17+08:00",
+  "quality_note": "2026-07-08 前的归档记录缺少部分零等待值，早期曲线可能偏高。",
+  "store_count": 138,
+  "record_count": 238786,
+  "day_count": 81,
+  "bytes": 1295261,
+  "sha256": "a51f64322f3c0fc037fa31f2732c7574461f4f515e8a43681dc83ef08284b3bc",
+  "quality": {
+    "daily_rows": 55759,
+    "raw_representatives": 183027,
+    "duplicate_keys": 0,
+    "unknown_waits": 55882,
+    "non_open": 17175,
+    "orphans": 0,
+    "usable_waits": 167674,
+    "valid_zero_waits": 73088,
+    "usable_called_numbers": 118027,
+    "unknown_called_numbers": 113104
+  },
+  "method": "Latest representative per store / CST date / half-hour; raw snapshots preferred, archived daily representatives retain NULL as unknown. Local overlap takes precedence at runtime."
+}

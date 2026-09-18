@@ -51,6 +51,26 @@ func TestNormalizeQueueBaselineConfig(t *testing.T) {
 	}
 }
 
+func TestQueueBaselineCollectionRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	if cfg := LoadQueueBaselineConfig(); cfg.Enabled {
+		t.Fatal("missing collection config must not opt in")
+	}
+	if err := SaveQueueBaselineConfig(QueueBaselineConfig{Enabled: true, StoreIDs: []string{"1012"}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := LoadQueueBaselineConfig(); !cfg.Enabled {
+		t.Fatal("explicit saved opt-in must be retained")
+	}
+	if err := os.WriteFile(queueBaselinePath(), []byte(`{"enabled":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg := LoadQueueBaselineConfig(); cfg.Enabled {
+		t.Fatal("damaged collection config must not silently opt in")
+	}
+}
+
 func TestQueueBaselineStoreIDsUseExplicitOrPreferenceStores(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -31,6 +31,7 @@ type mobileAuthCaptureManager struct {
 	cancel       context.CancelFunc
 	doneActivity func()
 	token        string
+	generation   uint64
 	proxyPort    int
 	guidePort    int
 	hosts        []string
@@ -80,11 +81,17 @@ func handleMobileAuthStop(w http.ResponseWriter, r *http.Request) {
 // ②引导页路径含随机 token（newMobileUAToken），防同网段他人乱扫；
 // ③引导页监听 0.0.0.0:0（随机端口）——必须绑 0.0.0.0，手机才能通过电脑局域网 IP 访问到。
 func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked("")
 
-	if status := engine.GetState().Status; status == EngineCapturing || status == EngineBooking || status == EngineSniping {
+	engine.mu.RLock()
+	busy := engine.isRunningLocked()
+	engine.mu.RUnlock()
+	if busy {
+		status := engine.GetState().Status
 		return nil, fmt.Errorf("当前主流程正在运行（%s），请先停止后再启动手机凭证捕获", status)
 	}
 	doneActivity := markMainFlowActive("mobile-auth-capturing")
@@ -151,6 +158,7 @@ func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
 	m.cancel = cancel
 	m.doneActivity = doneActivity
 	m.token = token
+	m.generation = authLifecycle.generation
 	m.proxyPort = proxy.Port()
 	m.guidePort = guidePort
 	m.hosts = hosts
@@ -185,7 +193,7 @@ func (m *mobileAuthCaptureManager) watch(ctx context.Context, token string) {
 		case <-ctx.Done():
 			return
 		case <-timeout.C:
-			m.stop("手机凭证捕获已超时，请重新启动")
+			m.stopSession(token, "手机凭证捕获已超时，请重新启动；无需提交真实订单")
 			return
 		case <-ticker.C:
 			// sameRun 比对本次启动的 token：只有仍是自己这一次会话、且 tokens 还在，才检查完成。
@@ -197,34 +205,40 @@ func (m *mobileAuthCaptureManager) watch(ctx context.Context, token string) {
 				return
 			}
 			if tokens.IsComplete() {
-				m.finish(tokens)
+				m.finish(token, tokens)
 				return
 			}
 		}
 	}
 }
 
-// finish 在令牌抓全后落盘：先存 UA，再存全部凭证参数，然后刷新前端设置、补默认门店、
-// 标记健康并停止会话。任何一步失败都记日志并改写 message 给用户，但不抛错中断流程。
-// markAuthHealthy 是因为重新抓到有效凭证 → 此前"凭证过期"提醒应同步清除。
-func (m *mobileAuthCaptureManager) finish(tokens *CapturedTokens) {
+// finish commits only the current session, serialized with credential reset.
+// Complete fields are saved as unverified until a read-only auth probe succeeds.
+func (m *mobileAuthCaptureManager) finish(token string, tokens *CapturedTokens) {
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token == "" || m.token != token || m.tokens != tokens || m.generation != authLifecycle.generation {
+		return
+	}
 	prefs := LoadPreferences()
 	tokens.Lock()
 	rawUA := tokens.UserAgent
 	tokens.Unlock()
 	if strings.TrimSpace(rawUA) != "" {
 		if _, err := SaveMobileUA(rawUA, "mobile-auth", "phone-proxy"); err != nil {
-			m.addLog("保存手机 UA 失败: " + err.Error())
+			LogMessage(time.Now(), "保存手机 UA 失败: "+err.Error())
 		}
 	}
 	if err := SaveLocalConfig(tokens); err != nil {
-		m.addLog("保存手机凭证参数失败: " + err.Error())
-		m.mu.Lock()
+		LogMessage(time.Now(), "保存手机凭证参数失败: "+err.Error())
 		m.message = "凭证参数已捕获，但保存失败: " + err.Error()
-		m.mu.Unlock()
+		m.stopLocked(m.message)
 		return
 	}
-	markAuthHealthy()                            // 手机重新捕获凭证 → 清除"凭证过期"提醒
+	authLifecycle.generation++
+	markAuthUnverified()
 	recordAuthCaptured(captureMethodMobileProxy) // 记录捕获时间/方式，重置寿命周期
 	setWebSettings(tokens.ToSettingsWithPrefs(prefs))
 	tokens.Lock()
@@ -239,11 +253,17 @@ func (m *mobileAuthCaptureManager) finish(tokens *CapturedTokens) {
 		})
 	}
 
-	m.mu.Lock()
 	m.saved = true
 	m.message = "手机凭证参数已保存。请关闭手机 Wi-Fi 代理，再回电脑测试基础接口。"
-	m.mu.Unlock()
-	m.stop("手机凭证参数已保存")
+	m.stopLocked(m.message)
+}
+
+func (m *mobileAuthCaptureManager) stopSession(token, message string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.token == token && token != "" {
+		m.stopLocked(message)
+	}
 }
 
 func (m *mobileAuthCaptureManager) stop(message string) {
@@ -275,6 +295,7 @@ func (m *mobileAuthCaptureManager) stopLocked(message string) {
 		m.doneActivity = nil
 	}
 	m.token = ""
+	m.tokens = nil
 	m.proxyPort = 0
 	m.guidePort = 0
 	m.hosts = nil
@@ -285,6 +306,12 @@ func (m *mobileAuthCaptureManager) stopLocked(message string) {
 	if message != "" {
 		m.message = message
 	}
+}
+
+func (m *mobileAuthCaptureManager) isActive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.proxy != nil
 }
 
 func (m *mobileAuthCaptureManager) status() map[string]any {
@@ -398,7 +425,7 @@ ul{padding-left:20px}
 <li>回「Wi-Fi」→ 当前网络 → 「配置代理」选「手动」，服务器/端口填下面任一：
 <ul>` + hostList + `</ul></li>
 <li>彻底关闭再打开手机微信，进寿司郎小程序。</li>
-<li>点一次「门店」，再真的排队或预约一下（产生查询+预约两类请求；之后可取消）。</li>
+<li>点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。</li>
 <li>电脑提示捕获完成后，立刻关闭手机 Wi-Fi 代理（改回「关闭」）。</li>
 </ol>
 <div class="ok">装好信任后，回电脑端点「我已装好证书，验证一下」继续。</div>
@@ -409,7 +436,7 @@ ul{padding-left:20px}
 <ol class="steps">
 <li>手机装「Reqable」（或 HttpCanary），打开它，按引导装好它的 CA 证书并信任。</li>
 <li>在 Reqable 里开始抓包，过滤 <code>crm-cn-prd.sushiro.com.cn</code>。</li>
-<li>打开微信进寿司郎小程序，点一次「门店」，再真的排队或预约一下（之后可取消）。</li>
+<li>打开微信进寿司郎小程序，点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。</li>
 <li>在 Reqable 找到那条请求，导出为 cURL 或复制请求头。</li>
 <li>把导出的内容发到电脑（微信文件传输助手），粘进电脑端「拿通行证」第 4 步。</li>
 </ol>

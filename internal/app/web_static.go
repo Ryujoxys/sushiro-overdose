@@ -12,7 +12,7 @@ import (
 //
 // Edit webui/* for UI changes — do not re-introduce a monolithic string blob here.
 
-//go:embed webui/index.html webui/app.css webui/app.js webui/logo.b64
+//go:embed webui/index.html webui/app.css webui/app.js webui/record_chart.js webui/auth_ticket.js webui/logo.b64
 var webuiFS embed.FS
 
 // indexHTML is the full document served at GET /. Built once at init from webui/.
@@ -37,11 +37,19 @@ func mustAssembleIndexHTML() string {
 	if err != nil {
 		panic("webui: read app.js: " + err.Error())
 	}
+	flow, err := webuiFS.ReadFile("webui/auth_ticket.js")
+	if err != nil {
+		panic("webui: read auth_ticket.js: " + err.Error())
+	}
+	chart, err := webuiFS.ReadFile("webui/record_chart.js")
+	if err != nil {
+		panic("webui: read record_chart.js: " + err.Error())
+	}
 	logo, err := webuiFS.ReadFile("webui/logo.b64")
 	if err != nil {
 		panic("webui: read logo.b64: " + err.Error())
 	}
-	return assembleIndexHTML(string(html), string(css), string(js), strings.TrimSpace(string(logo)))
+	return assembleIndexHTML(string(html), string(css), string(flow)+"\n"+string(chart)+"\n"+string(js), strings.TrimSpace(string(logo)))
 }
 
 // assembleIndexHTML injects CSS, JS, and logo into the HTML template placeholders.

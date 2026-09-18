@@ -19,12 +19,13 @@ import (
 )
 
 type AuthProbeReport struct {
-	OK      bool              `json:"ok"`
-	StoreID string            `json:"store_id,omitempty"`
-	Store   string            `json:"store,omitempty"`
-	Missing []string          `json:"missing,omitempty"`
-	Results []AuthProbeResult `json:"results"`
-	Advice  []string          `json:"advice,omitempty"`
+	OK            bool              `json:"ok"`
+	Authenticated bool              `json:"authenticated"`
+	StoreID       string            `json:"store_id,omitempty"`
+	Store         string            `json:"store,omitempty"`
+	Missing       []string          `json:"missing,omitempty"`
+	Results       []AuthProbeResult `json:"results"`
+	Advice        []string          `json:"advice,omitempty"`
 }
 
 type AuthProbeResult struct {
@@ -52,6 +53,7 @@ func handleAuthProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 func RunAuthProbe(ctx context.Context, requestedStore string) AuthProbeReport {
+	generation := authGeneration()
 	tokens, err := LoadLocalConfig()
 	if err != nil {
 		report := AuthProbeReport{}
@@ -62,13 +64,22 @@ func RunAuthProbe(ctx context.Context, requestedStore string) AuthProbeReport {
 	}
 
 	prefs := LoadPreferences()
-	return runAuthProbeWithTokens(ctx, requestedStore, tokens, prefs)
+	report := runAuthProbeWithTokens(ctx, requestedStore, tokens, prefs)
+	withAuthGeneration(generation, func() { applyAuthProbeHealth(report) })
+	return report
 }
 
 func runAuthProbeWithTokens(ctx context.Context, requestedStore string, tokens *CapturedTokens, prefs UserPreferences) AuthProbeReport {
+	return runAuthProbeWithClient(ctx, requestedStore, tokens, prefs, directProbeHTTPClient())
+}
+
+func runAuthProbeWithClient(ctx context.Context, requestedStore string, tokens *CapturedTokens, prefs UserPreferences, httpClient *http.Client) AuthProbeReport {
 	report := AuthProbeReport{}
 	settings := tokens.ToSettingsWithPrefs(prefs)
-	storeID := chooseProbeStoreID(requestedStore, settings.StoreIDs, tokens.StoreIDs)
+	tokens.Lock()
+	capturedStores := append([]string(nil), tokens.StoreIDs...)
+	tokens.Unlock()
+	storeID := chooseProbeStoreID(requestedStore, settings.StoreIDs, capturedStores)
 	report.StoreID = storeID
 
 	if missing := tokens.MissingFields(false); len(missing) > 0 {
@@ -84,7 +95,6 @@ func runAuthProbeWithTokens(ctx context.Context, requestedStore string, tokens *
 		return report
 	}
 
-	httpClient := directProbeHTTPClient()
 	storeResult, storeName := probeGetStoreInfo(ctx, httpClient, settings, storeID)
 	report.Results = append(report.Results, storeResult)
 	report.Store = storeName
@@ -108,6 +118,14 @@ func runAuthProbeWithTokens(ctx context.Context, requestedStore string, tokens *
 		}
 	}
 	report.Advice = authProbeAdvice(report)
+	for _, result := range report.Results {
+		if result.OK && !result.Skipped && strings.Contains(result.Path, "/api_auth/") {
+			report.Authenticated = true
+		}
+	}
+	if authProbeRejected(report) {
+		report.Authenticated = false
+	}
 	return report
 }
 
@@ -187,10 +205,19 @@ func probeReservations(ctx context.Context, client *http.Client, settings Settin
 	}
 	if result.OK {
 		var reservations []ReservationRecord
-		if err := json.Unmarshal(body, &reservations); err == nil {
+		data := bytes.TrimSpace(body)
+		if len(data) > 0 && data[0] == '{' {
+			var envelope struct {
+				Data json.RawMessage `json:"data"`
+			}
+			_ = json.Unmarshal(data, &envelope)
+			data = bytes.TrimSpace(envelope.Data)
+		}
+		if len(data) > 0 && data[0] == '[' && json.Unmarshal(data, &reservations) == nil {
 			result.Detail = fmt.Sprintf("返回 %d 条预约", len(reservations))
 		} else {
-			result.Detail = "返回 JSON 正常"
+			result.OK = false
+			result.Detail = "响应未包含预约列表，无法确认认证查询成功"
 		}
 	}
 	return result
@@ -253,7 +280,7 @@ func probeOfficialAPI(ctx context.Context, client *http.Client, method, target, 
 
 func authProbeAdvice(report AuthProbeReport) []string {
 	if report.OK {
-		return []string{"基础接口可用，凭证参数本身有效；Windows 问题集中在 PC 微信代理/MITM 捕获阶段。"}
+		return []string{"只读检查已完成；跳过的接口未验证，预约和取号能力仍以实际提交结果为准。"}
 	}
 	out := []string{}
 	for _, result := range report.Results {
@@ -277,6 +304,29 @@ func authProbeAdvice(report AuthProbeReport) []string {
 		out = append(out, "基础接口未全部通过，复制本结果继续排查。")
 	}
 	return UniqueNonEmptyStrings(out)
+}
+
+func authProbeRejected(report AuthProbeReport) bool {
+	for _, result := range report.Results {
+		if result.Status == http.StatusUnauthorized || result.Status == http.StatusForbidden {
+			return true
+		}
+	}
+	return false
+}
+
+func applyAuthProbeHealth(report AuthProbeReport) {
+	switch {
+	case authProbeRejected(report):
+		markAuthStale("只读检查返回认证失败（401/403）")
+	case report.Authenticated:
+		markAuthHealthy()
+	default:
+		// Temporary failures are not evidence that previously rejected tokens recovered.
+		if getAuthHealth().Status != authHealthStale {
+			markAuthUnverified()
+		}
+	}
 }
 
 func authProbeFailureSummary(report AuthProbeReport) string {

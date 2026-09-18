@@ -1,7 +1,5 @@
 package app
 
-import . "github.com/Ryujoxys/sushiro-overdose/internal/platform"
-
 import . "github.com/Ryujoxys/sushiro-overdose/internal/api"
 
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
@@ -189,7 +187,7 @@ func onBookingSuccess(reservation ReservationRecord, storeName, storeAddress, sl
 
 	title := fmt.Sprintf("寿司郎%s成功 - %s", mode, storeName)
 	message := fmt.Sprintf("号码: %s | 时段: %s", reservation.Number, slotLabel)
-	DesktopNotification(title, message)
+	sendDesktopNotification(title, message)
 
 	content := fmt.Sprintf("### %s成功 - %s\n**号码**：`%s`\n**时段**：%s\n**地址**：%s",
 		mode, storeName, reservation.Number, slotLabel, storeAddress)

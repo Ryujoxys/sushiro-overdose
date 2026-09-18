@@ -14,10 +14,10 @@ func TestOfficialMutationCallsStayInApprovedEntrypoints(t *testing.T) {
 	}
 
 	allowed := map[string][]string{
-		".CreateReservation(": {"runBooking", "runBookingLoop", "runSniper", "runSniperLoop"},
-		".CreateNetTicket(":   {"takeNetTicketLocked", "fireNetTicket", "runAuthVerify"},
+		".CreateReservation(": {},
+		".CreateNetTicket(":   {"takeNetTicketLocked"},
 		".CancelReservation(": {"handleCancelReservation", "cmdCancel"},
-		".CancelNetTicket(":   {"handleCancelNetTicket", "runAuthVerify"},
+		".CancelNetTicket(":   {"handleCancelNetTicket"},
 	}
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") {

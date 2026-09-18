@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -37,7 +38,17 @@ func (t *CapturedTokens) CaptureFromRequest(req *http.Request, bodyBytes []byte)
 		}
 	}
 
-	if sid := req.URL.Query().Get("storeId"); sid != "" {
+	query := req.URL.Query()
+	if t.WechatID == "" {
+		t.WechatID = query.Get("wechatId")
+	}
+	if t.PhoneNumber == "" {
+		t.PhoneNumber = query.Get("phoneNumber")
+	}
+	addStore := func(sid string) {
+		if sid == "" {
+			return
+		}
 		found := false
 		for _, existing := range t.StoreIDs {
 			if existing == sid {
@@ -49,10 +60,17 @@ func (t *CapturedTokens) CaptureFromRequest(req *http.Request, bodyBytes []byte)
 			t.StoreIDs = append(t.StoreIDs, sid)
 		}
 	}
+	addStore(query.Get("storeId"))
 
 	if req.Method == http.MethodPost && len(bodyBytes) > 0 {
 		var body map[string]any
 		if json.Unmarshal(bodyBytes, &body) == nil {
+			if sid, ok := body["storeId"].(string); ok {
+				addStore(sid)
+			}
+			if sid, ok := body["storeId"].(float64); ok && sid > 0 && sid == float64(int64(sid)) {
+				addStore(strconv.FormatInt(int64(sid), 10))
+			}
 			if wid, ok := body["wechatId"].(string); ok && t.WechatID == "" {
 				t.WechatID = wid
 			}

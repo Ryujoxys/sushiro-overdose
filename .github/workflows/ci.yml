@@ -1,8 +1,7 @@
-name: CI
+name: Manual Checks
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,7 +22,7 @@ jobs:
           cache: false
 
       - name: Run tests
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Run vet
         run: go vet ./...
@@ -57,6 +56,28 @@ jobs:
         shell: pwsh
         run: |
           $null = [scriptblock]::Create((Get-Content install/install.ps1 -Raw))
+
+  local-data-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Check browser script syntax
+        run: node --check internal/app/webui/app.js
+      - name: Check manual ticket syntax
+        run: node --check internal/app/webui/auth_ticket.js
+      - name: Check record chart syntax
+        run: node --check internal/app/webui/record_chart.js
+      - name: Test local UI and retired Worker
+        run: node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs cloudflare/sushiro-cloud/test/retired.test.mjs
+      - name: Test local MCP adapters
+        working-directory: mcp
+        run: python -m unittest discover -s tests -v
 
   cross-build:
     runs-on: ubuntu-latest

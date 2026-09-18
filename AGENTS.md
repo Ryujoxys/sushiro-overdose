@@ -7,11 +7,13 @@
 
 ## 项目概述
 
-**sushiro-overdose** 是寿司郎 (SUSHIRO) 餐厅的自动预约抢号工具。
+**sushiro-overdose** 是寿司郎 (SUSHIRO) 的本地排队记录与手动取号工具。
 
-核心流程：本地 MITM 代理拦截 PC 微信小程序流量 → 捕获凭证参数 → 直连官方 API 轮询/抢号。
+v4.0 的版本名称为「lite正式版」，在应用设置、CLI 和发布标题中展示；数字版本仍独立用于更新比较。GoReleaser 保留 tag 去掉 v 后的版本文本，因此 v4.0 的产物名使用 4.0，不要擅自补成 4.0.0。
 
-**技术栈**：Go 1.23，零外部依赖（纯标准库），单 `package main`。
+默认主流程：选门店 → 开始记录 → 查看自己的排队规律。手动取号独立保留：选店、必要时认证、显式确认、提交一次。所有狙击、定时取号、循环预约与每日自动计划均已移除；旧接口返回 410，旧计划不执行，历史数据保留。“想几点吃”仅提供只读建议。
+
+**技术栈**：Go 1.23，Go 端零外部依赖（纯标准库），已按职责拆到 `internal/`，根目录只保留入口。可选 MCP 为独立 Python 模块。
 
 **目标平台**：macOS (amd64/arm64 Universal)、Windows (amd64/arm64)、Linux (amd64/arm64)。
 
@@ -25,34 +27,37 @@
     ▼
 main.go (默认启动 Web UI)
     │
-    ├── web.go          HTTP 服务器 127.0.0.1:8081
-    │   ├── web_handlers.go   REST API + SSE
-    │   └── web_static.go     内嵌 HTML/CSS/JS 单页应用
+    ├── internal/app/web.go  HTTP 服务器 127.0.0.1:39871
+    │   ├── web_*.go         REST API + SSE
+    │   └── web_static.go    嵌入 webui/index.html、app.css、auth_ticket.js、record_chart.js、app.js
     │
-    ├── engine.go       后台引擎（可从 Web 控制）
-    │   ├── 捕获模式: proxy.go + cert.go + platform_*.go
-    │   └── 抢号模式: api.go + preferences.go
+    ├── queue_service.go    无凭证的公开记录服务
+    ├── local_records.go    本机历史聚合与导出
+    ├── engine.go           仅管理显式认证和代理清理
     │
-    └── CLI 子命令 (cli/calendar/sniper/list/cancel/...)
+    └── CLI 子命令 (collect/status/doctor/...)
 ```
 
 ### 两种使用模式
 
 1. **Web UI 模式（默认）**：无参数运行 → 启动 HTTP 服务 → 优先打开独立应用窗口，失败时回退默认浏览器
-2. **CLI 模式（高级）**：`sushiro cli` → 传统终端交互
+2. **记录服务模式**：`sushiro collect run` → 前台公开记录；`collect start` → 独立后台记录
 
 ---
 
 ## 文件清单与职责
 
+下表为职责索引，未带目录的文件名不代表根目录文件。当前包位置以 `ARCHITECTURE.md` 和 `internal/` 实际文件为准。历史图表使用本机记录和可关闭的固定内置历史包，标注截止时间，包不注入个人模型。GitHub 登录和运行时数据库客户端已移除，旧云端路径统一返回 410。不要根据旧发布文档重新接入共享数据库，协议见 `docs/local-data-contract.md`，离线包见 `docs/bundled-history.md`。
+
 ### 核心入口
 
 | 文件 | 职责 |
 |------|------|
-| `main.go` | 程序入口、CLI 命令分发、前台 CLI 流程、`runBookingLoop` 抢号循环 |
-| `daemon.go` | 后台启动/停止/status、守护进程子进程与 PID 读写 |
-| `engine.go` | **Web 控制的后台引擎**：管理捕获/抢号生命周期，状态广播到 SSE，可启动/停止 |
-| `engine_sniper.go` | Web 狙击计划执行引擎 |
+| `main.go` | 程序入口、CLI 命令分发，旧自动命令只给出移除说明 |
+| `daemon.go` | 旧进程停止/status 与 PID 兼容工具，不再启动自动预约 |
+| `engine.go` | **认证引擎**：仅管理凭证捕获生命周期、代理恢复及状态广播 |
+| `queue_service.go` | 独立公开采集服务、`collect` CLI、显式登录自启动与 `/api/queue/service`；不触碰凭证或订单调度 |
+| `queue_collection_state.go` | 桌面与服务共享采集心跳/间隔，OS 文件锁互斥，主流程活动后自动恢复 |
 
 ### Web UI
 
@@ -64,14 +69,18 @@ main.go (默认启动 Web UI)
 | `web_engine.go` | 状态、预约、引擎控制、洞察 API |
 | `web_preferences.go` | 偏好、通知、repair/uninstall API |
 | `auth_import.go` | 手动导入凭证 API：解析手机抓包导出的 JSON/curl/raw headers 并保存凭证参数 |
-| `web_sniper.go` | Web 狙击计划 API |
 | `web_sampling.go` | Web 信息收集 API |
 | `mobile_auth_capture.go` | 手机凭证捕获 API：局域网引导页 + 手机代理捕获真实微信凭证参数 |
 | `web_queue_trends.go` | 本地到店预测 API |
 | `web_queue_live.go` | 实时排队 API（公开门店等位/区域/单店详情） |
-| `web_cloud_auth.go` | 云端数据登录 API：Worker URL 配置、GitHub OAuth 本机回调、会话验证/退出 |
+| `local_records.go` | 本机公开快照查询、等待分布、样本覆盖与 JSONL 导出 |
+| `history_bundle.go`、`record_view.go` | 固定历史包嵌入和校验、图表半小时代表值合并、历史开关持久化；不参与取号预测或个人模型 |
+| `webui/record_chart.js` | 叫号与等待曲线切换、时段数值标注、范围和样本解释；鼠标、键盘、触屏均可查看 |
+| `automation_retired.go` | 旧自动抢号 API 返回 410，不执行或写计划 |
+| `netticket.go` | 手动取号结果与旧文件兼容，强制禁用旧计划 |
+| `cloud_retired.go` | 已下线的云端 API 统一返回 410，不跳转或保存会话 |
 | `web_events.go` | SSE 事件总线 |
-| `web_static.go` | `sushiroLogoSVG` Logo SVG 常量 + `indexHTML` 完整单页（Sushiro 品牌配色 + 官网同款布局） |
+| `web_static.go` + `webui/` | 嵌入的页面、样式和脚本，保留 Sushiro 视觉规范 |
 
 ### API 与数据
 
@@ -81,7 +90,8 @@ main.go (默认启动 Web UI)
 | `queue_live.go` | 公开排队接口客户端：门店列表、单店排队、区域列表（标准库实现，支持 `SUSHIRO_TOKEN` 覆盖）；解析 `getStoreById` 的 `groupQueues` 得到当前叫号 |
 | `queue_live_panel.go` | 单店实时面板聚合：实时叫号/在等桌数/预估等待 + 由本机采样历史算近15分钟叫号与历史均速 |
 | `queue_alerts.go` | 叫号提醒规则与去重状态：`wait_below`（预估等待降到阈值）/`called_reach`（叫号接近手中号），采样循环命中即经通知渠道推送 |
-| `cloud_auth.go` | 云端数据配置与客户端：本地只保存 Cloudflare Worker URL 和应用 session，不保存 Turso token |
+| `queue_baseline_local.go` | 本机公开快照聚合为统一版本化数据协议，无远程数据库请求 |
+| `queue_model.go` | 本机分位数统计模型持久化、文件指纹失效与样本覆盖状态，不包含个人凭证/票号 |
 | `config.go` | `Settings` 结构体定义，`LoadSettings` 从 JSON 文件加载（备用，当前未被调用） |
 | `tokens.go` | 捕获到的凭证参数模型、本地配置读写、旧配置迁移、凭证参数 → `Settings` 转换 |
 | `preferences.go` | **用户偏好持久化**：人数/桌型/自定义时段范围/日期与时段优先级，存到 `~/.sushiro/preferences.json` |
@@ -121,21 +131,19 @@ main.go (默认启动 Web UI)
 |------|------|
 | `booking.go` | `cmdList`/`cmdCancel` CLI 命令，`onBookingSuccess` 成功后逻辑（状态/通知/日志） |
 | `calendar.go` | `cmdCalendar` 终端日历网格 |
-| `sniper.go` | 狙击模式：开放前 30 天精准抢号，50ms 高速轮询 |
 | `history.go` | `history.jsonl` 追加（节流 30s），`cmdTrends` 趋势分析 |
 | `recommend.go` | `cmdRecommend` 基于历史数据的时段推荐 |
 | `insights.go` | Web/CLI 可复用的历史洞察：按门店/星期/时段统计开放概率、售罄速度与推荐 |
-| `activity.go` | 主流程活动标记与信息收集跨进程锁，确保信息收集避让抢号/捕获/狙击 |
+| `activity.go` | 主流程活动标记与信息收集跨进程锁，确保信息收集避让主动认证和手动取号 |
 | `queue_trends.go` | 本地排队数据结构、到店预测推荐、过号趋势聚合、节假日分类、信息收集状态提示 |
 | `sampling.go` | 后台信息收集配置、运行状态、定时 runner，仅记录历史不抢号 |
-| `sampling_cli.go` | `sample` CLI：单次信息收集、前台信息收集、后台静默信息收集 start/stop/status |
+| `sampling_cli.go` | `sample once/run` 保留认证时段采集；`start/stop/status/autostart` 兼容转到公开采集服务 |
 | `update_check.go` | GitHub Latest Release 检查与版本比较 |
 | `health.go` | 每 5 分钟验证 Token 有效性 |
 | `state.go` | `State` JSON 读写，`logMessage`，`readInput` |
 | `store.go` | `StoreRegistry` 门店昵称管理 `~/.sushiro/stores.json` |
 | `diagnostics.go` | doctor 只读诊断、通知测试、本机网络/证书/端口/代理链路检查 |
 | `maintenance.go` | repair-proxy / uninstall 的代理恢复和本地敏感数据清理 |
-| `sniper_plan.go` | Web 狙击计划持久化、倒计时、尝试次数与状态摘要 |
 
 ### 资源与脚本
 
@@ -143,7 +151,7 @@ main.go (默认启动 Web UI)
 |------|------|
 | `assets/sushiro.png` | 寿司郎官方 Logo PNG（base64 嵌入到 `web_static.go` 的 `logoBase64` 常量中） |
 | `scripts/bundle-macos.sh` | Mac .app + DMG 桌面应用打包脚本 |
-| `cloudflare/sushiro-cloud/` | Cloudflare Worker：GitHub OAuth、HMAC session、Turso secrets 和固定白名单查询 |
+| `cloudflare/sushiro-cloud/` | Worker 停用版本：全部路径返回 410；需要另行发布才能关闭线上入口 |
 | `install/install.sh` | macOS/Linux 一键安装脚本 |
 | `install/install.ps1` | Windows PowerShell 一键安装脚本 |
 
@@ -151,7 +159,7 @@ main.go (默认启动 Web UI)
 
 | 文件 | 职责 |
 |------|------|
-| `.github/workflows/ci.yml` | 常规 CI：push/PR 运行测试、vet、gofmt、go mod tidy diff、安装脚本语法检查 |
+| `.github/workflows/ci.yml` | 手动检查：仅 workflow_dispatch，运行隔离测试、静态检查及跨平台编译，不由 push/PR 自动触发 |
 | `.goreleaser.yml` | GoReleaser v2 配置：多平台编译 + Mac Universal Binary |
 | `.github/workflows/release.yml` | GitHub Actions：tag 触发 → GoReleaser → Mac .app 打包 → 上传 Release |
 | `resource_windows_{amd64,arm64}.syso` | Windows PE 资源（图标 + 干净 application manifest）；`go build` 按 GOARCH 自动链接 |
@@ -164,6 +172,8 @@ main.go (默认启动 Web UI)
 
 所有用户数据统一存放在 `~/.sushiro/` 目录：
 
+开发预览可设置绝对路径 `SUSHIRO_DATA_HOME`，应用数据和 CA 分别写入该根目录下的 `.sushiro/`、`.sushiro-proxy/`。不要覆盖 `HOME` / `USERPROFILE`，否则 macOS 钥匙串等系统能力会失效。独立数据目录不迁移旧凭证，也不允许修改系统自启动；它不是系统沙箱，用户显式认证仍需授权证书和代理。
+
 ```
 ~/.sushiro/
 ├── config.json          凭证参数（X-App-Code, Authorization 等）
@@ -172,12 +182,19 @@ main.go (默认启动 Web UI)
 ├── notify.json          通知渠道配置
 ├── stores.json          门店昵称
 ├── sampling.json        信息收集配置
-├── cloud_auth.json      云端数据 Worker URL 与 GitHub 登录 session（不含 Turso token）
+├── cloud_auth.json      遗留文件，已不再读取或写入
 ├── holidays.json        可选节假日/调休工作日本地表
 ├── history.jsonl        历史时段数据（JSONL 格式）
 ├── queue_observations.jsonl 实时排队/公开叫号快照（本地私有）
 ├── queue_sessions.jsonl 真实取号等待 session（本地私有）
 ├── queue_stats.json     本地聚合排队统计缓存
+├── queue_baseline.json  公开采集配置
+├── queue_baseline.jsonl 公开门店快照，统一协议字段
+├── queue_model.json     本机分位数模型与源文件指纹
+├── record_view.json     是否将内置历史计入图表，默认开启
+├── queue_collection_state.json 共享采集进度、心跳与错误
+├── queue_service.lock   公开采集服务生命周期 OS 锁
+├── queue_collection.lock 单轮公开采集 OS 锁
 ├── sushiro.log          后台模式日志
 ├── sampling.log         后台信息收集日志
 ├── sushiro.pid          后台进程 PID
@@ -192,7 +209,7 @@ main.go (默认启动 Web UI)
 └── ca.key               CA 私钥
 ```
 
-**旧版兼容**：`main.go` 启动时调用 `migrateOldConfig()`，自动将旧版放在当前目录的 `.sushiro_local.json` 迁移到 `~/.sushiro/config.json`。
+**旧版兼容**：常规启动调用 `MigrateOldConfig()`，自动将旧版当前目录的 `.sushiro_local.json` 迁移到 `~/.sushiro/config.json`；公开服务在迁移之前独立分流，不读取个人凭证。
 
 ---
 
@@ -205,22 +222,24 @@ main.go (默认启动 Web UI)
 | GET | `/api/stores` | 已配置门店列表（含名称/昵称/地址） |
 | GET | `/api/calendar?store=ID` 或 `/api/calendar?stores=ID1,ID2&available=1&period=lunch` | 门店时段数据，支持多选、只看可预约、午餐/晚餐过滤 |
 | GET | `/api/reservations` | 当前预约列表 |
+| GET | `/api/records`、`/api/records/export` | 图表分析与个人 JSONL 导出，支持 days=all 或 1..365、store、date_type、date；导出不含内置历史 |
+| GET/POST | `/api/records/settings` | 包含历史数据开关，仅 POST 写入本机，GET 不写文件 |
+| POST | `/api/queue/ticket` | 用户显式确认后手动取号一次，不自动重试 |
+| GET | `/api/queue/ticket/status` | 只读查询当前排队号 |
+| POST | `/api/queue/ticket/cancel` | 用户显式确认后取消当前排队号 |
 | GET | `/api/insights` | 历史洞察与推荐 |
 | GET | `/api/queue/trends` | 本地到店预测：推荐时段、实际过号、全局过号、信息收集权限与数据新鲜度 |
+| GET/POST | `/api/queue/service` | 公开采集服务与本机模型状态；显式启用后台、自启动、暂停和关闭自启动 |
 | GET | `/api/queue/stores?city=深圳&waiting=1&limit=10` | 实时排队门店列表，支持 city/area/q/store/stores/open/waiting/near/limit |
 | GET | `/api/queue/store?id=1012` | 实时单店排队详情 |
 | GET | `/api/queue/live?store=1012` | 单店实时面板：当前叫号/在等桌数/预估等待/近15分钟叫号/历史均速 |
 | GET/POST | `/api/queue/alerts` | 读取/保存叫号提醒规则 |
 | GET | `/api/queue/areas` | 官方区域列表 |
-| GET/POST | `/api/cloud/auth` | 云端数据配置与状态：Cloudflare Worker URL、GitHub 会话状态 |
-| GET | `/api/cloud/auth/start` | 跳转到 Cloudflare Worker 的 GitHub OAuth 登录入口 |
-| GET | `/api/cloud/auth/callback` | Worker 登录后回调本机，保存应用 session |
-| POST | `/api/cloud/auth/logout` | 清除本机保存的云端 session |
-| POST | `/api/cloud/auth/test` | 验证云端 Worker 会话和 `/api/me` |
+| 任意 | `/api/cloud`、`/api/cloud/*` | 已下线，统一返回 410；不再接受配置、登录或回调 |
 | GET/POST | `/api/preferences` | 读取/保存用户偏好 |
 | GET/POST | `/api/config` | 读取/保存通知配置 |
 | POST | `/api/auth/import` | 手动导入凭证参数，支持 JSON、curl、raw headers |
-| POST | `/api/auth/reset` | 重置本机寿司郎认证：停止当前自动操作、删除旧凭证、清内存 client、停止未执行自动取号计划，引导重新获取凭证 |
+| POST | `/api/auth/reset` | 停止认证、删除本机凭证并清内存 client；不删除公开记录、不取消号码 |
 | GET/POST | `/api/mobile-ua` | 读取/手动保存移动端 UA |
 | POST | `/api/mobile-ua/capture/start` | 启动手机扫码 UA 采集页 |
 | POST | `/api/mobile-ua/capture/stop` | 停止手机扫码 UA 采集 |
@@ -233,13 +252,11 @@ main.go (默认启动 Web UI)
 | POST | `/api/repair-proxy` | 恢复系统代理并清理代理 marker |
 | POST | `/api/uninstall` | 清理本地敏感数据和证书 |
 | POST | `/api/processes/stop` | 恢复代理并停止本应用相关进程，支持响应后退出当前进程 |
-| GET | `/api/engine/state` | 引擎当前状态（idle/capturing/booking/success/error） |
+| GET | `/api/engine/state` | 认证状态（idle/capturing/stopping/error） |
 | POST | `/api/engine/capture` | 启动参数捕获（MITM 代理） |
-| POST | `/api/engine/booking` | 启动自动抢号 |
+| 任意 | `/api/engine/booking`、`/api/sniper/*`、`/api/queue/ticket/plan`、`/api/queue/ticket/routine` | 自动功能已移除，返回 410 |
 | POST | `/api/engine/stop` | 停止当前操作 |
 | GET | `/api/engine/logs` | 获取引擎日志 |
-| GET/POST | `/api/sniper/plan` | 读取/保存 Web 狙击计划 |
-| POST | `/api/sniper/start` | 启动 Web 狙击计划 |
 | GET/POST | `/api/sampling` | 读取/保存后台信息收集配置 |
 | POST | `/api/sampling/start` | 启动后台信息收集 |
 | POST | `/api/sampling/stop` | 停止后台信息收集 |
@@ -286,7 +303,7 @@ go build -o sushiro .
 ./sushiro
 
 # CLI 模式
-./sushiro cli
+./sushiro collect run
 
 # 指定版本号编译
 go build -ldflags "-X main.Version=1.2.3" -o sushiro .
@@ -315,6 +332,10 @@ goreleaser release --snapshot --clean
 - 代码已合并到 `master`/`main` 分支
 - `go build ./...` 和 `go vet ./...` 通过
 - 已确认版本号（遵循 semver）
+- 写好 `docs/release-notes-<版本>.md`；tag 支持 `v4.0` 或 `v4.0.1`，当前流程只发布稳定版
+- 修改版本时同步 `winres/winres.json` 的数值版本并重新生成 syso
+
+发布工作流先创建草稿，再补齐 DMG、Windows 双击版及 8 个文件的 SHA-256 校验值，全部存在后才公开并设为 Latest。GoReleaser 固定为已验证版本，避免工具升级导致产物名或格式变化。
 
 ### 步骤
 
@@ -444,7 +465,7 @@ Sushiro Overdose.app/
 
 ### 为什么用内嵌 HTML 而不是前后端分离？
 
-单二进制分发是核心优势。用户下载一个文件就能运行，无需安装 Node.js、npm 等。HTML/CSS/JS 全部内嵌在 `web_static.go` 的 Go 字符串常量中。
+单二进制分发是核心优势。用户下载一个文件就能运行主程序，无需安装 Node.js、npm 等。HTML/CSS/JS 在 `internal/app/webui/` 中维护，通过 `web_static.go` 嵌入二进制。
 
 ### 为什么零外部 Go 依赖？
 
@@ -463,11 +484,13 @@ Sushiro Overdose.app/
 
 ### 端口冲突处理
 
-`web.go` 中的 `findAvailablePort()` 从 8081 开始尝试，冲突则 +1，最多尝试 100 个端口。MITM 捕获代理也从 8080 开始尝试可用端口，并把实际端口写入系统代理和 `proxy_active.json`。避免用户因端口被占用而无法启动或捕获失败。
+Web 与 MITM 的默认端口以 `internal/core/ports.go` 为准，Web 从 39871 开始尝试可用端口。代理实际端口会写入系统代理和 `proxy_active.json`，不能在页面或客户端硬编码实际监听端口。
 
 ---
 
 ## 编码约定
+
+自动测试不得弹出真实系统通知或发送外部推送。应用层通知统一经过 `notification_delivery.go`，测试由 `TestMain` 替换为内存通知器并隔离用户目录；不得绕过该边界。保留通知状态、通道路由和去重测试。按维护者要求，检查工作流仅手动触发，发布不跑全量测试，但保留 Windows 产物清单校验；本地或手动执行测试同样必须隔离副作用。
 
 1. **代码按职责分包到 `internal/`**：`app`（编排+CLI+Web）依赖 `core`/`api`/`proxy`/`platform`/`notify`；`core` 为无内部依赖的公共底座。详见 [ARCHITECTURE.md](ARCHITECTURE.md)
 2. **跨平台函数**：`internal/platform/platform.go` 导出大写函数 → `platform_*.go` 小写实现
@@ -498,11 +521,7 @@ Sushiro Overdose.app/
 
 ### 修改 Web UI 样式
 
-前端代码在 `web_static.go` 中：
-- `logoBase64` — Logo PNG 的 base64 编码，直接内嵌到 HTML `<img>` 标签
-- `indexHTML` — 完整单页 HTML/CSS/JS
-
-CSS 变量定义在 `:root` 块。修改后 `go build` 即生效。
+前端代码在 `internal/app/webui/index.html`、`app.css`、`app.js` 中；`web_static.go` 负责嵌入和注入。CSS 变量定义在 `app.css` 的 `:root` 块。修改后 `go build` 即生效。
 
 如需更换 Logo，将新 PNG 放到 `assets/`，然后 `base64 -i assets/new-logo.png` 替换 `logoBase64` 的值。
 

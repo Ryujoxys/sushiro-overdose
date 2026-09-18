@@ -9,9 +9,14 @@ package platform
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
+	"errors"
 	"sync"
 	"syscall"
 )
+
+var ErrUserKeychainUnavailable = errors.New("macOS 用户钥匙串不可用，请在正常用户环境中重新启动应用，不要覆盖 HOME")
+
+var errIsolatedAutoStart = errors.New("独立数据目录下不修改系统自启动；请使用正常安装的应用设置自启动")
 
 // DesktopNotification sends an OS-level notification to the user.
 func DesktopNotification(title, message string) {
@@ -108,31 +113,49 @@ type AutoStartStatus struct {
 // SamplingAutoStartStatus 查询当前平台自启状态。不同平台语义不同
 // （macOS 用 LaunchAgent，Windows 用注册表/启动文件夹），由各平台实现填充。
 func SamplingAutoStartStatus() AutoStartStatus {
+	if HasCustomDataHome() {
+		return AutoStartStatus{Message: errIsolatedAutoStart.Error()}
+	}
 	return samplingAutoStartStatus()
 }
 
-// InstallSamplingAutoStart 注册开机自启取号。平台不支持时返回错误。
+// InstallSamplingAutoStart registers the public collector at user login, not a booking scheduler.
 func InstallSamplingAutoStart() error {
+	if HasCustomDataHome() {
+		return errIsolatedAutoStart
+	}
 	return installSamplingAutoStart()
 }
 
-// RemoveSamplingAutoStart 取消开机自启取号。幂等：未注册时通常返回 nil。
+// RemoveSamplingAutoStart removes the public collector's login registration.
 func RemoveSamplingAutoStart() error {
+	if HasCustomDataHome() {
+		return errIsolatedAutoStart
+	}
 	return removeSamplingAutoStart()
 }
 
 // MCPAutoStartStatus 查询 MCP 助手开机自启状态。
 func MCPAutoStartStatus() AutoStartStatus {
+	if HasCustomDataHome() {
+		return AutoStartStatus{Message: errIsolatedAutoStart.Error()}
+	}
 	return mcpAutoStartStatus()
 }
 
 // InstallMCPAutoStart 注册 MCP 助手开机自启（启动 sushiro --mcp-daemon-child 确保 venv 就绪）。
 func InstallMCPAutoStart() error {
+	if HasCustomDataHome() {
+		return errIsolatedAutoStart
+	}
 	return installMCPAutoStart()
 }
 
 // RemoveMCPAutoStart 取消 MCP 助手开机自启。幂等。
 func RemoveMCPAutoStart() error {
+	if HasCustomDataHome() {
+		return errIsolatedAutoStart
+	}
 	return removeMCPAutoStart()
 }
 

@@ -45,9 +45,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 go-winres make \
   --in winres/winres.json \
   --arch amd64,arm64 \
-  --out "$tmpdir/rsrc" \
-  --product-version 0.0.0.0 \
-  --file-version 0.0.0.0
+  --out "$tmpdir/rsrc"
 
 for arch in amd64 arm64; do
   src="$tmpdir/rsrc_windows_${arch}.syso"

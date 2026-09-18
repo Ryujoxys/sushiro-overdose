@@ -16,9 +16,10 @@ type authImportRequest struct {
 }
 
 // handleAuthImport 接收用户粘贴的抓包文本（JSON / curl / 原始请求头），解析出凭证字段，
-// 字段不全则只回预览不落盘；齐全则存 UA、存凭证、补默认门店、刷新设置并标记健康。
+// 字段不全则只回预览不落盘；齐全则存 UA、存凭证、补默认门店，标为尚未验证。
 // 是凭证捕获代理之外的"手动导入"入口。
 func handleAuthImport(w http.ResponseWriter, r *http.Request) {
+	generation := authGeneration()
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
@@ -46,6 +47,19 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
+	if generation != authLifecycle.generation {
+		writeError(w, http.StatusConflict, "认证状态已重置，请重新导入")
+		return
+	}
+	engine.mu.RLock()
+	busy := engine.isRunningLocked()
+	engine.mu.RUnlock()
+	if busy || mobileAuthCapture.status()["active"] == true {
+		writeError(w, http.StatusConflict, "请先停止当前操作，再导入凭证")
+		return
+	}
 	tokens.Lock()
 	rawUA := tokens.UserAgent
 	tokens.Unlock()
@@ -56,7 +70,8 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存凭证参数失败: "+err.Error())
 		return
 	}
-	markAuthHealthy()                       // 重新导入凭证 → 清除"凭证过期"提醒
+	authLifecycle.generation++
+	markAuthUnverified()
 	recordAuthCaptured(captureMethodImport) // 记录捕获时间/方式，重置寿命周期
 	prefs := LoadPreferences()
 	tokens.Lock()

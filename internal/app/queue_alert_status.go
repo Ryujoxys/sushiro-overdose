@@ -1,7 +1,5 @@
 package app
 
-import . "github.com/Ryujoxys/sushiro-overdose/internal/notify"
-
 import (
 	"math"
 	"sort"
@@ -11,12 +9,13 @@ import (
 )
 
 type QueueAlertStatusResponse struct {
-	GeneratedAt   string                       `json:"generated_at"`
-	Config        QueueAlertConfig             `json:"config"`
-	Rules         []QueueAlertRuleStatus       `json:"rules"`
-	Sampling      QueueSamplingStatus          `json:"sampling"`
-	Notifications QueueAlertNotificationStatus `json:"notifications"`
-	Warnings      []string                     `json:"warnings,omitempty"`
+	GeneratedAt      string                       `json:"generated_at"`
+	Config           QueueAlertConfig             `json:"config"`
+	Rules            []QueueAlertRuleStatus       `json:"rules"`
+	Sampling         QueueSamplingStatus          `json:"sampling"`
+	PublicCollection PublicQueueCollectionStatus  `json:"public_collection"`
+	Notifications    QueueAlertNotificationStatus `json:"notifications"`
+	Warnings         []string                     `json:"warnings,omitempty"`
 }
 
 type QueueAlertNotificationStatus struct {
@@ -25,6 +24,7 @@ type QueueAlertNotificationStatus struct {
 }
 
 type QueueAlertRuleStatus struct {
+	EvaluatedAt                string         `json:"evaluated_at,omitempty"`
 	Key                        string         `json:"key"`
 	Rule                       QueueAlertRule `json:"rule"`
 	Label                      string         `json:"label,omitempty"`
@@ -59,10 +59,11 @@ func BuildQueueAlertStatus(now time.Time) QueueAlertStatusResponse {
 	state := loadQueueAlertState()
 	summary := queueAlertSamplingSummary(observations)
 	response := QueueAlertStatusResponse{
-		GeneratedAt:   now.Format(time.RFC3339),
-		Config:        cfg,
-		Sampling:      buildQueueSamplingStatus(now, summary),
-		Notifications: queueAlertNotificationStatus(),
+		GeneratedAt:      now.Format(time.RFC3339),
+		Config:           cfg,
+		Sampling:         buildQueueSamplingStatus(now, summary),
+		PublicCollection: queueBaselineCollector.status(),
+		Notifications:    queueAlertNotificationStatus(),
 	}
 
 	rates := map[string]float64{}
@@ -97,7 +98,7 @@ func queueAlertSamplingSummary(observations []QueueObservation) QueueTrendSummar
 }
 
 func queueAlertNotificationStatus() QueueAlertNotificationStatus {
-	notifier := BuildNotifierFromConfig()
+	notifier := configuredNotifiers()
 	list := notifier.List()
 	out := QueueAlertNotificationStatus{Configured: len(list) > 0}
 	for _, item := range list {
@@ -141,6 +142,7 @@ func buildQueueAlertRuleStatus(rule QueueAlertRule, latest QueueObservation, sta
 	remainingToThreshold := max(0, threshold-calledNo)
 	remainingToTicket := max(0, rule.TargetNo-calledNo)
 	status := QueueAlertRuleStatus{
+		EvaluatedAt:          state.EvaluatedAt,
 		Key:                  rule.key(),
 		Rule:                 rule,
 		Label:                queueAlertLabel(rule),

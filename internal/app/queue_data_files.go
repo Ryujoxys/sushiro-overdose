@@ -1,9 +1,11 @@
 package app
 
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
+import "github.com/Ryujoxys/sushiro-overdose/internal/platform"
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"os"
 	"strconv"
@@ -35,15 +37,14 @@ const (
 // 时像现有调用方一样 range 拷贝或建新切片。
 type jsonlReadCache[T any] struct {
 	mu      sync.Mutex
+	path    string
 	size    int64
 	modNano int64
 	rows    []T
 }
 
-// load 返回 path 的解析结果；(size, mtime) 与上次一致时直接命中缓存，
-// 跳过全量读盘和逐行反序列化。未命中才解析，且解析后用「新 stat」作键：
-// 解析期间若有并发追加，新 stat 与解析内容对齐，下次 stat 变化会重读——
-// 宁可多解析一次也不能把旧键配新内容。
+// Cache only a stable (path, size, mtime) snapshot. If a writer changes the file
+// while parsing, return the available rows without caching a partial snapshot.
 func (c *jsonlReadCache[T]) load(path string, normalize func(*T)) []T {
 	if normalize == nil {
 		normalize = func(*T) {}
@@ -55,7 +56,7 @@ func (c *jsonlReadCache[T]) load(path string, normalize func(*T)) []T {
 		c.size, c.modNano, c.rows = 0, 0, nil
 		return nil
 	}
-	if c.rows != nil && c.size == info.Size() && c.modNano == info.ModTime().UnixNano() {
+	if c.path == path && c.rows != nil && c.size == info.Size() && c.modNano == info.ModTime().UnixNano() {
 		return c.rows
 	}
 	rows, parseErr := parseJSONLFile[T](path, normalize)
@@ -63,16 +64,26 @@ func (c *jsonlReadCache[T]) load(path string, normalize func(*T)) []T {
 		LogMessage(time.Now(), "读取排队数据文件失败（"+path+"）："+parseErr.Error())
 	}
 	if info2, err2 := os.Stat(path); err2 == nil {
-		info = info2
+		if info2.Size() != info.Size() || info2.ModTime() != info.ModTime() {
+			c.rows = nil
+			return rows // Never cache a partially read file under its newer fingerprint.
+		}
 	} else {
 		// 解析期间文件被删：按空数据处理。
 		c.size, c.modNano, c.rows = 0, 0, nil
 		return nil
 	}
 	c.size = info.Size()
+	c.path = path
 	c.modNano = info.ModTime().UnixNano()
 	c.rows = rows
 	return c.rows
+}
+
+func lockQueueDataFile(path string) (*platform.FileLock, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return platform.LockFile(ctx, path+".lock")
 }
 
 // parseJSONLFile 逐行解析 JSONL。与旧 loader 的差异：scanner 错误不再被静默

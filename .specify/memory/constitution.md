@@ -9,12 +9,12 @@
    - 允许只读入口修正本地过期缓存，但必须只影响 `~/.sushiro/` 本地文件，不能触发官方 mutation API。
 
 2. 预约和排队必须分层隔离。
-   - 预约使用 `CreateReservation` / `CancelReservation`。
+   - 不再创建预约；旧预约查询与显式取消保留兼容。
    - 排队取号使用 `CreateNetTicket` / `CancelNetTicket`。
    - UI 和后端都必须带 `kind` 或独立入口，禁止用同一个取消接口模糊处理两类记录。
    - 允许的预约取消入口只有显式 Web `handleCancelReservation` 和 CLI `cmdCancel`。
-   - 允许的排队取消入口只有显式 Web `handleCancelNetTicket`，以及凭证验证入口 `runAuthVerify`（仅取消本次验证刚取的号；若官方提示已有号则绝不取消）。
-   - 允许的排队取号入口只有 `handleQueueTicket` / `fireNetTicket`，以及凭证验证入口 `runAuthVerify`（用户显式点「验证凭证」时，对开放门店取号一次并立即取消，用于确认凭证是否仍可取号）。
+   - 允许的排队取消入口只有显式 Web `handleCancelNetTicket`。
+   - 允许的排队取号入口只有 `handleQueueTicket`（内部 `takeNetTicketLocked`）。凭证验证只能只读，不能以验证为由创建或取消排队号。
 
 3. 公开排队数据和认证预约数据必须分层隔离。
    - 公开接口可以用于看板、趋势、排队估算、门店状态。
@@ -26,15 +26,15 @@
    - 官方当前预约接口不可用时，UI 必须明确提示“不代表小程序没有预约”。
    - 过期排队号必须按日期或官方 no-current-ticket 信号清理。
 
-5. 采集和看板不能影响抢号主流程。
+5. 采集和看板不能影响主动认证与手动取号。
    - 采集只能写历史、基准、趋势数据。
    - 主流程活跃时，采集必须避让。
    - 看板计算不能写预约状态、排队状态、取消状态。
 
 6. 官方业务错误必须分类，不允许只刷“失败”。
-   - 名额已满：继续尝试其他目标。
-   - 已有预约：停止当前抢号，提示用户到小程序确认取消是否同步。
-   - 官方临时错误：短时间跳过当前时段，后续重试。
+   - 名额已满：提示用户，不自动尝试其他目标。
+   - 已有号码：查询并展示，不再取第二个号。
+   - 官方临时错误或结果不明：先查询已有号码，不自动重试写请求。
    - 认证过期：停止并要求重新捕获。
 
 7. 任何跨模块新增能力必须有测试。
@@ -47,10 +47,11 @@
 
 | Domain | Owner Files | May Write | Must Not Do |
 |---|---|---|---|
-| Booking reservation | `internal/api/api.go`, `internal/app/engine*.go`, `internal/app/sniper*.go` | reservation state on success | cancel queue ticket |
-| Queue ticket | `internal/app/netticket.go`, `internal/app/web_engine.go`, `internal/api/api.go` | net ticket plan/state | cancel reservation |
+| Legacy reservations | `internal/app/booking.go`, `internal/app/web_engine.go` | explicit query/cancel results | create reservations or cancel queue ticket |
+| Manual queue ticket | `internal/app/netticket.go`, `internal/app/web_engine.go`, `internal/api/api.go` | net ticket plan/state | cancel reservation |
 | Public queue live data | `internal/app/queue_live*.go` | observations/baseline | call auth mutation API |
 | Sampling | `internal/app/sampling.go`, `internal/app/history.go` | history/baseline/observations | modify reservation or net ticket state |
+| Public local service | `internal/app/queue_service.go`, `queue_collection_state.go`, `queue_model.go` | public history/model/heartbeat, explicit autostart | import credentials, start account schedulers, submit tickets |
 | Dashboard/trends | `internal/app/queue_dashboard.go`, `internal/app/queue_trends.go` | computed responses/cache | mutate official or local booking state |
 | Web UI | `internal/app/web_static.go`, `internal/app/web_*.go` | display and explicit user actions | hidden destructive actions |
 

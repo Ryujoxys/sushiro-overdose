@@ -22,12 +22,20 @@ func TestAssembleIndexHTMLFromEmbeddedSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app.js: %v", err)
 	}
+	flow, err := webuiFS.ReadFile("webui/auth_ticket.js")
+	if err != nil {
+		t.Fatalf("read auth_ticket.js: %v", err)
+	}
+	chart, err := webuiFS.ReadFile("webui/record_chart.js")
+	if err != nil {
+		t.Fatalf("read record_chart.js: %v", err)
+	}
 	logo, err := webuiFS.ReadFile("webui/logo.b64")
 	if err != nil {
 		t.Fatalf("read logo.b64: %v", err)
 	}
 
-	got := assembleIndexHTML(string(html), string(css), string(js), strings.TrimSpace(string(logo)))
+	got := assembleIndexHTML(string(html), string(css), string(flow)+"\n"+string(chart)+"\n"+string(js), strings.TrimSpace(string(logo)))
 	if got != indexHTML {
 		t.Fatalf("assembleIndexHTML != package indexHTML (init path diverged): len(got)=%d len(indexHTML)=%d", len(got), len(indexHTML))
 	}
@@ -39,6 +47,8 @@ func TestAssembleIndexHTMLFromEmbeddedSources(t *testing.T) {
 		"<script>",
 		"</script>",
 		"function go(",
+		"function renderRecordChart(",
+		"function initRecordChart(",
 		"init();",
 		"</html>",
 	} {

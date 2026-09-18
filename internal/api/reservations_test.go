@@ -100,6 +100,21 @@ func TestGetReservationsAcceptsEmptyWrappedData(t *testing.T) {
 	}
 }
 
+func TestGetReservationsRejectsUnknownOrNullResponses(t *testing.T) {
+	for _, body := range []string{`{}`, `{"error":"expired"}`, `null`, `{"data":null}`, `{"data":{}}`, `"unexpected"`, ``} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			client := NewClient(Settings{BaseURL: server.URL})
+			if records, err := client.GetReservations(context.Background()); err == nil {
+				t.Fatalf("unknown response treated as a reservation list: %+v", records)
+			}
+		})
+	}
+}
+
 func TestGetNetTicketStatusMarksNetTicketKind(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/wechat/api_auth/2.0/ticket/status" {

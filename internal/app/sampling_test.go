@@ -133,6 +133,15 @@ func TestSamplingRunLogsQueueObservationAppendFailureWithoutStoreError(t *testin
 }
 
 func TestCompareVersions(t *testing.T) {
+	if compareVersions("v4.0", "3.18.0") <= 0 {
+		t.Fatal("v4.0 should be newer than 3.18.0")
+	}
+	if compareVersions("v4.0", "4.0.0") != 0 {
+		t.Fatal("v4.0 and 4.0.0 should compare equal")
+	}
+	if compareVersions("v4.0.1", "4.0") <= 0 {
+		t.Fatal("4.0 must be upgradable to 4.0.1")
+	}
 	if compareVersions("v2.4.0", "2.3.9") <= 0 {
 		t.Fatal("v2.4.0 should be newer than 2.3.9")
 	}

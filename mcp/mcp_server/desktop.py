@@ -25,7 +25,7 @@ class DesktopClient:
         """GET 桌面端 API。失败返回 {"ok": False, "hint": ...}。"""
         url = f"{self._base}{path}"
         try:
-            with httpx.Client(timeout=httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT)) as client:
+            with httpx.Client(timeout=httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT), trust_env=False) as client:
                 # Host 头用 127.0.0.1 通过桌面端白名单（防 DNS 重绑定）
                 resp = client.get(url, params=params, headers={"Host": f"127.0.0.1:{self._port}"})
             if resp.status_code != 200:

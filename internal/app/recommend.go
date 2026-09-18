@@ -71,7 +71,7 @@ func cmdRecommend() {
 	// Filter: only future dates, at least 3 observations
 	loc := getWebSettings().Location
 	if loc == nil {
-		loc, _ = time.LoadLocation("Asia/Shanghai")
+		loc = SushiroTimezone
 	}
 	now := time.Now().In(loc)
 

@@ -619,7 +619,7 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 // 这些状态会跟手机端争抢凭证，所以采样必须让路。
 func isMainFlowRunning() bool {
 	switch engine.GetState().Status {
-	case EngineCapturing, EngineBooking, EngineSniping:
+	case EngineCapturing, EngineStopping:
 		return true
 	default:
 		return false
@@ -664,17 +664,10 @@ func netTicketIssuedToday(now time.Time) bool {
 	return netTicketPlanFiredOn(plan, now)
 }
 
-// pauseSamplingForMainFlow 在主流程（抢号）即将启动前紧急叫停采样，三段式尽力停：
-//  1. 先停本进程的 sampler 循环；
-//  2. 再尝试停独立的采样守护进程（PID 文件指向的那个）；
-//  3. 若守护进程不在 PID 文件里、但进程锁还被别的 PID 持着，直接 kill 那个持锁进程。
-//
-// 注意最后一段的 holder != os.Getpid() 自我保护：锁若恰好被自己持有就不自杀。
+// Stop authenticated sampling; the public service stays alive and yields to the
+// activity marker, so it resumes automatically after capture/manual ticket request finishes.
 func pauseSamplingForMainFlow() {
 	sampler.Stop()
-	if stopped, _ := stopSamplingDaemon(); stopped {
-		return
-	}
 	if holder, ok := processLockHolder(samplingLockFileName); ok && holder != os.Getpid() {
 		_ = KillProcess(holder)
 	}

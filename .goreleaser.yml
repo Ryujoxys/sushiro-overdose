@@ -25,7 +25,7 @@ universal_binaries:
     name_template: sushiro
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     # Archive filename keeps the project/repo name; the binary inside is `sushiro`.
     name_template: >-
       {{ .ProjectName }}_
@@ -34,7 +34,11 @@ archives:
       {{- if eq .Os "darwin" }}all{{ else }}{{ .Arch }}{{ end }}
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
+
+release:
+  draft: true
+  name_template: '{{ .Tag }} · lite正式版'
 
 checksum:
   name_template: 'checksums.txt'

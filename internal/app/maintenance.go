@@ -61,6 +61,8 @@ func RepairProxy() MaintenanceReport {
 			Status: MaintenanceStatusError,
 			Error:  err.Error(),
 		})
+		report.OK = false
+		return report // Keep recovery metadata until restoration actually succeeds.
 	} else {
 		report.Results = append(report.Results, MaintenanceResult{
 			Name:   "system_proxy",
@@ -253,7 +255,6 @@ func cleanupProcessMarkers() {
 	_ = os.Remove(samplingPidFilePath())
 	_ = os.Remove(mainActivityPath())
 	_ = os.Remove(filepath.Join(AppDirPath(), samplingLockFileName))
-	markProxyInactive()
 }
 
 func uninstallSystemCertificate(dryRun bool) MaintenanceResult {

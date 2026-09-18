@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -48,11 +49,29 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// AppDirPath 返回本应用的数据目录（~/.sushiro）。os.UserHomeDir 失败时 home 为空，
-// 会退化成相对路径 ".sushiro"（极少见，主要在 HOME 没设置的环境）。
-func AppDirPath() string {
+// HasCustomDataHome reports an explicitly isolated application data root.
+func HasCustomDataHome() bool { return os.Getenv("SUSHIRO_DATA_HOME") != "" }
+
+// ValidateDataHome rejects ambiguous paths before any startup reads or writes.
+func ValidateDataHome() error {
+	if home := os.Getenv("SUSHIRO_DATA_HOME"); home != "" && !filepath.IsAbs(home) {
+		return fmt.Errorf("SUSHIRO_DATA_HOME 必须是绝对路径；请勿通过覆盖 HOME 隔离应用数据")
+	}
+	return nil
+}
+
+// DataHomeDir isolates app files without changing the OS user's keychain or profile.
+func DataHomeDir() string {
+	if home := os.Getenv("SUSHIRO_DATA_HOME"); home != "" {
+		return filepath.Clean(home)
+	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, appDir)
+	return home
+}
+
+// AppDirPath 返回本应用的数据目录，默认 ~/.sushiro。
+func AppDirPath() string {
+	return filepath.Join(DataHomeDir(), appDir)
 }
 
 // PidFilePath 返回守护进程 PID 文件路径（~/.sushiro/sushiro.pid），用于单实例与进程管理。

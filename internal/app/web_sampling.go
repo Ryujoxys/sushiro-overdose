@@ -57,9 +57,9 @@ func handleSamplingAutoStart(w http.ResponseWriter, r *http.Request) {
 		}
 		var err error
 		if body.Enabled {
-			err = InstallSamplingAutoStart()
+			err = setPublicQueueAutoStart(true)
 		} else {
-			err = RemoveSamplingAutoStart()
+			err = setPublicQueueAutoStart(false)
 		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -89,10 +89,6 @@ func handleSamplingStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sampler.Stop()
-	if _, err := stopSamplingDaemon(); err != nil {
-		writeError(w, http.StatusInternalServerError, "停止守护采样失败: "+err.Error())
-		return
-	}
 	writeJSON(w, map[string]any{"ok": true, "state": sampler.GetState()})
 }
 

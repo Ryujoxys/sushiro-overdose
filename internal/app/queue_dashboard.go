@@ -263,30 +263,19 @@ func BuildQueueDashboardWithContext(ctx context.Context, query QueueDashboardQue
 	storeFilter := stringSet(query.StoreIDs)
 	localBaseline := loadQueueBaselineRecords()
 	localObservations := loadQueueObservations()
-	baseline, baselineStatus, baselineErr := loadRemoteQueueDashboardBaseline(ctx, query, now)
+	baseline := localQueueBaselineForRecords(localBaseline, now)
+	baselineStatus := localQueueBaselineStatus()
 	storeNames := queueDashboardStoreNames(baseline, localBaseline, localObservations)
 
 	latest := buildQueueDashboardLatestRows(query, baseline, localBaseline, localObservations, storeNames, storeFilter)
 	trend := buildQueueDashboardLocalTrend(query, localBaseline, localObservations, storeNames, storeFilter, now)
 	trendSource := "local"
-	if len(trend) == 0 {
-		trend = buildQueueDashboardBaselineTrend(query, baseline.Rollups, storeFilter, now)
-		trendSource = "remote_baseline"
-	}
 	calledSummary, calledCurve := buildQueueDashboardCalledCurve(query, localBaseline, localObservations, storeNames, storeFilter, now)
-	remoteCalledSummary, remoteCalledCurve := buildQueueDashboardRemoteCalledCurve(query, baseline, storeNames, storeFilter, latest)
-	// 历史叫号曲线优先用线上基准(remote)：它是跨多天、覆盖全天各时段的「几点叫到几号」规律，
-	// 远比本机今天刚采的几个点（常只有当前一两小时、sample_count=1）有价值。
-	// 旧逻辑只在「本地为空 或 全国汇总」时才用 remote——单店查询时本地哪怕只有 2 个点也会盖掉
-	// remote 全天曲线，导致用户看不到历史叫号规律。改为：remote 可用且点数不少于本地时优先 remote。
-	if len(remoteCalledCurve) > 0 && len(remoteCalledCurve) >= len(calledCurve) {
-		calledSummary, calledCurve = remoteCalledSummary, remoteCalledCurve
-	}
 	advisor := buildQueueDashboardAdvisor(query, calledSummary, calledCurve, latest, now)
 	weekdayProfiles, heatmap, dateTypes := buildQueueDashboardRollupViews(query, baseline.Rollups, storeFilter)
 	summary := buildQueueDashboardSummary(query, latest, trend, len(localBaseline)+len(localObservations), baseline)
 	scope := queueDashboardScope(query, latest, baselineStatus, trendSource)
-	warnings := queueDashboardWarnings(query, baselineStatus, baselineErr, len(localBaseline), len(localObservations), len(trend), len(heatmap), len(calledCurve))
+	warnings := queueDashboardWarnings(query, baselineStatus, nil, len(localBaseline), len(localObservations), len(trend), len(heatmap), len(calledCurve))
 	samplingSummary := QueueTrendSummary{
 		ObservationRecords: len(localObservations),
 		BaselineSamples:    baseline.Stats.RollupCount,
@@ -307,10 +296,6 @@ func BuildQueueDashboardWithContext(ctx context.Context, query QueueDashboardQue
 		Baseline:          baselineStatus,
 		Warnings:          warnings,
 	}
-}
-
-func loadRemoteQueueDashboardBaseline(ctx context.Context, query QueueDashboardQuery, now time.Time) (QueueBaselineExport, QueueBaselineRemoteStatus, error) {
-	return loadRemoteQueueBaselineForStores(ctx, query.StoreIDs, now)
 }
 
 func normalizeQueueDashboardQuery(query QueueDashboardQuery) QueueDashboardQuery {
@@ -428,7 +413,7 @@ func buildQueueDashboardLatestRows(query QueueDashboardQuery, baseline QueueBase
 			waitTimeCounter: item.WaitTimeCounter,
 			waitTimeCap:     item.WaitTimeCap,
 			calledNo:        item.DisplayCalledNo,
-			source:          "remote",
+			source:          DefaultString(baseline.Source, "local"),
 		}
 	}
 	for _, record := range localBaseline {
@@ -509,8 +494,6 @@ func buildQueueDashboardSummary(query QueueDashboardQuery, rows []QueueDashboard
 		StoreCount:       len(rows),
 		WindowHours:      query.WindowHours,
 		LocalRecords:     localRecords,
-		RemoteStores:     baseline.Stats.LatestCount,
-		RemoteRollups:    baseline.Stats.RollupCount,
 		TotalCalledNo:    0,
 		TotalWaitMinutes: 0,
 	}
@@ -543,7 +526,7 @@ func buildQueueDashboardCalledCurve(query QueueDashboardQuery, baselineRecords [
 		End:           queueDashboardDayEnd,
 		Confidence:    "none",
 		Source:        "local",
-		Message:       "这条曲线优先使用本机选定门店的叫号明细；本机没有样本时会回退线上叫号基准。",
+		Message:       "这条曲线仅使用本机选定门店的叫号明细；没有样本时显示数据不足。",
 	}
 	holidays, workdays, _ := loadQueueHolidayDates()
 	samples := make([]queueDashboardCalledSample, 0, len(baselineRecords)+len(observations))
@@ -783,7 +766,7 @@ func buildQueueDashboardRemoteCalledCurve(query QueueDashboardQuery, baseline Qu
 		End:           queueDashboardDayEnd,
 		Confidence:    "none",
 		Source:        "remote_baseline",
-		Message:       "按线上 Turso 叫号聚合基准展示；跨日期类型时会按样本数做近似加权。",
+		Message:       "按版本化叫号聚合基准展示；跨日期类型时会按样本数做近似加权。",
 	}
 	if summary.BucketMinutes <= 0 {
 		summary.BucketMinutes = query.BucketMinutes
@@ -918,7 +901,7 @@ func buildQueueDashboardAdvisor(query QueueDashboardQuery, summary QueueDashboar
 		StoreName:     summary.StoreName,
 		TargetNo:      query.TargetNo,
 		Headline:      "暂无可用叫号判断",
-		Copy:          "先开启信息收集，或选择一个有线上基准的门店。",
+		Copy:          "先开启本机公开数据采集，并选择已积累历史的门店。",
 		Confidence:    summary.Confidence,
 		Source:        summary.Source,
 		BucketMinutes: query.BucketMinutes,
@@ -1619,35 +1602,29 @@ func queueDashboardScope(query QueueDashboardQuery, rows []QueueDashboardStoreRo
 		Mode:       query.Scope,
 		Source:     source,
 		StoreCount: len(rows),
-		Message:    "默认看全国公开基准；选择门店后会叠加本机常用门店的叫号细节。",
+		Message:    "仅使用本机已采集门店的历史数据，不连接线上数据库。",
 	}
 	if query.Scope == "local" {
-		scope.Message = "当前优先看本机常用门店；线上全国数据只按需补门店维度和基准。"
+		scope.Message = "当前显示本机常用门店的历史数据。"
 	}
 	return scope
 }
 
 func queueDashboardWarnings(query QueueDashboardQuery, baselineStatus QueueBaselineRemoteStatus, baselineErr error, localBaselineRecords, localObservationRecords, trendPoints, heatmapPoints, calledCurvePoints int) []string {
 	warnings := []string{}
-	if baselineErr != nil {
-		warnings = append(warnings, "线上排队基准暂时不可用，已退回本机数据："+baselineErr.Error())
-	}
-	if !baselineStatus.Used {
-		warnings = append(warnings, "未连接线上排队基准时，只能看到本机已采集门店。")
-	}
 	if query.DateType == "all" {
 		warnings = append(warnings, "默认已把节假日从周一到周日规律里剔出；要看节假日请切换到“节假日”。")
 	}
 	if trendPoints == 0 && localBaselineRecords+localObservationRecords == 0 {
-		warnings = append(warnings, "本机还没有实时趋势样本；连接线上排队基准或开启本机采集后会出现近 1/3/6/12 小时曲线。")
+		warnings = append(warnings, "本机还没有实时趋势样本；选择常用门店并开启本机采集后会逐步出现曲线。")
 	}
 	if calledCurvePoints == 0 && localObservationRecords == 0 {
-		warnings = append(warnings, "本机和线上排队基准都没有叫号明细；先换门店，或开启本机采集积累叫号曲线。")
+		warnings = append(warnings, "本机还没有叫号明细；先换门店，或开启本机采集积累叫号曲线。")
 	} else if calledCurvePoints == 0 {
 		warnings = append(warnings, "当前筛选下没有 10:00-22:00 的叫号点；换门店或日期类型再看。")
 	}
-	if heatmapPoints == 0 && baselineStatus.Used {
-		warnings = append(warnings, "线上排队基准还在积累，日期类型补充暂时没有足够样本。")
+	if heatmapPoints == 0 {
+		warnings = append(warnings, "本机历史还在积累，日期类型补充暂时没有足够样本。")
 	}
 	return warnings
 }

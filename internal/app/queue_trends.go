@@ -257,6 +257,11 @@ func queueHolidayPath() string {
 func appendQueueObservation(observation QueueObservation) error {
 	queueObservationMu.Lock()
 	defer queueObservationMu.Unlock()
+	lock, err := lockQueueDataFile(queueObservationPath())
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 
 	if strings.TrimSpace(observation.StoreID) == "" {
 		return nil
@@ -501,30 +506,16 @@ func BuildQueueTrendsWithContext(ctx context.Context, query QueueTrendQuery, now
 
 	summary = addQueueObservationsToTrend(series, summary, query, observations, storeNames, storeFilter, holidays, workdays)
 
-	baseline, baselineStatus, baselineErr := loadRemoteQueueBaselineForStores(ctx, query.StoreIDs, now)
-	if baselineStatus.Used {
-		summary = addQueueBaselineToTrend(series, summary, query, baseline, storeNames, storeFilter)
-	}
+	baseline := localQueueBaselineForRecords(loadQueueBaselineRecords(), now)
+	baselineStatus := localQueueBaselineStatus()
 	latest := filterQueueBaselineLatest(baseline.Latest, storeFilter)
 	points := finalizeQueueTrendPoints(series)
 	warnings := queueTrendWarnings(query, holidayConfigured, summary)
-	if baselineErr != nil {
-		warnings = append(warnings, "全国基准数据库连接失败，已只使用本机数据。")
-	}
 	stores := queueTrendStores(storeNames, query.StoreIDs, points)
 	scope := QueueTrendScope{
 		Mode:       "local",
 		StoreCount: len(stores),
 		Message:    "选择你关心的门店持续收集，预测会按门店分别生成。",
-	}
-	if baselineStatus.Used {
-		if summary.ObservationRecords == 0 && summary.SessionRecords == 0 {
-			scope.Mode = "baseline"
-			scope.Message = "当前使用 Turso 全国基准数据；无需本机凭证也可以先看门店时段基准。"
-		} else {
-			scope.Mode = "hybrid"
-			scope.Message = "当前混合使用 Turso 全国基准和本机真实数据。"
-		}
 	}
 	return QueueTrendResponse{
 		GeneratedAt:     now.Format(time.RFC3339),

@@ -24,39 +24,13 @@ import (
 type MCPStatusJSON struct {
 	Enabled             bool   `json:"enabled"`
 	AutoStart           bool   `json:"auto_start"`
-	TursoConfigured     bool   `json:"turso_configured"`
-	TursoURL            string `json:"turso_url,omitempty"` // 回显给前端预填（token 不回显）
-	PythonReady         bool   `json:"python_ready"`        // venv + 依赖是否就绪
+	PythonReady         bool   `json:"python_ready"` // venv + 依赖是否就绪
 	VenvPath            string `json:"venv_path,omitempty"`
 	MCPDir              string `json:"mcp_dir,omitempty"`
 	ClaudeConfigWritten bool   `json:"claude_config_written"` // claude_desktop_config.json 是否含 sushiro 条目
 	ClaudeConfigPath    string `json:"claude_config_path,omitempty"`
 	Message             string `json:"message,omitempty"`
 	InstallHint         string `json:"install_hint,omitempty"`
-}
-
-// mcpDirCandidates 返回 mcp/ 目录的可能位置。
-func mcpDirCandidates() []string {
-	var out []string
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		out = append(out, filepath.Join(dir, "mcp"), filepath.Join(dir, "..", "mcp"))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		out = append(out, filepath.Join(wd, "mcp"))
-	}
-	return out
-}
-
-// findMCPDir 找第一个存在的 mcp/ 目录。
-func findMCPDir() string {
-	for _, p := range mcpDirCandidates() {
-		if fi, err := os.Stat(filepath.Join(p, "mcp_server", "__init__.py")); err == nil && !fi.IsDir() {
-			abs, _ := filepath.Abs(p)
-			return abs
-		}
-	}
-	return ""
 }
 
 // mcpVenvPython 返回 venv 内 python 可执行路径。
@@ -73,7 +47,7 @@ func mcpVenvReady(mcpDir string) bool {
 	if _, err := os.Stat(py); err != nil {
 		return false
 	}
-	cmd := exec.Command(py, "-c", "import mcp, libsql, httpx")
+	cmd := exec.Command(py, "-c", "import mcp, httpx, mcp_server.server")
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+mcpDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		LogMessagef("MCP venv 依赖探测失败: %s: %s", err, string(out))
@@ -100,7 +74,7 @@ func EnsureMCPVenv(mcpDir string) error {
 		if err := mcpRunVisible(uv, mcpDir, "venv", "venv"); err != nil {
 			return fmt.Errorf("uv venv 失败: %w", err)
 		}
-		if err := mcpRunVisible(uv, mcpDir, "pip", "install", "-e", "."); err != nil {
+		if err := mcpRunVisible(uv, mcpDir, "pip", "install", "--python", mcpVenvPython(mcpDir), "-e", "."); err != nil {
 			return fmt.Errorf("uv pip install 失败: %w（可能网络问题，稍后重试）", err)
 		}
 	} else {
@@ -132,9 +106,9 @@ func mcpRunVisible(name, dir string, args ...string) error {
 
 // MCPEnable 开启：准备 venv + 写 claude_desktop_config.json。返回错误（UI 显示）。
 func MCPEnable(cfg MCPConfig) error {
-	mcpDir := findMCPDir()
-	if mcpDir == "" {
-		return fmt.Errorf("找不到 mcp/ 目录（随 sushiro 分发）；请把 mcp/ 放在 sushiro 可执行文件同级")
+	mcpDir, err := materializeMCPAssets()
+	if err != nil {
+		return fmt.Errorf("释放内嵌 MCP 资源失败: %w", err)
 	}
 	if err := EnsureMCPVenv(mcpDir); err != nil {
 		return err
@@ -157,17 +131,15 @@ func MCPStatus() MCPStatusJSON {
 	cfg := LoadMCPConfig()
 	mcpDir := findMCPDir()
 	st := MCPStatusJSON{
-		Enabled:         cfg.Enabled,
-		AutoStart:       cfg.AutoStart,
-		TursoConfigured: cfg.TursoConfigured(),
-		TursoURL:        cfg.TursoURL,
-		MCPDir:          mcpDir,
+		Enabled:   cfg.Enabled,
+		AutoStart: cfg.AutoStart,
+		MCPDir:    mcpDir,
 	}
 	if mcpDir != "" {
 		st.VenvPath = filepath.Join(mcpDir, "venv")
 		st.PythonReady = mcpVenvReady(mcpDir)
 		if !st.PythonReady {
-			st.Message = "首次启用会自动安装 Python 依赖（需联网，约几十秒）"
+			st.Message = "MCP 源码已内嵌；首次启用需本机 Python 或 uv，并联网安装依赖"
 		}
 	} else {
 		st.Message = "未找到 mcp/ 目录"
@@ -182,10 +154,8 @@ func MCPStatus() MCPStatusJSON {
 			}
 		}
 	}
-	if !cfg.TursoConfigured() {
-		if st.Message == "" {
-			st.Message = "未配置 Turso 只读 token（查数据 tool 不可用，联动桌面端 tool 仍可用）"
-		}
+	if st.Message == "" {
+		st.Message = "仅通过本机桌面端读取数据，无需数据库密钥；使用时请保持桌面端运行。"
 	}
 	return st
 }
@@ -212,8 +182,6 @@ func registerClaudeDesktop(mcpDir string, cfg MCPConfig) error {
 		"command": mcpVenvPython(mcpDir),
 		"args":    []string{"-m", "mcp_server"},
 		"env": map[string]string{
-			"SUSHIRO_MCP_TURSO_URL":    cfg.TursoURL,
-			"SUSHIRO_MCP_TURSO_TOKEN":  cfg.TursoToken,
 			"SUSHIRO_MCP_DESKTOP_PORT": fmt.Sprint(GetActiveWebPort()),
 			"PYTHONPATH":               mcpDir,
 		},

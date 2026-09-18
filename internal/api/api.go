@@ -193,15 +193,22 @@ func (c *Client) GetReservations(ctx context.Context) ([]ReservationRecord, erro
 		}
 		return nil, err
 	}
-	var reservations []ReservationRecord
-	if err := json.Unmarshal(body, &reservations); err != nil {
+	data := bytes.TrimSpace(body)
+	if len(data) > 0 && data[0] == '{' {
 		var wrapper struct {
-			Data []ReservationRecord `json:"data"`
+			Data json.RawMessage `json:"data"`
 		}
-		if err2 := json.Unmarshal(body, &wrapper); err2 == nil {
-			markReservationRecordsKind(wrapper.Data, "reservation")
-			return wrapper.Data, nil
+		if err := json.Unmarshal(data, &wrapper); err != nil {
+			return nil, fmt.Errorf("reservations response parse error: %w", err)
 		}
+		data = bytes.TrimSpace(wrapper.Data)
+	}
+	// An unknown envelope or null must not erase a previously saved reservation.
+	if len(data) == 0 || data[0] != '[' {
+		return nil, fmt.Errorf("reservations response does not contain a list")
+	}
+	var reservations []ReservationRecord
+	if err := json.Unmarshal(data, &reservations); err != nil {
 		return nil, fmt.Errorf("reservations response parse error: %w", err)
 	}
 	markReservationRecordsKind(reservations, "reservation")

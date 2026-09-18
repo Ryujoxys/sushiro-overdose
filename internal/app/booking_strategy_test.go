@@ -310,25 +310,6 @@ func TestSlotConfigShouldTargetLegacyRanges(t *testing.T) {
 	}
 }
 
-func TestSortSniperTargetsPrioritizesEarlierOpenTime(t *testing.T) {
-	loc := testLocation(t)
-	targets := []SniperTarget{
-		{Date: "20260614", StartAfter: "193000", StartBefore: "203000", StoreID: "late"},
-		{Date: "20260614", StartAfter: "103000", StartBefore: "130000", StoreID: "same-day-early"},
-		{Date: "20260613", StartAfter: "203000", StartBefore: "210000", StoreID: "previous-day"},
-	}
-
-	sortSniperTargets(targets, loc)
-
-	got := []string{targets[0].StoreID, targets[1].StoreID, targets[2].StoreID}
-	want := []string{"previous-day", "same-day-early", "late"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("sorted store IDs = %v, want %v", got, want)
-		}
-	}
-}
-
 func TestSettingsValidate(t *testing.T) {
 	valid := validSettingsForTest()
 

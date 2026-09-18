@@ -4,19 +4,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	. "github.com/Ryujoxys/sushiro-overdose/internal/core"
 )
 
-// MCPConfig 是桌面端 MCP 助手的配置：是否启用、是否自启、Turso 只读连接。
-// 存 ~/.sushiro/mcp_config.json，0600（含 Turso token，敏感，跟 config.json/notify.json 同级）。
+// MCPConfig 只保存本机助手开关。旧数据库字段在读取时忽略。
 type MCPConfig struct {
-	Enabled    bool   `json:"enabled"`
-	AutoStart  bool   `json:"auto_start"`
-	TursoURL   string `json:"turso_url"`   // libsql://... 只读库地址
-	TursoToken string `json:"turso_token"` // 只读 token（a:ro）
+	Enabled   bool `json:"enabled"`
+	AutoStart bool `json:"auto_start"`
 }
 
 var (
@@ -30,19 +26,10 @@ func MCPConfigPath() string {
 
 // DefaultMCPConfig 返回默认（空）MCP 配置。
 func DefaultMCPConfig() MCPConfig {
-	return MCPConfig{
-		TursoURL: "libsql://su-shiro-ryujoxys.aws-us-west-2.turso.io",
-	}
+	return MCPConfig{}
 }
 
-// NormalizeMCPConfig 规整：去空白、默认 Turso URL。
 func NormalizeMCPConfig(cfg MCPConfig) MCPConfig {
-	cfg.TursoURL = strings.TrimSpace(cfg.TursoURL)
-	cfg.TursoToken = strings.TrimSpace(cfg.TursoToken)
-	if cfg.TursoURL == "" {
-		cfg.TursoURL = DefaultMCPConfig().TursoURL
-	}
-	// token 缺失时不能算 enabled（查数据 tool 用不了，但联动桌面端 tool 仍可用，故不强求）
 	return cfg
 }
 
@@ -72,9 +59,4 @@ func SaveMCPConfig(cfg MCPConfig) error {
 		return err
 	}
 	return AtomicWriteFile(MCPConfigPath(), data, 0o600)
-}
-
-// MCPConfigured 报告 Turso 是否配齐（URL+token）。
-func (c MCPConfig) TursoConfigured() bool {
-	return c.TursoURL != "" && c.TursoToken != ""
 }

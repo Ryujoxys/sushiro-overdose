@@ -12,19 +12,19 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
 // Version is injected from the root main package (which receives it via ldflags).
 var Version = "dev"
+
+// Edition is separate from the numeric version used for update checks.
+const Edition = "lite正式版"
 
 // SetVersion lets the root package pass through the ldflags-provided version.
 func SetVersion(v string) {
@@ -43,46 +43,30 @@ func printBanner() {
 	fmt.Println("███    ███ ███   ▄███    ▄█    ███ ███    ███    ▄█    ███   ███    ███   ███")
 	fmt.Println(" ▀██████▀  ████████▀   ▄████████▀  ████████▀   ▄████████▀    ███    █▀    █▀")
 	fmt.Println()
-	fmt.Printf("寿司郎 Overdose v%s — https://github.com/Ryujoxys/sushiro-overdose\n", Version)
+	fmt.Printf("寿司郎 Overdose v%s · %s\n", Version, Edition)
+	fmt.Println("本地记录排队规律，需要时手动取号。")
+	fmt.Println("https://github.com/Ryujoxys/sushiro-overdose")
 	fmt.Println()
 }
 
 func printUsage() {
 	fmt.Println("用法: sushiro [命令]")
-	fmt.Println()
-	fmt.Println("默认 (无命令)   启动 Web UI（推荐，独立窗口优先）")
-	fmt.Println()
-	fmt.Println("运行:")
-	fmt.Println("  web            启动 Web UI")
-	fmt.Println("  cli            前台终端模式（高级）")
-	fmt.Println("  start          后台静默抢号")
-	fmt.Println("  status         查看运行状态")
-	fmt.Println("  exit           停止后台进程")
-	fmt.Println("  version        打印版本号并退出（-v / --version 同义）")
-	fmt.Println()
-	fmt.Println("预约:")
-	fmt.Println("  calendar       查看近 7 天可预约时段")
-	fmt.Println("  sniper         狙击模式（提前锁定未开放时段）")
-	fmt.Println("  list           查看当前预约")
-	fmt.Println("  cancel <id>    取消预约")
-	fmt.Println()
-	fmt.Println("数据与推荐:")
-	fmt.Println("  trends         分析时段可用率趋势")
-	fmt.Println("  recommend      智能推荐最佳时段")
-	fmt.Println("  sample         信息收集（once|run|start|stop|autostart）")
-	fmt.Println()
-	fmt.Println("配置与维护:")
-	fmt.Println("  config         通知/门店配置（feishu|telegram|bark|serverchan|store）")
-	fmt.Println("  doctor         打印只读诊断")
-	fmt.Println("  diag-bundle    导出脱敏证据包（zip）")
-	fmt.Println("  auth-probe     测试已存凭证连通性")
-	fmt.Println("  repair-proxy   恢复系统代理")
-	fmt.Println("  stop-processes 停止相关进程")
-	fmt.Println("  uninstall      移除本地敏感数据与证书")
-	fmt.Println("  help           显示本帮助")
+	fmt.Println("  web            打开本地界面（默认）")
+	fmt.Println("  collect        排队记录服务（status|start|stop|run|autostart）")
+	fmt.Println("  status         查看记录状态")
+	fmt.Println("  doctor         只读诊断")
+	fmt.Println("  diag-bundle    导出脱敏诊断包")
+	fmt.Println("  repair-proxy   恢复旧版残留代理")
+	fmt.Println("  config         通知与门店配置")
+	fmt.Println("  version        查看版本")
+	fmt.Println("记录无需认证；手动取号请在界面确认。")
 }
 
 func Run() {
+	if err := ValidateDataHome(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	args := os.Args[1:]
 	if len(args) == 1 && (args[0] == "doctor" || args[0] == "diagnostics") {
 		cmdDoctor()
@@ -97,6 +81,15 @@ func Run() {
 		return
 	}
 
+	// Public collection must not import old credentials or start account work.
+	if len(args) == 1 && (args[0] == "--queue-collector-child" || args[0] == "--sampler-daemon-child") {
+		cmdPublicQueueDaemon()
+		return
+	}
+	if len(args) >= 1 && args[0] == "collect" {
+		cmdCollect(args[1:])
+		return
+	}
 	os.MkdirAll(AppDirPath(), 0o755)
 	MigrateOldConfig()
 
@@ -105,15 +98,15 @@ func Run() {
 	} else if len(args) == 1 && (args[0] == "cli" || args[0] == "run" || args[0] == "-f" || args[0] == "--foreground") {
 		cmdForeground()
 	} else if len(args) == 1 && (args[0] == "start" || args[0] == "-d" || args[0] == "--daemon") {
-		cmdStart()
+		fmt.Println(retiredAutomationMessage)
 	} else if len(args) == 1 && (args[0] == "exit" || args[0] == "stop") {
 		cmdStop()
 	} else if len(args) == 1 && args[0] == "status" {
-		cmdStatus()
+		cmdCollect([]string{"status"})
 	} else if len(args) == 1 && args[0] == "calendar" {
 		cmdCalendar()
 	} else if len(args) >= 1 && args[0] == "sniper" {
-		cmdSniper(args[1:])
+		fmt.Println(retiredAutomationMessage)
 	} else if len(args) == 1 && (args[0] == "list" || args[0] == "reservations") {
 		cmdList()
 	} else if len(args) >= 1 && args[0] == "cancel" {
@@ -125,9 +118,7 @@ func Run() {
 	} else if len(args) == 1 && (args[0] == "auth-probe" || args[0] == "probe-auth") {
 		cmdAuthProbe()
 	} else if len(args) == 1 && args[0] == "--daemon-child" {
-		cmdDaemon()
-	} else if len(args) == 1 && args[0] == "--sampler-daemon-child" {
-		cmdSamplerDaemon()
+		fmt.Println(retiredAutomationMessage)
 	} else if len(args) == 1 && args[0] == "--mcp-daemon-child" {
 		cmdMCPDaemon()
 	} else if len(args) >= 1 && (args[0] == "sample" || args[0] == "sampling") {
@@ -153,25 +144,10 @@ func Run() {
 // 用途：排障（"你装的是哪个版本？"）、打包/安装脚本校验产物、CI 里确认 ldflags 注入成功。
 // Version 未通过 ldflags 注入时为 "dev"（源码构建），这本身也是有用的诊断信息。
 func cmdVersion() {
-	fmt.Printf("寿司郎 Overdose v%s\n", Version)
+	fmt.Printf("寿司郎 Overdose v%s · %s\n", Version, Edition)
 }
 
-func cmdForeground() {
-	printBanner()
-
-	// Check for stale proxy from a previous crashed run
-	if checkStaleProxy() {
-		fmt.Println("已清除上次异常退出的系统代理设置")
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
+func cmdForeground() { cmdCollect([]string{"run"}) }
 
 func cmdConfig(args []string) {
 	if len(args) == 0 {
@@ -331,120 +307,6 @@ func sendNotification(title, content string) {
 	}
 }
 
-// ---- Main run logic (shared by foreground and daemon) ----
-
-func run(ctx context.Context) error {
-	tokens, configExists := tryLoadConfig()
-
-	if !configExists {
-		var err error
-		tokens, err = runCapturePhase(ctx)
-		if err != nil {
-			return err
-		}
-		if err := SaveLocalConfig(tokens); err != nil {
-			LogMessage(time.Now(), "保存配置失败: "+err.Error())
-		} else {
-			LogMessage(time.Now(), "配置已保存到 "+LocalConfigPath())
-		}
-	}
-
-	settings := tokens.ToSettings()
-
-	// Initialize notifier
-	setNotifier(BuildNotifierFromConfig())
-
-	// Interactive Feishu config (legacy support)
-	tokens.Lock()
-	feishu := tokens.FeishuWebhook
-	tokens.Unlock()
-	if feishu == "" {
-		fmt.Println()
-		fmt.Print("是否配置飞书通知机器人？(y/N): ")
-		if answer := ReadInput(); strings.ToLower(answer) == "y" {
-			fmt.Println("飞书群 → 群设置 → 群机器人 → 添加自定义机器人 → 复制 Webhook 地址")
-			fmt.Print("请输入 Webhook 地址: ")
-			if webhook := ReadInput(); webhook != "" {
-				tokens.Lock()
-				tokens.FeishuWebhook = webhook
-				tokens.Unlock()
-				SaveFeishuConfig(webhook)
-				settings.FeishuWebhook = webhook
-				// Add feishu to notifier
-				globalNotifier.Add(NewFeishuNotifier(webhook))
-				fmt.Println("飞书通知已配置!")
-			}
-		}
-	}
-
-	client := NewClient(settings)
-
-	// Verify config still works
-	LogMessage(time.Now(), "验证凭证参数...")
-	if _, err := client.GetTimeslots(ctx, settings.StoreIDs[0]); err != nil {
-		LogMessage(time.Now(), "验证失败: "+err.Error())
-		LogMessage(time.Now(), "凭证参数可能已过期，需要重新获取...")
-		sendNotification("寿司郎 - 凭证过期", "需要重新运行捕获凭证参数")
-		DeleteLocalConfig()
-		tokens, err = runCapturePhase(ctx)
-		if err != nil {
-			return err
-		}
-		SaveLocalConfig(tokens)
-		settings = tokens.ToSettings()
-		client = NewClient(settings)
-	}
-
-	if err := tokens.ValidateForReservation(); err != nil {
-		LogMessage(time.Now(), "预约参数不完整，需要重新捕获: "+err.Error())
-		DeleteLocalConfig()
-		tokens, err = runCapturePhase(ctx)
-		if err != nil {
-			return err
-		}
-		if err := tokens.ValidateForReservation(); err != nil {
-			return err
-		}
-		if err := SaveLocalConfig(tokens); err != nil {
-			LogMessage(time.Now(), "保存配置失败: "+err.Error())
-		}
-		settings = tokens.ToSettings()
-		client = NewClient(settings)
-	}
-
-	selectedStores, err := SelectStores(ctx, client, tokens)
-	if err != nil {
-		return fmt.Errorf("选择门店失败: %w", err)
-	}
-	settings.StoreIDs = selectedStores
-
-	tokens.Lock()
-	tokens.StoreIDs = selectedStores
-	tokens.Unlock()
-	SaveLocalConfig(tokens)
-
-	prefs := LoadPreferences()
-	prefs.SelectedStores = selectedStores
-
-	// CLI mode: offer to configure slots interactively or use saved
-	if len(prefs.WeekdaySlots) == 0 && len(prefs.SaturdaySlots) == 0 && len(prefs.SundaySlots) == 0 {
-		slotConfig := ConfigureSlots()
-		prefs.WeekdaySlots = SlotPrefToRanges(slotConfig.Weekday)
-		prefs.SaturdaySlots = SlotPrefToRanges(slotConfig.Saturday)
-		prefs.SundaySlots = SlotPrefToRanges(slotConfig.Sunday)
-	} else {
-		fmt.Println("\n使用已保存的时段偏好（可通过 Web UI 修改）")
-	}
-	SavePreferences(prefs)
-
-	healthStop := startHealthCheck(ctx, client, selectedStores)
-	defer close(healthStop)
-
-	LogMessage(time.Now(), "开始抢号...")
-	runBookingLoop(ctx, client, settings, selectedStores, prefs)
-	return nil
-}
-
 func runCapturePhase(ctx context.Context) (*CapturedTokens, error) {
 	doneActivity := markMainFlowActive("capturing")
 	defer doneActivity()
@@ -477,16 +339,24 @@ func runCapturePhase(ctx context.Context) (*CapturedTokens, error) {
 	actualPort := proxy.Port()
 
 	// Set system proxy
+	if err := markProxyActive(actualPort, os.Getpid()); err != nil {
+		return nil, err
+	}
 	if err := SetSystemProxy(actualPort); err != nil {
+		if restoreErr := ClearSystemProxy(); restoreErr == nil {
+			markProxyInactive()
+		}
 		return nil, fmt.Errorf("设置系统代理失败: %w", err)
 	}
 	fmt.Printf("系统代理已设置 (127.0.0.1:%d)\n", actualPort)
 	fmt.Println("请彻底关闭 PC 微信后重新打开，在寿司郎小程序里选任意门店点一次「排队」或「预约」（不必真的提交）")
-	markProxyActive(actualPort, os.Getpid())
 
 	// Ensure proxy is cleared on exit
 	defer func() {
-		ClearSystemProxy()
+		if err := ClearSystemProxy(); err != nil {
+			fmt.Println("代理恢复失败，已保留恢复标记:", err)
+			return
+		}
 		markProxyInactive()
 		fmt.Println("系统代理已清除")
 	}()
@@ -548,130 +418,4 @@ func isAuthError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "HTTP 401") ||
 		strings.Contains(msg, "HTTP 403")
-}
-
-func runBookingLoop(ctx context.Context, client *Client, settings Settings, storeIDs []string, prefs UserPreferences) {
-	doneActivity := markMainFlowActive("booking")
-	defer doneActivity()
-
-	var booked map[string]bool
-	temporarySkips := map[string]time.Time{}
-	errStreak := 0
-	authErrors := 0
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		now := time.Now().In(settings.Location)
-
-		var best *TargetSlot
-		for _, storeID := range storeIDs {
-			slots, err := client.GetTimeslots(ctx, storeID)
-			if err != nil {
-				if isAuthError(err) {
-					authErrors++
-					if authErrors >= 3 {
-						LogMessage(now, "凭证失败，请重新运行获取新参数")
-						sendNotification("寿司郎 - 凭证失败", "凭证参数已失效，请重新打开 sushiro 重新捕获")
-						DeleteLocalConfig()
-						return
-					}
-				}
-				errStreak++
-				if errStreak >= 5 {
-					LogMessage(now, "连续失败过多，等待5秒...")
-					time.Sleep(5 * time.Second)
-					errStreak = 0
-				}
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			errStreak = 0
-			authErrors = 0
-
-			// Record slot history
-			appendHistory(slots, storeID)
-
-			for i := range slots {
-				if !prefs.ShouldTarget(slots[i], settings.Location) {
-					continue
-				}
-				// Skip non-available slots
-				if strings.ToUpper(slots[i].Availability) != "AVAILABLE" {
-					continue
-				}
-				key := bookingSlotKey(storeID, slots[i].Date, slots[i].Start)
-				if booked != nil && booked[key] {
-					continue
-				}
-				if isTemporaryBookingSkipped(temporarySkips, key, now) {
-					continue
-				}
-				t := &TargetSlot{
-					StoreID: storeID,
-					Date:    slots[i].Date,
-					Start:   slots[i].Start,
-					End:     slots[i].End,
-				}
-				if best == nil || prefs.PreferTargetSlot(*t, *best, settings.Location, storeIDs) {
-					best = t
-				}
-			}
-		}
-
-		if best == nil {
-			fmt.Printf("\r[%s] 查询中...无目标时段", now.Format("15:04:05"))
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		slotLabel := FormatSlotWindow(best.Date, best.Start, best.End, settings.Location)
-		fmt.Printf("\r[%s] %s - 尝试预约...", now.Format("15:04:05"), slotLabel)
-
-		reservation, err := client.CreateReservation(ctx, best.StoreID, best.Date, best.Start)
-		if err != nil {
-			if isAuthError(err) {
-				authErrors++
-				if authErrors >= 3 {
-					LogMessage(now, "凭证失败，请重新运行")
-					sendNotification("寿司郎 - 凭证失败", "请重新打开 sushiro 重新捕获")
-					DeleteLocalConfig()
-					return
-				}
-			}
-
-			if isOfficialServerHTTPError(err) {
-				key := bookingSlotKey(best.StoreID, best.Date, best.Start)
-				markTemporaryBookingSkip(temporarySkips, key, now)
-				LogMessage(now, bookingServerErrorLog(slotLabel, err))
-			} else if errors.Is(err, ErrNoReservationAvailable) {
-				key := bookingSlotKey(best.StoreID, best.Date, best.Start)
-				if booked == nil {
-					booked = make(map[string]bool)
-				}
-				booked[key] = true
-				fmt.Printf("\r[%s] %s - 名额已满", now.Format("15:04:05"), slotLabel)
-			} else {
-				fmt.Printf("\r[%s] %s - 失败: %s", now.Format("15:04:05"), slotLabel, err)
-			}
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// Success!
-		now = time.Now().In(settings.Location)
-		storeInfo, _ := client.GetStoreInfo(ctx, best.StoreID)
-		storeName := storeInfo.Name
-		if storeName == "" {
-			storeName = best.StoreID
-		}
-		reservation.MonitoredStoreID = best.StoreID
-		onBookingSuccess(reservation, storeName, storeInfo.Address, slotLabel, "预约")
-
-		return
-	}
 }

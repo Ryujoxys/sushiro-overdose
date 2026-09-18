@@ -1,10 +1,7 @@
 package app
 
-import . "github.com/Ryujoxys/sushiro-overdose/internal/notify"
-
-import . "github.com/Ryujoxys/sushiro-overdose/internal/platform"
-
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
+import "github.com/Ryujoxys/sushiro-overdose/internal/platform"
 
 import (
 	"context"
@@ -68,6 +65,7 @@ type QueueAlertConfig struct {
 
 // queueAlertRuleState 是单条规则的去重状态。
 type queueAlertRuleState struct {
+	EvaluatedAt      string `json:"evaluated_at,omitempty"`
 	Armed            bool   `json:"armed"`               // wait_below 是否已武装（等待曾高于阈值）
 	FiredAt          string `json:"fired_at"`            // 上次推送时间
 	FiredOnce        bool   `json:"fired_once"`          // called_reach 是否已推送过
@@ -98,6 +96,13 @@ func SaveQueueAlertConfig(cfg QueueAlertConfig) error {
 }
 
 func saveQueueAlertConfigLocked(cfg QueueAlertConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lock, err := platform.LockFile(ctx, filepath.Join(AppDirPath(), "queue_alerts.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	os.MkdirAll(AppDirPath(), 0o755)
 	cfg = normalizeQueueAlertConfig(cfg)
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -255,6 +260,14 @@ func evaluateQueueAlerts(ctx context.Context, obs QueueObservation, storeName st
 	notifications := func() []queueAlertNotification {
 		queueAlertMu.Lock()
 		defer queueAlertMu.Unlock()
+		lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		lock, err := platform.LockFile(lockCtx, filepath.Join(AppDirPath(), "queue_alerts.lock"))
+		if err != nil {
+			LogMessage(time.Now(), "queue alert state busy: "+err.Error())
+			return nil
+		}
+		defer lock.Close()
 		cfg := LoadQueueAlertConfig()
 		if len(cfg.Rules) == 0 {
 			return nil
@@ -267,7 +280,14 @@ func evaluateQueueAlerts(ctx context.Context, obs QueueObservation, storeName st
 			if !rule.Enabled || rule.StoreID != storeID {
 				continue
 			}
+			before := state[rule.key()]
 			title, body, fire := queueAlertEvaluateRule(rule, obs, state)
+			evaluated := state[rule.key()]
+			evaluated.EvaluatedAt = time.Now().Format(time.RFC3339)
+			state[rule.key()] = evaluated
+			if state[rule.key()] != before {
+				changed = true
+			}
 			if !fire {
 				continue
 			}
@@ -404,8 +424,8 @@ func queueAlertLabel(rule QueueAlertRule) string {
 
 func sendQueueAlert(ctx context.Context, title, content string) {
 	LogMessage(time.Now(), fmt.Sprintf("[排队提醒] %s — %s", title, content))
-	DesktopNotification(title, content)
-	BuildNotifierFromConfig().Send(ctx, title, content)
+	sendDesktopNotification(title, content)
+	configuredNotifiers().Send(ctx, title, content)
 }
 
 // sendQueueAlertWithChannels 同 sendQueueAlert，但额外带会话键（sessionKey 非空时走原地更新）
@@ -414,11 +434,11 @@ func sendQueueAlert(ctx context.Context, title, content string) {
 func sendQueueAlertWithChannels(ctx context.Context, title, content, sessionKey string, channels []string) {
 	if sessionKey == "" {
 		LogMessage(time.Now(), fmt.Sprintf("[排队提醒] %s — %s", title, content))
-		DesktopNotification(title, content)
-		BuildNotifierFromConfig().SendToChannels(ctx, title, content, channels)
+		sendDesktopNotification(title, content)
+		configuredNotifiers().SendToChannels(ctx, title, content, channels)
 		return
 	}
 	LogMessage(time.Now(), fmt.Sprintf("[排队提醒·更新] %s — %s", title, content))
-	DesktopNotification(title, content)
-	BuildNotifierFromConfig().SendSessionToChannels(ctx, sessionKey, title, content, channels)
+	sendDesktopNotification(title, content)
+	configuredNotifiers().SendSessionToChannels(ctx, sessionKey, title, content, channels)
 }

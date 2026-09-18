@@ -270,7 +270,7 @@ func collectConfigDiagnostics() DiagnosticConfig {
 
 func configuredNotificationChannels() []string {
 	channels := make([]string, 0, 4)
-	for _, notifier := range BuildNotifierFromConfig().List() {
+	for _, notifier := range configuredNotifiers().List() {
 		channels = append(channels, notifier.Name())
 	}
 	sort.Strings(channels)
@@ -855,7 +855,7 @@ func sanitizedEngineLogTail(entries []LogEntry, maxLines int) []DiagnosticLogEnt
 }
 
 func runNotificationTest(ctx context.Context, onlyChannels ...string) ([]NotificationTestResult, bool) {
-	notifiers := BuildNotifierFromConfig().List()
+	notifiers := configuredNotifiers().List()
 	if len(onlyChannels) > 0 {
 		wanted := map[string]bool{}
 		for _, channel := range onlyChannels {

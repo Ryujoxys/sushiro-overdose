@@ -54,7 +54,7 @@ func TestHandleAuthResetClearsLocalAuthAndPendingNetTicketPlan(t *testing.T) {
 		t.Fatalf("auth health = %q, want %q", got, authHealthUnknown)
 	}
 	plan := LoadNetTicketPlan()
-	if plan.Enabled || plan.Status != "error" || !strings.Contains(plan.LastError, "重新获取通行证") {
+	if plan.Enabled || plan.Status != "retired" || !strings.Contains(plan.LastError, "重新认证后手动取号") {
 		t.Fatalf("net ticket plan not reset for auth refresh: %+v", plan)
 	}
 }

@@ -1,136 +1,130 @@
-# 寿司郎排队助手（Sushiro Overdose）
+# 寿司郎排队记录
 
-拿号之后，告诉你大概几点叫到、几点该出门——不用自己盯着大屏算。
+**Sushiro Overdose v4.0 · lite正式版**
 
-开源桌面工具，macOS / Windows / Linux 都能用，Go 写的，零外部依赖。
+记录常去门店的排队数据，看看什么时间通常叫到几号、要等多久。想去吃饭时，再手动取号。
 
-[![Latest Release](https://img.shields.io/github/v/release/Ryujoxys/sushiro-overdose?label=release)](https://github.com/Ryujoxys/sushiro-overdose/releases/latest)
-[![CI](https://img.shields.io/github/actions/workflow/status/Ryujoxys/sushiro-overdose/ci.yml?branch=master&label=CI)](https://github.com/Ryujoxys/sushiro-overdose/actions/workflows/ci.yml)
-[![Platforms](https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux-supported-2d9c4a)](#下载)
-[![License](https://img.shields.io/badge/license-MIT-2d9c4a)](LICENSE)
+[下载 v4.0](https://github.com/Ryujoxys/sushiro-overdose/releases/tag/v4.0) · [这次改了什么](docs/release-notes-4.0.md) · [使用与安全](SECURITY.md) · [反馈问题](https://github.com/Ryujoxys/sushiro-overdose/issues)
 
-<p align="center">
-  <img src="docs/screenshot-home.png" width="720" alt="首页：想吃寿司郎先看现在排多久，三种用法一目了然" />
-</p>
+支持 macOS、Windows、Linux。下载即可运行，不用部署网站，也不用安装 Node.js 或数据库。
 
----
+## 先记录，不用登录
 
-## 它能干什么
+1. 打开应用，在「我的记录」选择常去的门店。
+2. 点击「开始记录」，默认每 5 分钟保存一次公开排队数据。
+3. 按门店、日期和日期类型查看曲线，逐渐积累自己的记录。
 
-| 用法 | 说明 |
+**只记录数据，不需要账号、证书或代理。** 选店不会自动启动服务，是否记录由你决定。
+
+可以单独开启「登录电脑后自动记录」。后台服务启动后，关闭界面仍会继续；电脑关机、退出登录或休眠时暂停。暂停不会删除已有数据。
+
+## 看懂排队规律
+
+| 想知道什么 | 怎么看 |
 |------|------|
-| **📱 没号，想看排队** | 不用登录。挑一家店，看开着没、排几桌、等多久、这会儿挤不挤。 |
-| **🎫 有号了（最常用）** | 填进排队号，给出预计叫到时间和出发时间，跟着叫号进度实时更新。快叫到了还能推送提醒。 |
-| **📅 想约未来某天** | 查未来哪些时段还能约，热门时段挂着等，一开放就帮你订上。这个需要登录凭证（见下文「通行证」）。 |
+| 这个时间一般叫到几号？ | 切到「叫到几号」，点击曲线或拖动时间，查看通常叫到的号码、常见范围和样本天数 |
+| 通常需要等多久？ | 切到「等多久」，看各时段的等待分布 |
+| 周末和工作日有什么不同？ | 切换日期类型，也可以只看某一天 |
+| 只想分析自己采的数据？ | 关闭「包含历史数据」，重启后仍保留选择 |
+| 想自己继续分析？ | 导出自己的原始 JSONL 记录 |
 
-> **预测长这样**：`1078 号，当前叫到 1051，预计 38–62 分钟后叫到（约 12:18–12:42）。建议 12:10 前后出发。`
+首次打开也有曲线可看：程序内置一份 **截至 2026-09-06 的固定历史包**，覆盖 138 家门店。它随程序分发，不会自动联网更新，也不计入你自己的记录数量和个人模型。
 
-<p align="center">
-  <img src="docs/screenshot-queue.png" width="720" alt="我有号码：填排队号，看叫到时间、出发时间与排队压力" />
-</p>
+图表会区分本机与历史样本。同店、同日、同半小时已有本机记录时，优先使用本机数据，不重复计数。缺失时段不会当成零，样本不足会直接注明。
 
-预测参考这家店今天的叫号速度和前面剩的桌数，并跟着叫号进度一直更新：
+历史叫号采用堂食队列的最大号码，不区分桌型。它是过去的参考，不是今天的实时叫号，也不保证某张排队号的入座时间。[历史包的范围与限制](docs/bundled-history.md)
 
-<p align="center">
-  <img src="docs/screenshot-chart.png" width="720" alt="叫号趋势曲线：今天叫号进度与排队压力随时间变化" />
-</p>
+## 需要时，手动取号
 
-快叫到了可以推一条通知（飞书 / Telegram / Bark / Server酱，能同时开多个），先找地方坐会儿，不用一直守着屏幕。
+进入「手动取号」，选店、核对人数和桌型，必要时连接本人账号，然后确认提交。
 
-### 小屏 / 窄窗口
+认证完成后会回到确认框，**不会直接取号**。已有有效号码时优先展示；提交结果不明确时先查询，不自动重试。
 
-界面本质是本机 Web UI，桌面应用窗口或本机浏览器缩窄时也能用。[`v3.17.1`](docs/release-notes-3.17.1.md) 修了小屏顶部导航：切到「我的单据」「设置」这类靠右入口时，会自动把当前栏目滚到可视区域，不用手动猜自己在哪一页。
+「想几点吃」只给时间建议。确认后取的是现在的排队号，不是预约未来的入座时间；建议只参考本机数据，样本不足时会说明。
 
-<p align="center">
-  <img src="docs/screenshot-mobile-nav.jpg" width="280" alt="移动端顶部导航当前栏目可见" />
-</p>
+v4.0 不再提供狙击、循环抢号、定时取号或每日自动计划。
 
-## 下载
+### 账号怎么连接
 
-去 [Latest Release](https://github.com/Ryujoxys/sushiro-overdose/releases/latest) 下对应平台的包，或一行命令装：
+仅手动取号需要寿司郎账号。凭证从你本人的小程序请求中获取，保存在本机。
 
-| 平台 | 文件 | 一行安装 |
-|------|------|----------|
-| **Windows** | `*-windows-amd64.exe`（ARM 用 `windows-arm64.exe`） | `irm https://raw.githubusercontent.com/Ryujoxys/sushiro-overdose/master/install/install.ps1 \| iex` |
-| **macOS** | `*-macOS.dmg`，拖进 Applications | （首次打开会被拦，见下方说明） |
-| **Linux** | `*_linux_amd64.tar.gz` | `curl -fsSL https://raw.githubusercontent.com/Ryujoxys/sushiro-overdose/master/install/install.sh \| bash` |
+- macOS 默认使用电脑微信；Windows、Linux 默认使用手机微信，也支持手动导入凭证。
+- 电脑连接会安装本机证书并临时设置代理，完成或停止后恢复代理。
+- 手机与电脑需在同一 Wi-Fi，按引导安装证书和设置手机代理，结束后关闭手机 Wi-Fi 代理。
+- 代理只解密寿司郎接口，其他 HTTPS 连接透传。
 
-装好双击运行，会自动弹出网页界面。搜城市或门店名挑一家店——没号看排队，有号填号码。想要到点提醒，去设置里填个通知地址。
+这不是免配置扫码登录。微信版本、证书策略、防火墙和路由器隔离都可能影响认证，凭证也会过期。**只想记录数据，可以完全跳过这一步。**
 
-> **macOS 首次打开被拦？** 不是安全问题，是没花钱买 Apple 签名（开源非商用）。代码全部可审计（见 [SECURITY.md](SECURITY.md)）。放行一次即可永久可用：
-> - **最简单**：双击 App 弹「无法打开」后，进 **系统设置 → 隐私与安全性**，滚到「已阻止使用 "Sushiro Overdose"」，点 **仍要打开**。
-> - **或**：访达里 **按住 Control 点按** App → **打开** → 再点 **打开**。
-> - **都不行**：终端跑 `xattr -dr com.apple.quarantine "/Applications/Sushiro Overdose.app"`。
+## 下载与升级
 
-<details>
-<summary>从源码构建</summary>
+| 系统 | 推荐下载 | 使用方式 |
+|------|------|------|
+| Windows 常见电脑 | [windows-amd64.exe](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0/Sushiro-Overdose-4.0-windows-amd64.exe) | 双击运行 |
+| Windows ARM | [windows-arm64.exe](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0/Sushiro-Overdose-4.0-windows-arm64.exe) | 双击运行 |
+| macOS Intel / Apple 芯片 | [macOS.dmg](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0/Sushiro-Overdose-4.0-macOS.dmg) | 拖入 Applications 后打开 |
+| Linux x86-64 | [linux_amd64.tar.gz](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0/sushiro-overdose_4.0_linux_amd64.tar.gz) | 解压后运行 `./sushiro` |
+| Linux ARM64 | [linux_arm64.tar.gz](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0/sushiro-overdose_4.0_linux_arm64.tar.gz) | 解压后运行 `./sushiro` |
 
-需要 Go 1.23+（[下载](https://go.dev/dl/)）。纯标准库，无需第三方依赖。
+更多压缩包及 SHA-256 校验值见[发布页](https://github.com/Ryujoxys/sushiro-overdose/releases/tag/v4.0)。
+
+macOS 和 Windows 可能提示应用未签名或来源未知。请先确认下载来源；macOS 可在「系统设置 → 隐私与安全性」中允许打开。不要关闭系统整体安全检查。
+
+从旧版升级前，先停止旧版后台进程，再替换应用。新版保留本机记录，不执行旧自动计划；替换文件不会停止已经运行的旧版进程。开启自启动前，把应用放在固定位置。
+
+本地界面默认位于 `127.0.0.1:39871`，端口占用时自动换端口。
+
+## 数据留在自己电脑上
+
+自己的记录、配置和模型保存在 `~/.sushiro/`，Windows 对应 `%USERPROFILE%\.sushiro\`。
+
+- 记录服务只访问寿司郎公开接口，不读取个人凭证，不创建或取消号码。
+- 不登录 GitHub，不连接共享数据库，不上传自己的排队记录。
+- 内置历史包和自己的原始数据分开保存；导出不含历史包、凭证或个人号码。
+- 手动取号只在你确认后访问寿司郎官方接口。
+- 原始公开快照定期保留最近 10 万条，长期记录建议定期导出备份。
+
+数据字段遵循[统一本地数据协议](docs/local-data-contract.md)。网络请求、凭证与证书处理详见[安全说明](SECURITY.md)。
+
+## 命令行与开发
+
+Go 1.23+，Go 端仅使用标准库。页面与历史包内嵌在程序里，无需前端构建。
 
 ```bash
 git clone https://github.com/Ryujoxys/sushiro-overdose.git
 cd sushiro-overdose
 go build -o sushiro .
-./sushiro          # 自动开浏览器到 http://127.0.0.1:39871
+./sushiro
 ```
 
-验证：`go test ./... && go vet ./... && gofmt -l .`
-
-</details>
-
-## 🔒 安全与隐私
-
-- 排队和叫号信息本来就公开（小程序里也显示），工具只是读出来算一下，**不抢号、不碰别人账号、不上传服务器**。
-- 凭证只存你本机（`~/.sushiro/`），不传任何第三方。
-- MITM 抓包**只解密寿司郎域名**，其他流量原样透传。
-- 任何动账号的操作（取号、预约、取消）都会先弹窗确认。
-- 代码全开源，详见 [SECURITY.md](SECURITY.md)。
-
-## 通行证是什么
-
-只看排队和叫号预测**不用登录**。需要「动账号」的操作（预约、远程取号、取消、读我的单据）才用通行证——从寿司郎微信小程序请求里提取的一次登录凭证。
-
-凭证会过期或被手机重新登录顶掉。出现 `E010 / error.server`、401/403、取号或预约突然失败时，在设置里重置认证再重新获取即可。Windows 一般手机抓包导入，macOS 可先试 PC 微信自动捕获，向导会一步步提示。
-
-## 命令行
+常用命令：
 
 ```bash
-sushiro                 # 启动 Web UI（默认）
-sushiro cli             # 终端交互模式
-sushiro calendar        # 查可预约时段
-sushiro list            # 查当前预约
-sushiro cancel <id>     # 取消预约
-sushiro sample once     # 采集一次排队/时段数据
-sushiro version         # 打印版本号（-v / --version 同义）
-sushiro doctor          # 只读诊断
-sushiro repair-proxy    # 恢复系统代理
-sushiro uninstall       # 清理本地敏感数据和证书
-sushiro help            # 更多命令
+sushiro                       # 打开界面
+sushiro collect status        # 查看记录状态
+sushiro collect start         # 后台记录，需先选门店
+sushiro collect stop          # 停止记录，保留数据
+sushiro collect autostart on  # 开启登录自启动
+sushiro collect autostart off # 关闭自启动
+sushiro doctor                # 只读诊断
+sushiro repair-proxy          # 恢复残留系统代理
+sushiro version               # 查看版本和版本名称
 ```
 
-## 遇到问题
+开发与验证见 [CONTRIBUTING.md](CONTRIBUTING.md)，包职责见 [ARCHITECTURE.md](ARCHITECTURE.md)。MCP 是[可选模块](mcp/README.md)，普通使用不需要安装。
 
-| 现象 | 处理 |
-|------|------|
-| 打不开页面 | 重跑，端口冲突会自动换端口 |
-| 系统代理异常 | `sushiro repair-proxy`，或设置页点代理修复 |
-| 通知收不到 | 设置页「测试通知」，确认 Webhook / Token |
-| 取号失败 E010 | 先重置认证，再重新获取通行证 |
-| macOS 打不开 App | 见上方「macOS 首次打开被拦」 |
-| Windows 被拦截 | SmartScreen 点「更多信息」→「仍要运行」 |
+开发预览使用绝对路径 `SUSHIRO_DATA_HOME` 隔离文件，**不要改写 `HOME` 或 `USERPROFILE`**。它不是系统沙箱，主动认证仍可能安装证书、设置代理。检查工作流只手动触发，发布不执行全量测试，测试也不会发送真实系统通知。
 
-更详细的诊断跑 `sushiro doctor`。
+## Star 趋势
 
-## 开发
+<a href="https://www.star-history.com/?repos=Ryujoxys%2Fsushiro-overdose&type=date&legend=top-left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Ryujoxys/sushiro-overdose&type=date&theme=dark&legend=top-left">
+    <img alt="Sushiro Overdose 的 GitHub Star 趋势" src="https://api.star-history.com/chart?repos=Ryujoxys/sushiro-overdose&type=date&legend=top-left">
+  </picture>
+</a>
 
-架构和文件职责见 [ARCHITECTURE.md](ARCHITECTURE.md)，开发约定见 [AGENTS.md](AGENTS.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。
+图表由 [Star History](https://www.star-history.com/) 提供，仅在查看 README 时加载，不属于应用的数据采集。
 
-```bash
-go build ./... && go test ./... && go vet ./...
-```
+## 许可与说明
 
-发新版本：`git tag vX.Y.Z && git push origin vX.Y.Z`，GitHub Actions 自动构建三平台产物并创建 Release。
-
-## License
-
-MIT
+[MIT](LICENSE)。本项目为非官方工具，与寿司郎官方无隶属关系；实时状态、取号结果和入座时间以官方小程序及门店为准。

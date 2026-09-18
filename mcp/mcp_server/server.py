@@ -1,7 +1,7 @@
 """sushiro-overdose MCP server（FastMCP，stdio transport）。
 
 注册所有 tool（查数据/联动桌面端/到店建议/教学）+ resource（FAQ）。
-启动时建 Turso/libsql 连接 + DesktopClient，全程复用。
+启动时只连接本机桌面端；历史数据由桌面端本地计算。
 
 用法：
   uv run sushiro-mcp          # stdio，配 Claude Desktop
@@ -18,77 +18,65 @@ from mcp.types import ToolAnnotations
 
 from .config import load_config
 from .desktop import DesktopClient
-from .turso import TursoClient
 from . import tools_queue, tools_desktop, tools_advice, resources
 
 log = logging.getLogger("mcp")
 
 # 模块级客户端：lifespan 建连后赋值，tool 函数直接读。MCP 是单进程，无线程安全问题。
-_turso: Optional[TursoClient] = None
 _desktop: Optional[DesktopClient] = None
 
 
-def _require_turso() -> TursoClient:
-    """tool 调用前确保 Turso 已连。未配置时抛异常（FastMCP 把异常转成 tool error 给 AI）。"""
-    if _turso is None:
-        raise RuntimeError("Turso 未配置（缺 SUSHIRO_MCP_TURSO_URL/TOKEN）。请在桌面端设置页 MCP 助手填 Turso 只读 token，或设环境变量。")
-    return _turso
+def _require_desktop() -> DesktopClient:
+    if _desktop is None:
+        raise RuntimeError("本机助手尚未初始化，请重新启动 MCP 客户端。")
+    return _desktop
 
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
     """启动时建连，退出时清理。"""
-    global _turso, _desktop
+    global _desktop
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = load_config()
     _desktop = DesktopClient(cfg.desktop_port)
-    if cfg.turso_configured:
-        try:
-            _turso = TursoClient(cfg.turso_url, cfg.turso_token)
-        except Exception as e:
-            log.warning("Turso 连接失败，查数据 tool 将不可用: %s", e)
-    else:
-        log.warning("未配置 Turso（SUSHIRO_MCP_TURSO_URL/TOKEN），查数据 tool 将不可用")
-    log.info("sushiro MCP server 启动（turso=%s desktop=127.0.0.1:%d）",
-             _turso is not None, cfg.desktop_port)
+    log.info("sushiro MCP server 启动（local desktop=127.0.0.1:%d）", cfg.desktop_port)
     try:
         yield
     finally:
-        if _turso:
-            _turso.close()
+        _desktop = None
 
 
 mcp = FastMCP("sushiro", lifespan=lifespan)
 _READONLY = ToolAnnotations(readOnlyHint=True)
 
 
-# ===== A. 查排队数据（读 Turso）=====
+# ===== A. 查排队数据（本机历史 + 官方实时只读接口）=====
 
 @mcp.tool(annotations=_READONLY, description="搜索门店。city 匹配城市/区域，q 模糊匹配店名/城市/区域。返回 store_id/name/city/area。")
-def list_stores(city: Optional[str] = None, q: Optional[str] = None, limit: int = 20) -> list:
+def list_stores(city: Optional[str] = None, q: Optional[str] = None, limit: int = 20):
     """例：list_stores(city='广州') 或 list_stores(q='太阳宫')"""
-    return tools_queue.list_stores(_require_turso(), city, q, limit)
+    return tools_queue.list_stores(_require_desktop(), city, q, limit)
 
 
 @mcp.tool(annotations=_READONLY, description="某店历史叫号曲线 + 各时段忙率/等位。date_type 可选 weekday/workday/weekend/holiday（默认 weekday）。返回'按历史几点叫到几号'。")
 def store_queue_history(store_id: int, date_type: str = "weekday") -> dict:
     """例：store_queue_history(3006, 'holiday')"""
-    return tools_queue.store_queue_history(_require_turso(), store_id, date_type)
+    return tools_queue.store_queue_history(_require_desktop(), store_id, date_type)
 
 
 @mcp.tool(annotations=_READONLY, description="某店各时段排队压力（忙率/等位/桌数），突出'几点最挤'。date_type 默认 weekday。")
 def store_pressure(store_id: int, date_type: str = "weekday") -> dict:
-    return tools_queue.store_pressure(_require_turso(), store_id, date_type)
+    return tools_queue.store_pressure(_require_desktop(), store_id, date_type)
 
 
-@mcp.tool(annotations=_READONLY, description="某店叫号速度/吞吐率（每小时叫多少号、两次叫号间隔）。反映叫号快慢。")
+@mcp.tool(annotations=_READONLY, description="某店实时叫号、等位和本机历史叫号速度。速率单位及样本覆盖以返回字段为准；无样本不做推测。")
 def called_speed(store_id: int) -> dict:
-    return tools_queue.called_speed(_require_turso(), store_id)
+    return tools_queue.called_speed(_require_desktop(), store_id)
 
 
-@mcp.tool(annotations=_READONLY, description="多店对比某时段（或全天峰值）的叫号/忙率。store_ids 是门店 id 列表。")
-def compare_stores(store_ids: list, date_type: str = "weekday", time_bucket: Optional[str] = None) -> list:
-    return tools_queue.compare_stores(_require_turso(), store_ids, date_type, time_bucket)
+@mcp.tool(annotations=_READONLY, description="多店本机历史趋势对比。store_ids 是门店 id 列表；time_bucket 为 HH:MM，查询从该时间开始的半小时，否则用默认全天窗口。返回样本与可信度，不承诺有数据。")
+def compare_stores(store_ids: list, date_type: str = "weekday", time_bucket: Optional[str] = None) -> dict:
+    return tools_queue.compare_stores(_require_desktop(), store_ids, date_type, time_bucket)
 
 
 # ===== B. 联动桌面端（调本地 API）=====
@@ -127,7 +115,7 @@ def arrival_advice(
     want_meal_time: Optional[str] = None,
     travel_minutes: Optional[int] = None,
 ) -> dict:
-    return tools_advice.arrival_advice(_require_turso(), _desktop, store_id, target_no, want_meal_time, travel_minutes)
+    return tools_advice.arrival_advice(_require_desktop(), store_id, target_no, want_meal_time, travel_minutes)
 
 
 # ===== D. 教学资源 =====

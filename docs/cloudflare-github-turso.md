@@ -1,118 +1,36 @@
-# Cloudflare GitHub 登录与 Turso 代理
+# 云端数据入口下线
 
-本方案用于“登录 GitHub 后使用线上 Turso 基准库”。本地应用只保存 Cloudflare Worker URL 和短期应用会话，不保存 Turso URL/token。
+GitHub 登录和共享数据库访问已从桌面端与 MCP 源码移除。当前历史数据只在本机积累；实时排队仍请求寿司郎官方公开接口。这不是离线运行模式。
 
-## 架构
+## 当前行为
 
-```text
-本地 sushiro Web UI
-  -> GitHub 登录跳转
-  -> Cloudflare Worker /auth/github/*
-  -> GitHub OAuth App
-  -> Worker 签发 sushiro cloud session
-  -> 本地保存 session 到 ~/.sushiro/cloud_auth.json
-  -> 本地后端带 Bearer session 请求 Worker 白名单 API
-  -> Worker 用 secrets 里的 Turso token 查询固定 SELECT
-```
+- 桌面端不再读取 `cloud_auth.json`、`queue_baseline_remote.json` 或数据库环境变量，也不会上传历史。
+- `/api/cloud` 及其子路径统一返回 HTTP 410，不跳转 GitHub、不接受 OAuth 回调、不保存 session。
+- MCP 只连接本机桌面端，不再依赖 `libsql-client` 或数据库 token。
+- 旧本地配置文件不自动删除；其中旧凭证不再使用。`mcp_config.json` 下次保存时会丢弃旧数据库字段。
+- GitHub Release 更新检查保留，它与 GitHub 登录无关。
 
-Worker 只暴露这些数据接口：
+## 当前处理范围
 
-- `GET /api/me`
-- `GET /api/queue/baseline/export`
-- `GET /api/queue/baseline/store?store_id=3006`
+维护者已说明网站自定义域名过期。本轮按要求只下线客户端云入口，线上只读 key 暂不处理，不执行 Worker 部署、凭证撤销或数据库删除，也不将这些操作作为本次改动的发布前置条件。
 
-不暴露任意 SQL，也不下发 Turso token。
+**域名过期不等于已确认 Worker 停服。** 仓库的 `wrangler.toml` 仍配置 `workers_dev = true`，不能只凭自定义域名失效判断所有入口的实际可达性。本轮不做线上探测，实际部署状态保持未核实；桌面端和 MCP 无论线上是否可达，都不再请求旧数据入口。
 
-## 已验证的线上 schema
+## 后续可选清理
 
-2026-06-08 只读查询确认当前 Turso 有这些表：
+以下清单仅在维护者后续决定彻底清理线上服务时执行，本轮暂缓：
 
-- `store_dimension`
-- `store_latest`
-- `store_bucket_rollups`
-- `daily_store_bucket_rollups`
-- `queue_snapshots`
-- `collector_runs`
-- `archive_runs`
+1. 将 `cloudflare/sushiro-cloud/src/index.js` 中的停用版本发布到所有实际入口，或禁用对应 Worker、路由和自定义域名。
+2. 确认旧登录路径、回调、`/api/me`、基准查询路径均不再返回数据；停用版本统一返回 410 且不访问上游。
+3. 撤销旧数据库只读 token，停用 GitHub OAuth 应用或撤销其 client secret，移除 Worker 上遗留的数据库、OAuth、会话签名 secrets。
+4. 检查是否存在其他历史部署、代理或直连 token。仅下掉页面不能撤回已发给客户端的凭证或已经复制的数据。
+5. 如不再采集线上数据，单独停掉服务器上的 `collector.service` 及相应定时任务。仓库中的采集器是独立运维工具，不会由桌面端启动。
 
-当前 `store_latest` 没有 `display_called_no` / `group_queues_json`，`store_bucket_rollups` 没有 `called_sample_count` / `called_no_*`。本地和 Worker 都做了兼容：如果未来 schema 加上叫号列，会自动读取；现在只能提供等待分钟、等位桌数和排队压力基准。
+不删除原数据库，避免丢失历史；是否保留备份和继续服务端采集由维护者决定。未来重新开放前按 [数据协议](local-data-contract.md) 做适配、隐私审查、限流和授权设计，不恢复共享直连 token。
 
-用户本机采样会继续融合进本机主曲线。把用户采样上传到线上库需要先设计并迁移贡献表，本次不默认开启。
-
-## 当前默认地址（workers.dev）
-
-本仓库桌面端默认云端地址：
-
-```text
-https://sushiro-cloud.sushiro-ryujoxys.workers.dev
-```
-
-Turso / GitHub OAuth / SESSION 等密钥只配置在 Worker secrets，不写进源码、不下发到本机。
-
-自定义域（如 `sushiro-cloud.ryujo.online`）可选；域名到期时改用 workers.dev 并更新 GitHub OAuth 回调即可。
-
-## GitHub OAuth App
-
-在 GitHub 创建 OAuth App：
-
-- Homepage URL: Worker URL，例如 `https://sushiro-cloud.<account>.workers.dev`
-- Authorization callback URL: `https://sushiro-cloud.<account>.workers.dev/auth/github/callback`
-- Scope: Worker 只请求 `read:user`
-
-创建后拿到：
-
-- `GITHUB_CLIENT_ID`
-- `GITHUB_CLIENT_SECRET`
-
-## Cloudflare Worker
-
-Worker 源码位于 `cloudflare/sushiro-cloud/`，无运行时 npm 依赖。
-
-必需 secrets：
-
-```text
-GITHUB_CLIENT_ID
-GITHUB_CLIENT_SECRET
-SESSION_SECRET
-TURSO_DATABASE_URL
-TURSO_AUTH_TOKEN
-```
-
-可选变量：
-
-```text
-ALLOWED_GITHUB_LOGINS=
-SESSION_TTL_SECONDS=2592000
-```
-
-`ALLOWED_GITHUB_LOGINS` 是 fail-closed：留空时 Worker 会拒绝所有 GitHub 登录（登录回调与每次 session 校验都会失败），任何账号都无法访问云端基准接口。要放行自己和朋友，用英文逗号分隔 GitHub login，并通过 secret 配置：
+## 无部署回归测试
 
 ```bash
-npx wrangler secret put ALLOWED_GITHUB_LOGINS
-# 输入例如：alice,bob
+go test ./internal/app -run 'TestRetiredCloud|TestLocalHistory|TestMCPDrops|TestWebUIDoesNot'
+node --test cloudflare/sushiro-cloud/test/retired.test.mjs
 ```
-
-## 部署命令
-
-```bash
-cd cloudflare/sushiro-cloud
-npx wrangler login
-npx wrangler secret put GITHUB_CLIENT_ID
-npx wrangler secret put GITHUB_CLIENT_SECRET
-npx wrangler secret put SESSION_SECRET
-npx wrangler secret put TURSO_DATABASE_URL
-npx wrangler secret put TURSO_AUTH_TOKEN
-npx wrangler deploy
-```
-
-部署后把 Worker URL 填到本地 UI：
-
-```text
-设置 -> 云端数据 -> Cloudflare Worker URL -> 保存 URL -> 用 GitHub 登录
-```
-
-## 免费托管说明
-
-- Worker 不使用 KV/D1/R2，不产生 Cloudflare 存储资源。
-- Worker 每次 baseline 请求会向 Turso 发 3 个固定 SELECT；单店请求同样只查固定门店数据。
-- 低频个人使用适合 Cloudflare Workers Free；如果开放给很多用户，需要再加缓存和限流。

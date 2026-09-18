@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
@@ -26,6 +27,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	exePath, _ := os.Executable()
 	status := map[string]any{
 		"version":           Version,
+		"edition":           Edition,
 		"running":           isRunning(),
 		"pid":               pid,
 		"has_config":        hasConfig,
@@ -99,48 +101,30 @@ func clearLocalReservationOnly() {
 // saveActiveReservationSlot 把一条预约写进 State 的预约槽，保留排队号槽不动。
 // load-merge-save：避免历史上「整盘覆写」把排队号冲掉。
 func saveActiveReservationSlot(rec ReservationRecord) error {
-	// load-merge-save：只覆盖预约槽，排队号槽（state.ActiveNetTicket）原样保留。
-	state, _ := LoadState(StateFilePath())
-	state.ActiveReservation = &rec
-	state.SavedAt = time.Now().Format(time.RFC3339)
-	return SaveState(StateFilePath(), state)
+	return UpdateState(StateFilePath(), func(state *State) {
+		state.ActiveReservation = &rec
+	})
 }
 
 // saveActiveNetTicketSlot 把一条排队号写进 State 的排队号槽，保留预约槽不动。
 func saveActiveNetTicketSlot(rec ReservationRecord) error {
-	state, _ := LoadState(StateFilePath())
-	state.ActiveNetTicket = &rec
-	state.SavedAt = time.Now().Format(time.RFC3339)
-	return SaveState(StateFilePath(), state)
+	return UpdateState(StateFilePath(), func(state *State) {
+		state.ActiveNetTicket = &rec
+	})
 }
 
 // clearActiveReservationSlot 只清预约槽；排队号槽仍有效时保留文件。
 func clearActiveReservationSlot() error {
-	state, err := LoadState(StateFilePath())
-	if err != nil || state.ActiveReservation == nil {
-		return nil
-	}
-	state.ActiveReservation = nil
-	state.SavedAt = time.Now().Format(time.RFC3339)
-	if state.ActiveNetTicket == nil {
-		// 两槽都空 → 直接删文件，等价于干净初始态。
-		return ClearState(StateFilePath())
-	}
-	return SaveState(StateFilePath(), state)
+	return UpdateState(StateFilePath(), func(state *State) {
+		state.ActiveReservation = nil
+	})
 }
 
 // clearActiveNetTicketSlot 只清排队号槽；预约槽仍有效时保留文件。
 func clearActiveNetTicketSlot() error {
-	state, err := LoadState(StateFilePath())
-	if err != nil || state.ActiveNetTicket == nil {
-		return nil
-	}
-	state.ActiveNetTicket = nil
-	state.SavedAt = time.Now().Format(time.RFC3339)
-	if state.ActiveReservation == nil {
-		return ClearState(StateFilePath())
-	}
-	return SaveState(StateFilePath(), state)
+	return UpdateState(StateFilePath(), func(state *State) {
+		state.ActiveNetTicket = nil
+	})
 }
 
 func refreshReservationItemsWithCurrentNetTicket(ctx context.Context, client *Client, items []ReservationRecord) []ReservationRecord {
@@ -534,13 +518,18 @@ func handleQueueTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
-	var body struct {
-		Store string `json:"store"`
+	var body queueTicketRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "无效的取号请求")
+		return
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
 	storeID := strings.TrimSpace(body.Store)
 	if storeID == "" {
 		writeError(w, http.StatusBadRequest, "缺少门店 ID")
+		return
+	}
+	if isMainFlowRunning() || mobileAuthCapture.isActive() {
+		writeError(w, http.StatusConflict, "请先完成或停止当前捕获/预约操作，再取号")
 		return
 	}
 	// 写操作前强制重新读盘刷新凭证：取号是会产生真实副作用的操作（占用排队号），
@@ -551,13 +540,45 @@ func handleQueueTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "尚未获取通行证，请先获取通行证再取号")
 		return
 	}
+	settings, err := body.apply(getWebSettings())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	client = NewClient(settings)
 
-	// 与后台 netTicketTick 串行化，避免并发取号发两张号（连点 / 后台 tick 与手动点击撞车）。
+	// 手动请求串行化，避免连点或多个窗口同时创建排队号。
 	// 锁内完成「探活 → create → 更新 plan」，拿到结果出锁再写 HTTP 响应，不持锁做 IO。
 	netTicketMu.Lock()
 	result := takeNetTicketLocked(r.Context(), client, storeID)
 	netTicketMu.Unlock()
 	result.write(w)
+}
+
+type queueTicketRequest struct {
+	Store     string  `json:"store"`
+	Adult     *int    `json:"adult,omitempty"`
+	Child     *int    `json:"child,omitempty"`
+	TableType *string `json:"table_type,omitempty"`
+}
+
+func (request queueTicketRequest) apply(settings Settings) (Settings, error) {
+	if request.Adult != nil {
+		settings.Adult = *request.Adult
+	}
+	if request.Child != nil {
+		settings.Child = *request.Child
+	}
+	if request.TableType != nil {
+		settings.TableType = *request.TableType
+	}
+	if settings.Adult < 0 || settings.Adult > 10 || settings.Child < 0 || settings.Child > 10 || settings.Adult+settings.Child == 0 {
+		return settings, fmt.Errorf("人数需为 0 到 10 的整数，且至少一人")
+	}
+	if settings.TableType != "T" && settings.TableType != "C" {
+		return settings, fmt.Errorf("请选择桌位或吧台")
+	}
+	return settings, nil
 }
 
 // netTicketTakeOutcome 是 takeNetTicketLocked 的结果，由 handler 出锁后写回 HTTP。
@@ -578,6 +599,8 @@ func (o netTicketTakeOutcome) write(w http.ResponseWriter) {
 // takeNetTicketLocked 在持有 netTicketMu 的前提下取号。先探活：若已有一个有效排队号，
 // 直接复用（recover），不再发 create——这是并发/连点场景下不发第二张号的关键。
 func takeNetTicketLocked(ctx context.Context, client *Client, storeID string) netTicketTakeOutcome {
+	doneActivity := markMainFlowActive("taking-ticket")
+	defer doneActivity()
 	// 前置探活：官方若已发号，复用它，避免重复取号顶掉手机端会话。
 	if existing, probeErr := client.GetNetTicketStatus(ctx); probeErr == nil &&
 		reservationRecordLooksSuccessful(existing) && !reservationRecordIsReservation(existing) {
@@ -639,147 +662,30 @@ func handleQueueTicketStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	refreshWebClient()
 	client := getWebClient()
+	writeQueueTicketStatus(w, r, client)
+}
+
+func writeQueueTicketStatus(w http.ResponseWriter, r *http.Request, client *Client) {
 	if client == nil {
 		writeError(w, http.StatusBadRequest, "尚未获取通行证，请先获取通行证")
 		return
 	}
 	ticket, err := client.GetNetTicketStatus(r.Context())
 	if err != nil {
+		if !IsHTTPStatus(err, http.StatusNotFound) && isNoCurrentNetTicketError(err) {
+			writeJSON(w, map[string]any{"ok": true, "ticket": nil, "plan": LoadNetTicketPlan()})
+			return
+		}
 		writeError(w, http.StatusBadGateway, friendlyNetTicketError(err))
 		return
 	}
-	plan := LoadNetTicketPlan()
-	if strings.TrimSpace(plan.StoreID) == "" {
-		plan.StoreID = ticket.StoreID
+	// Reading official state must not complete an unrelated plan or replay its
+	// success notification. Only explicit ticket creation owns those effects.
+	if !netTicketLooksSuccessful(ticket) {
+		writeJSON(w, map[string]any{"ok": true, "ticket": nil, "plan": LoadNetTicketPlan()})
+		return
 	}
-	applyNetTicketSuccess(r.Context(), client, &plan, ticket)
-	if err := SaveNetTicketPlan(plan); err != nil {
-		LogMessage(time.Now(), "保存排队号计划失败: "+err.Error())
-	}
-	writeJSON(w, map[string]any{"ok": true, "ticket": ticket, "plan": plan})
-}
-
-// handleNetTicketPlan 读取/设置「定时取号」计划。
-func handleNetTicketPlan(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		writeJSON(w, LoadNetTicketPlan())
-	case http.MethodPost:
-		var body struct {
-			Enabled     bool   `json:"enabled"`
-			Store       string `json:"store"`
-			StoreName   string `json:"store_name"`
-			TriggerMode string `json:"trigger_mode"`
-			TargetTime  string `json:"target_time"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "无效的请求格式: "+err.Error())
-			return
-		}
-		mode := strings.TrimSpace(body.TriggerMode)
-		if mode != "on_open" {
-			mode = "time"
-		}
-		netTicketMu.Lock()
-		plan := LoadNetTicketPlan()
-		plan.Enabled = body.Enabled
-		plan.StoreID = strings.TrimSpace(body.Store)
-		plan.StoreName = strings.TrimSpace(body.StoreName)
-		plan.TriggerMode = mode
-		plan.TargetTime = strings.TrimSpace(body.TargetTime)
-		plan.Source = ""
-		plan.TargetMealTime = ""
-		plan.RoutinePlannedDate = ""
-		// 重新设定即重置当天执行状态，允许（重新）到点取号。
-		plan.FiredDate = ""
-		plan.FiredAt = ""
-		plan.Number = ""
-		plan.TicketID = 0
-		plan.LastError = ""
-		plan.ServerRetryCount = 0
-		plan.RetryDate = ""
-		if body.Enabled {
-			plan.Status = "armed"
-		} else {
-			plan.Status = "idle"
-		}
-		clearNetTicketFire(time.Now().Format("2006-01-02"))
-		if err := SaveNetTicketPlan(plan); err != nil {
-			netTicketMu.Unlock()
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		netTicketMu.Unlock()
-		writeJSON(w, plan)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "GET or POST only")
-	}
-}
-
-// handleNetTicketRoutine 读取/设置「每天想几点吃」Routine。
-func handleNetTicketRoutine(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		netTicketMu.Lock()
-		resp := NetTicketRoutineResponse{Routine: LoadNetTicketRoutine(), Plan: LoadNetTicketPlan()}
-		netTicketMu.Unlock()
-		writeJSON(w, resp)
-	case http.MethodPost:
-		var body struct {
-			Enabled        bool   `json:"enabled"`
-			Store          string `json:"store"`
-			StoreID        string `json:"store_id"`
-			StoreName      string `json:"store_name"`
-			TargetMeal     string `json:"target_meal"`
-			TargetMealTime string `json:"target_meal_time"`
-			TravelMinutes  int    `json:"travel_minutes"`
-			SafetyMinutes  *int   `json:"safety_minutes"`
-			NotifyBefore   *int   `json:"notify_before_minutes"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, http.StatusBadRequest, "无效的请求格式: "+err.Error())
-			return
-		}
-		storeID := strings.TrimSpace(DefaultString(body.StoreID, body.Store))
-		targetMeal := strings.TrimSpace(DefaultString(body.TargetMealTime, body.TargetMeal))
-		if body.Enabled {
-			if storeID == "" {
-				writeError(w, http.StatusBadRequest, "请先选择门店")
-				return
-			}
-			if _, ok := parseHHMM(targetMeal, time.Now()); !ok {
-				writeError(w, http.StatusBadRequest, "请提供有效的目标就餐时间，例如 1300 或 13:00")
-				return
-			}
-			if !routineNotifyConfigured() {
-				writeError(w, http.StatusBadRequest, "启用 Routine 前必须先配置通知渠道，否则无法提醒你取号")
-				return
-			}
-		}
-		notifyBefore := netTicketRoutineDefaultNotifyBeforeMins
-		if body.NotifyBefore != nil {
-			notifyBefore = *body.NotifyBefore
-		} else if body.SafetyMinutes != nil {
-			notifyBefore = *body.SafetyMinutes
-		}
-		if notifyBefore < 0 {
-			notifyBefore = 0
-		}
-		routine := NetTicketRoutine{
-			Enabled:             body.Enabled,
-			StoreID:             storeID,
-			StoreName:           strings.TrimSpace(body.StoreName),
-			TargetMealTime:      targetMeal,
-			TravelMinutes:       max(0, body.TravelMinutes),
-			NotifyBeforeMinutes: notifyBefore,
-		}
-		netTicketMu.Lock()
-		resp := saveNetTicketRoutineConfigLocked(routine, time.Now())
-		netTicketMu.Unlock()
-		writeJSON(w, resp)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "GET or POST only")
-	}
+	writeJSON(w, map[string]any{"ok": true, "ticket": ticket, "plan": LoadNetTicketPlan()})
 }
 
 // handleCancelNetTicket 取消当前排队号（cancelNetTicket，只需 wechatId）。
@@ -853,8 +759,21 @@ func handleAuthReset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
+	authLifecycle.generation++
+	mobileAuthCapture.stop("通行证已重置，手机捕获已停止；请关闭手机 Wi-Fi 代理")
+	mobileAuthCapture.mu.Lock()
+	mobileAuthCapture.saved = false
+	mobileAuthCapture.mu.Unlock()
 	engine.Stop()
-	DeleteLocalConfig()
+	engine.mu.Lock()
+	engine.tokens = nil
+	engine.mu.Unlock()
+	if err := os.Remove(LocalConfigPath()); err != nil && !os.IsNotExist(err) {
+		writeError(w, http.StatusInternalServerError, "删除本机凭证失败，请检查文件权限："+err.Error())
+		return
+	}
 	clearWebSettings()
 	resetAuthHealth()
 	resetAuthMeta()
@@ -879,46 +798,14 @@ func handleEngineCapture(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "message": "通行证获取已开始"})
 }
 
-func handleEngineBooking(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "POST only")
-		return
-	}
-	refreshWebClient()
-
-	// 可选时段参数：齐全则直接预约这个确切时段，否则维持原"按偏好自动抢"。
-	var body struct {
-		Store string `json:"store"`
-		Date  string `json:"date"`
-		Start string `json:"start"`
-		End   string `json:"end"`
-	}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
-	}
-	if strings.TrimSpace(body.Store) != "" && strings.TrimSpace(body.Date) != "" && strings.TrimSpace(body.Start) != "" {
-		if err := engine.StartBookingSlot(body.Store, body.Date, body.Start, body.End); err != nil {
-			writeError(w, http.StatusConflict, err.Error())
-			return
-		}
-		writeJSON(w, map[string]any{"ok": true, "message": "正在预约这个时段"})
-		return
-	}
-
-	if err := engine.StartBooking(); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true, "message": "抢号已开始"})
-}
-
 func handleEngineStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
 	engine.Stop()
-	writeJSON(w, map[string]any{"ok": true, "message": "已停止"})
+	state := engine.GetState()
+	writeJSON(w, map[string]any{"ok": true, "message": state.Message, "engine": state})
 }
 
 // handleEngineReset 重置抓包状态：断开代理、清残留、回到 idle，便于手动重新连接。
