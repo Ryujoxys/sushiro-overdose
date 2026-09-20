@@ -16,6 +16,7 @@ type localRecordStore struct {
 	ID      int                 `json:"id"`
 	Name    string              `json:"name"`
 	City    string              `json:"city,omitempty"`
+	Area    string              `json:"area,omitempty"`
 	Samples int                 `json:"samples"`
 	Days    int                 `json:"days"`
 	Latest  QueueBaselineRecord `json:"latest"`
@@ -166,6 +167,9 @@ func summarizeLocalRecords(rows []QueueBaselineRecord, selected int) localRecord
 		}
 		if row.City != "" {
 			s.City = row.City
+		}
+		if row.Area != "" {
+			s.Area = row.Area
 		}
 		if selected != 0 && row.StoreID != selected {
 			continue

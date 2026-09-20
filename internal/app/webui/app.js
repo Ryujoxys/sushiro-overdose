@@ -117,7 +117,7 @@ function renderService() {
   if(![...interval.options].some(o=>Number(o.value)===cfg.interval_minutes))interval.add(new Option('每 '+cfg.interval_minutes+' 分钟',cfg.interval_minutes));
   if(document.activeElement!==interval)interval.value=cfg.interval_minutes||5;
   el('record-toggle').textContent=cfg.enabled?'暂停记录':'开始记录';el('record-toggle').disabled=!ids.length||state.busy.has('service');
-  el('autostart').checked=!!auto.enabled;el('autostart').disabled=auto.supported===false||!ids.length||state.busy.has('service');
+  el('autostart').checked=!!auto.enabled;el('autostart').disabled=auto.supported===false||(!ids.length&&!auto.enabled)||state.busy.has('service');
   el('autostart').title=auto.error||'单独开启，不会随开始记录自动启用';
   el('repair-autostart').hidden=!auto.needs_update;el('repair-autostart').disabled=state.busy.has('service');
   el('service-detail').textContent=data.state.last_error||data.state.paused_reason||(auto.needs_update?'程序位置已变化，请更新自启动位置。':'')||auto.error||('最近记录：'+clockTime(data.state.last_at)+(data.background_running?'。可以关闭界面。':cfg.enabled?'。后台未就绪时，请保持界面运行。':''));
@@ -154,7 +154,7 @@ async function changeHistory() {
 }
 async function saveRecordConfig(ids=recordIDs()) {
   if(!state.service)throw new Error('请先刷新记录状态。');
-  await api('/api/queue/baseline',{...state.service.config,store_ids:ids,use_preference_stores:false,interval_minutes:Number(el('record-interval').value)});
+  await api('/api/queue/baseline',{...state.service.config,enabled:ids.length?state.service.config.enabled:false,store_ids:ids,use_preference_stores:false,interval_minutes:Number(el('record-interval').value)});
 }
 async function toggleRecording() {
   await guard('service',async()=>{
@@ -194,9 +194,30 @@ function openStorePicker(mode) {
   state.pickerMode=mode;state.picker=new Set(mode==='records'?recordIDs():state.selectedStore?[state.selectedStore]:[]);
   el('store-dialog-title').textContent=mode==='records'?'选择记录门店':'今天去哪家店';
   el('store-save').textContent=mode==='records'?'保存门店':'选这家店';
+  showError('store-error',null);
   el('store-search').value='';el('store-dialog').showModal();updatePicked();searchStores();
 }
-function updatePicked(){el('store-picked').textContent='已选 '+state.picker.size+' 家';el('store-save').disabled=!state.picker.size;}
+function updatePicked(){
+  const records=state.pickerMode==='records',saving=state.busy.has('stores');
+  el('store-picked').textContent='已选 '+state.picker.size+' 家';
+  el('store-save').disabled=saving||(!records&&!state.picker.size);
+  el('store-search').disabled=saving;
+  el('store-selection').hidden=!records;
+  setMarkup('store-selected',[...state.picker].map(id=>'<button class="selected-store" data-action="remove-picked-store" data-id="'+escapeHTML(id)+'" aria-label="移除 '+escapeHTML(storeName(id))+'"'+(saving?' disabled':'')+'><span>'+escapeHTML(storeName(id))+'</span><span aria-hidden="true">×</span></button>').join(''));
+  el('store-selection-hint').textContent=state.picker.size?'移除门店不会删除记录。':recordIDs().length?'保存后暂停记录，已有数据保留。':'先搜索常去的门店。';
+  el('store-results').querySelectorAll('input[name="picked-store"]').forEach(input=>{input.checked=state.picker.has(input.value);input.disabled=saving;});
+}
+function removePickedStore(id){
+  if(state.pickerMode!=='records'||state.busy.has('stores'))return;
+  const index=[...state.picker].indexOf(id);
+  state.picker.delete(id);updatePicked();
+  const remaining=el('store-selected').querySelectorAll('button');
+  (remaining[Math.max(0,Math.min(index,remaining.length-1))]||el('store-search')).focus();
+}
+function closeStorePicker(){
+  if(state.busy.has('stores'))return;
+  state.searchRevision++;clearTimeout(searchTimer);el('store-dialog').close();
+}
 async function searchStores() {
   const revision=++state.searchRevision,q=el('store-search').value.trim();
   el('store-results').innerHTML='<p class="empty">正在找门店…</p>';
@@ -205,18 +226,20 @@ async function searchStores() {
     if(revision!==state.searchRevision)return;
     for(const store of data.stores||[])state.stores.set(String(store.id),store);
     el('store-results').innerHTML=(data.stores||[]).map(s=>'<label class="picker-row"><input type="'+(state.pickerMode==='records'?'checkbox':'radio')+'" name="picked-store" value="'+escapeHTML(s.id)+'" '+(state.picker.has(String(s.id))?'checked':'')+'><span><b>'+escapeHTML(s.name)+'</b><small>'+escapeHTML([s.name_kana||s.city,s.address].filter(Boolean).join(' · '))+'</small></span></label>').join('')||'<p class="empty">没有找到，试试城市或其他店名。</p>';
+    updatePicked();
   }catch(e){if(revision===state.searchRevision)el('store-results').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="retry-stores">重试</button>';}
 }
 async function savePickedStores() {
   await guard('stores',async()=>{
-    const ids=[...state.picker];if(!ids.length)return;
-    el('store-save').disabled=true;
+    const ids=[...state.picker];if(state.pickerMode!=='records'&&!ids.length)return;
+    showError('store-error',null);updatePicked();
     try{
-      if(state.pickerMode==='records'){await saveRecordConfig(ids);syncAnalysisStore(ids[0]);el('analysis-date').value='';await refreshRecords();toast(state.service?.config.enabled?'门店已保存':'门店已保存，点“开始记录”即可');}
+      if(state.pickerMode==='records'){await saveRecordConfig(ids);if(ids.length)syncAnalysisStore(ids[0]);el('analysis-date').value='';await refreshRecords();toast(!ids.length?'已暂停记录，历史数据保留':state.service?.config.enabled?'门店已保存':'门店已保存，点“开始记录”即可');}
       else{state.selectedStore=ids[0];loadLive();}
-      el('store-dialog').close();
-    }finally{updatePicked();}
+      state.searchRevision++;clearTimeout(searchTimer);el('store-dialog').close();
+    }catch(error){showError('store-error',error);}
   });
+  updatePicked();
 }
 async function loadLive() {
   const id=state.selectedStore;
@@ -279,7 +302,7 @@ function init() {
   window.runtime?.EventsOn?.('desktop:busy',()=>toast('正在完成操作，请稍候再关闭。'));
   const actions={
     refresh:refreshRecords,'pick-records':()=>openStorePicker('records'),'pick-queue':()=>openStorePicker('queue'),
-    'retry-stores':searchStores,'save-stores':savePickedStores,'close-store':()=>{state.searchRevision++;el('store-dialog').close();},
+    'retry-stores':searchStores,'save-stores':savePickedStores,'close-store':closeStorePicker,'remove-picked-store':button=>removePickedStore(button.dataset.id),
     'toggle-recording':toggleRecording,'repair-autostart':repairAutostart,'quit-app':quitApp,'refresh-live':loadLive,
     'analyze-store':button=>{selectAnalysisStore(button.dataset.id);el('analysis-title').scrollIntoView({block:'start'});},
     'review-ticket':reviewTicket,'confirm-ticket':confirmTicket,'close-ticket':()=>{if(!state.busy.has('ticket'))el('ticket-dialog').close();},
@@ -292,6 +315,7 @@ function init() {
   let resizeTimer;
   window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(state.page==='records'&&state.records)renderAnalysis();},150);});
   el('store-search').addEventListener('input',()=>{state.searchRevision++;clearTimeout(searchTimer);searchTimer=setTimeout(searchStores,250);});
+  el('store-dialog').addEventListener('cancel',event=>{event.preventDefault();closeStorePicker();});
   el('store-results').addEventListener('change',event=>{const input=event.target;if(input.name!=='picked-store')return;if(state.pickerMode==='queue')state.picker.clear();if(input.checked)state.picker.add(input.value);else state.picker.delete(input.value);updatePicked();});
   el('record-interval').addEventListener('change',()=>guard('config',async()=>{await saveRecordConfig();await refreshRecords();toast('记录间隔已保存');}));
   el('autostart').addEventListener('change',changeAutostart);

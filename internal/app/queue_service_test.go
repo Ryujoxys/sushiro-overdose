@@ -137,7 +137,11 @@ func TestPublicCollectorYieldsResumesAndRespectsCrossProcessLock(t *testing.T) {
 }
 
 func TestPublicCollectorHeartbeatAndReminderCadence(t *testing.T) {
-	publicCollectorFixture(t)
+	cfg := publicCollectorFixture(t)
+	cfg.UsePreferenceStores = true
+	if err := SaveQueueBaselineConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	if err := SaveQueueAlertConfig(QueueAlertConfig{Rules: []QueueAlertRule{{Enabled: true, StoreID: "3006", Type: queueAlertCalledReach, TargetNo: 100, NotifyAtNo: 90}}}); err != nil {
 		t.Fatal(err)
 	}

@@ -48,10 +48,7 @@ func (c *QueueBaselineCollector) collectTick(ctx context.Context) {
 	key := strings.Join(queueBaselineStoreIDs(cfg), ",")
 	state.Enabled, state.Running = cfg.Enabled, cfg.Enabled && ctx.Err() == nil
 	state.PID, state.StoreIDs = os.Getpid(), queueBaselineStoreIDs(cfg)
-	state.IntervalSeconds = cfg.IntervalMinutes * 60
-	if len(queueAlertStoreIDs()) > 0 && state.IntervalSeconds > 60 {
-		state.IntervalSeconds = 60
-	}
+	state.IntervalSeconds = queueBaselineIntervalSeconds(cfg, state.StoreIDs)
 	state.PausedReason = publicQueueCollectionBlockedReason()
 	if len(state.StoreIDs) == 0 {
 		state.PausedReason = "先选择要记录的门店"
@@ -95,10 +92,7 @@ func sharedQueueCollectionStatus(now time.Time) PublicQueueCollectionStatus {
 	cfg := LoadQueueBaselineConfig()
 	status.Enabled, status.StoreIDs = cfg.Enabled, queueBaselineStoreIDs(cfg)
 	status.Running = status.Running && cfg.Enabled
-	status.IntervalSeconds = cfg.IntervalMinutes * 60
-	if len(queueAlertStoreIDs()) > 0 && status.IntervalSeconds > 60 {
-		status.IntervalSeconds = 60
-	}
+	status.IntervalSeconds = queueBaselineIntervalSeconds(cfg, status.StoreIDs)
 	if !cfg.Enabled {
 		status.PausedReason = "已暂停采集"
 	}

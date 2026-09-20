@@ -177,7 +177,7 @@ func NormalizeQueueBaselineConfig(cfg QueueBaselineConfig) QueueBaselineConfig {
 	}
 	cfg.StoreIDs = UniqueNonEmptyStrings(cfg.StoreIDs)
 	if len(cfg.StoreIDs) == 0 && !cfg.UsePreferenceStores {
-		cfg.UsePreferenceStores = true
+		cfg.Enabled = false
 	}
 	return cfg
 }
@@ -190,7 +190,8 @@ func LoadQueueBaselineConfig() QueueBaselineConfig {
 	if err != nil {
 		return def
 	}
-	var cfg QueueBaselineConfig
+	// Older files may omit this flag; an explicit false keeps an empty selection empty.
+	cfg := def
 	if json.Unmarshal(data, &cfg) != nil {
 		return def
 	}
@@ -370,6 +371,9 @@ func collectQueueBaselineWithClient(ctx context.Context, cfg QueueBaselineConfig
 func queueBaselineStoreIDs(cfg QueueBaselineConfig) []string {
 	cfg = NormalizeQueueBaselineConfig(cfg)
 	ids := append([]string(nil), cfg.StoreIDs...)
+	if !cfg.UsePreferenceStores {
+		return append([]string{}, ids...)
+	}
 	if len(ids) == 0 && cfg.UsePreferenceStores {
 		prefs := LoadPreferences()
 		ids = prefs.SelectedStores
@@ -378,6 +382,21 @@ func queueBaselineStoreIDs(cfg QueueBaselineConfig) []string {
 		}
 	}
 	return UniqueNonEmptyStrings(append(ids, queueAlertStoreIDs()...))
+}
+
+func queueBaselineIntervalSeconds(cfg QueueBaselineConfig, storeIDs []string) int {
+	interval := cfg.IntervalMinutes * 60
+	if interval <= 60 {
+		return interval
+	}
+	for _, alertID := range queueAlertStoreIDs() {
+		for _, storeID := range storeIDs {
+			if alertID == storeID {
+				return 60
+			}
+		}
+	}
+	return interval
 }
 
 func queueBaselineRecordFromStore(s QueueLiveStore, collectedAt string) QueueBaselineRecord {
@@ -488,6 +507,8 @@ func handleQueueBaseline(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		queueServiceControlMu.Lock()
+		defer queueServiceControlMu.Unlock()
 		if err := SaveQueueBaselineConfig(body); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

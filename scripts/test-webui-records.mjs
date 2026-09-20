@@ -133,6 +133,100 @@ function fixture() {
 }
 {
  const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("state.stores.set('1012',{name:'深圳 <店>'});openStorePicker('records');");
+ await new Promise(resolve=>setImmediate(resolve));
+ f.setRespond(async()=>({stores:[{id:3006,name:'广州店',city:'广州'}]}));
+ f.node('store-search').value='广州';await f.run('searchStores()');
+ f.run("state.picker.add('3006');updatePicked();");
+ assert.match(f.node('store-selected').innerHTML,/深圳 &lt;店&gt;/,'searching another city hid an existing selection');
+ assert.match(f.node('store-selected').innerHTML,/广州店/);
+ const result={value:'3006',checked:true,disabled:false};
+ f.node('store-results').querySelectorAll=()=>[result];
+ let focused='';f.node('store-selected').querySelectorAll=()=>[{focus(){focused='remaining';}}];
+ f.run("removePickedStore('3006')");
+ assert.equal(result.checked,false,'removing a chip left its result checked');
+ assert.equal(focused,'remaining','removing a chip lost keyboard focus');
+ f.setRespond(async()=>{throw new Error('网络不可用');});
+ await f.run('searchStores()');
+ assert.match(f.node('store-results').innerHTML,/网络不可用/);
+ assert.match(f.node('store-selected').innerHTML,/深圳 &lt;店&gt;/,'failed search discarded selected stores');
+ f.node('store-selected').querySelectorAll=()=>[];
+ f.node('store-search').focus=()=>{focused='search';};
+ f.run("removePickedStore('1012')");
+ assert.equal(focused,'search','removing the last chip did not focus search');
+ assert.equal(f.node('store-save').disabled,false,'records must allow saving an empty selection');
+ assert.match(f.node('store-selection-hint').textContent,/暂停记录/);
+ f.run('closeStorePicker()');
+ assert.equal(f.node('store-dialog').open,false);
+ assert.equal(f.run('recordIDs().join(",")'),'1012','cancelling saved a draft selection');
+ assert.equal(f.calls.filter(call=>call.options.method==='POST').length,0,'search/remove/cancel wrote configuration');
+}
+{
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("state.service.config.enabled=true;state.service.autostart={enabled:true,supported:true};openStorePicker('records');removePickedStore('1012');");
+ await new Promise(resolve=>setImmediate(resolve));
+ f.run('refreshRecords=async()=>{}');
+ f.setRespond(async()=>{throw new Error('保存失败，请重试');});
+ await f.run('savePickedStores()');
+ assert.equal(f.node('store-dialog').open,true,'failed save closed the picker');
+ assert.equal(f.run('state.picker.size'),0,'failed save discarded the draft');
+ assert.equal(f.node('store-save').disabled,false,'failed save cannot be retried');
+ assert.equal(f.node('store-search').disabled,false);
+ assert.match(f.node('store-error').textContent,/保存失败/);
+ f.setRespond(async()=>({}));
+ await f.run('savePickedStores()');
+ const writes=f.calls.filter(call=>call.options.method==='POST');
+ assert.equal(writes.length,2,'save retry performed extra configuration operations');
+ for(const write of writes){
+   assert.equal(write.path,'/api/queue/baseline','clearing stores changed autostart or history');
+   const body=JSON.parse(write.options.body);
+   assert.deepEqual(body.store_ids,[]);assert.equal(body.enabled,false);assert.equal(body.use_preference_stores,false);
+ }
+ assert.equal(f.node('store-dialog').open,false);
+ assert.match(f.node('toast').textContent,/已暂停记录/);
+ assert.equal(f.run('state.service.autostart.enabled'),true,'clearing stores disabled autostart');
+}
+{
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("openStorePicker('records')");await new Promise(resolve=>setImmediate(resolve));
+ let resolveSave;
+ f.setRespond(()=>new Promise(resolve=>{resolveSave=resolve;}));
+ f.run('refreshRecords=async()=>{}');
+ const save=f.run('savePickedStores()');await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.node('store-save').disabled,true);assert.equal(f.node('store-search').disabled,true);
+ f.run("closeStorePicker();removePickedStore('1012')");
+ assert.equal(f.node('store-dialog').open,true,'closing during a write hid its outcome');
+ assert.equal(f.run('state.picker.size'),1,'selection changed during a write');
+ resolveSave({});await save;
+ assert.equal(f.node('store-dialog').open,false);
+}
+{
+ const f=fixture();
+ f.run("state.selectedStore='';openStorePicker('queue');");await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.node('store-selection').hidden,true,'recording chips appeared in manual ticket selection');
+ assert.equal(f.node('store-save').disabled,true,'manual ticket selection accepted zero stores');
+ await f.run('savePickedStores()');
+ assert.equal(f.node('store-dialog').open,true);
+ assert.equal(f.calls.filter(call=>call.options.method==='POST').length,0);
+ f.run("state.picker.add('3006');updatePicked();closeStorePicker();");
+ assert.equal(f.run('state.selectedStore'),'','cancelling changed manual ticket store');
+}
+{
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("state.service.config.store_ids=[];state.service.state.store_ids=[];state.service.autostart={enabled:true,supported:true};renderService();");
+ assert.equal(f.node('autostart').disabled,false,'empty selection prevented disabling existing autostart');
+ assert.equal(f.node('record-toggle').disabled,true,'empty selection allowed starting collection');
+ f.run('state.service.autostart.enabled=false;renderService();');
+ assert.equal(f.node('autostart').disabled,true,'empty selection allowed enabling autostart');
+ f.run("openStorePicker('records')");
+ assert.equal(f.node('store-selection-hint').textContent,'先搜索常去的门店。','first use described pausing a nonexistent collection');
+}
+{
+ const f=fixture();
  f.setRespond(async path=>{
    if(path==='/api/queue/ticket')throw new Error('network timeout');
    if(path==='/api/status')return {has_config:true,engine:{status:'idle'}};
@@ -290,4 +384,4 @@ function fixture() {
  await f.run('cancelTicket()');
  assert.equal(f.calls.filter(c=>c.path==='/api/queue/ticket/cancel').length,1,'cleared ticket can still cancel');
 }
-console.log('Web UI behavior: passed (search, keyboard, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge).');
+console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge).');

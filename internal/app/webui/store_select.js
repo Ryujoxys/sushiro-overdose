@@ -16,7 +16,7 @@ function syncAnalysisStore(preferred='') {
 function filterAnalysisStores(query='') {
   const terms=query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   return analysisStoreIDs().filter(id=>{
-    const s=state.stores.get(id)||{},haystack=[storeName(id),s.city,s.name_kana,id].filter(Boolean).join(' ').toLocaleLowerCase();
+    const s=state.stores.get(id)||{},haystack=[storeName(id),s.city,s.area,s.name_kana,id].filter(Boolean).join(' ').toLocaleLowerCase();
     return terms.every(term=>haystack.includes(term));
   });
 }
@@ -24,7 +24,7 @@ function renderAnalysisStoreOptions(query='') {
   analysisStoreMatches=filterAnalysisStores(query);
   analysisStoreActive=analysisStoreMatches.indexOf(el('analysis-store').value);
   el('analysis-store-options').innerHTML=analysisStoreMatches.map((id,index)=>{
-    const s=state.stores.get(id)||{},city=s.city||s.name_kana||'';
+    const s=state.stores.get(id)||{},city=s.city||s.area||s.name_kana||'';
     return '<div id="analysis-store-option-'+index+'" class="store-option" role="option" aria-selected="'+(id===el('analysis-store').value)+'" data-store-index="'+index+'"><span>'+escapeHTML(storeName(id))+'</span>'+(city?'<small>'+escapeHTML(city)+'</small>':'')+'</div>';
   }).join('');
   el('analysis-store-empty').hidden=analysisStoreMatches.length>0;

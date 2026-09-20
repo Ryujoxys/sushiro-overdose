@@ -85,9 +85,11 @@
 <footer class="shell footer">SUSHIRO Overdose · 本地记录，以门店实际叫号为准</footer>
 <dialog id="store-dialog" aria-labelledby="store-dialog-title">
   <div class="dialog-heading"><h2 id="store-dialog-title">选择记录门店</h2><button class="icon-button" data-action="close-store" aria-label="关闭门店选择">×</button></div>
+  <section id="store-selection" class="picker-selection" aria-label="已选记录门店"><div id="store-selected" class="selected-stores"></div><p id="store-selection-hint" class="caption"></p></section>
   <label class="field">搜索城市或门店<input id="store-search" type="search" placeholder="例如 深圳、海岸城" autocomplete="off"></label>
   <div id="store-results" class="picker-results" role="status"></div>
-  <div class="dialog-footer"><span id="store-picked" class="muted"></span><button id="store-save" class="button primary" data-action="save-stores">保存门店</button></div>
+  <p id="store-error" class="notice error" role="alert" hidden></p>
+  <div class="dialog-footer"><span id="store-picked" class="muted" role="status"></span><button id="store-save" class="button primary" data-action="save-stores">保存门店</button></div>
 </dialog>
 <dialog id="ticket-dialog" aria-labelledby="ticket-dialog-title">
   <div class="dialog-heading"><h2 id="ticket-dialog-title">确认取号</h2><button class="icon-button" data-action="close-ticket" aria-label="关闭取号确认">×</button></div>

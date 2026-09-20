@@ -1,10 +1,14 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/Ryujoxys/sushiro-overdose/internal/core"
 )
@@ -45,9 +49,124 @@ func TestNormalizeQueueBaselineConfig(t *testing.T) {
 		if got.IntervalMinutes != c.want {
 			t.Errorf("NormalizeQueueBaselineConfig(%d) = %d, want %d", c.in, got.IntervalMinutes, c.want)
 		}
-		if !got.UsePreferenceStores {
-			t.Errorf("NormalizeQueueBaselineConfig(%d) should default to preference stores", c.in)
+		if got.UsePreferenceStores || got.Enabled {
+			t.Errorf("NormalizeQueueBaselineConfig(%d) must preserve an explicit empty selection", c.in)
 		}
+	}
+}
+
+func TestQueueBaselineExplicitEmptySelectionStaysPaused(t *testing.T) {
+	t.Setenv("SUSHIRO_DATA_HOME", t.TempDir())
+	if err := SavePreferences(UserPreferences{SelectedStores: []string{"3006"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveQueueAlertConfig(QueueAlertConfig{Rules: []QueueAlertRule{{Enabled: true, StoreID: "3050", Type: queueAlertCalledReach, TargetNo: 100, NotifyAtNo: 90}}}); err != nil {
+		t.Fatal(err)
+	}
+	record := QueueBaselineRecord{StoreID: 1012, CollectedAt: time.Now().Format(time.RFC3339), WaitMinutes: 20}
+	if err := appendQueueBaselineRecords([]QueueBaselineRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(queueBaselineRecordsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	handleQueueBaseline(rr, httptest.NewRequest(http.MethodPost, "/api/queue/baseline", strings.NewReader(`{"enabled":true,"store_ids":[],"use_preference_stores":false,"interval_minutes":5}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("clear selection: %d %s", rr.Code, rr.Body.String())
+	}
+	for i := 0; i < 2; i++ {
+		cfg := LoadQueueBaselineConfig()
+		if cfg.Enabled || cfg.UsePreferenceStores || len(queueBaselineStoreIDs(cfg)) != 0 {
+			t.Fatalf("empty selection revived old stores: %+v, effective %v", cfg, queueBaselineStoreIDs(cfg))
+		}
+		if err := SaveQueueBaselineConfig(cfg); err != nil {
+			t.Fatal(err)
+		}
+		collector := &QueueBaselineCollector{collect: func(context.Context, QueueBaselineConfig) (int, error) {
+			t.Error("empty selection collected old preference or alert stores")
+			return 0, nil
+		}}
+		collector.tick(context.Background())
+		if status := collector.status(); status.Enabled || status.Running || len(status.StoreIDs) != 0 {
+			t.Fatalf("empty selection status: %+v", status)
+		}
+	}
+	after, err := os.ReadFile(queueBaselineRecordsPath())
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("clearing stores changed history: %v", err)
+	}
+	if got := LoadPreferences().SelectedStores; len(got) != 1 || got[0] != "3006" {
+		t.Fatalf("clearing records changed ticket preferences: %v", got)
+	}
+	if got := queueAlertStoreIDs(); len(got) != 1 || got[0] != "3050" {
+		t.Fatalf("clearing records changed reminder settings: %v", got)
+	}
+	var actions []string
+	injected := publicQueueServiceActions{
+		install: func() error { actions = append(actions, "install"); return nil },
+		start:   func() error { actions = append(actions, "start"); return nil },
+		remove:  func() error { actions = append(actions, "remove"); return nil },
+	}
+	if err := configurePublicQueueAutoStart(true, injected); err == nil || len(actions) != 0 {
+		t.Fatalf("empty selection enabled autostart: %v %v", actions, err)
+	}
+	if err := configurePublicQueueAutoStart(false, injected); err != nil || strings.Join(actions, ",") != "remove" {
+		t.Fatalf("empty selection prevented disabling existing autostart: %v %v", actions, err)
+	}
+	if LoadQueueBaselineConfig().Enabled {
+		t.Fatal("disabling autostart resumed empty collection")
+	}
+}
+
+func TestQueueBaselineLegacyPreferenceSelectionRemainsReadable(t *testing.T) {
+	t.Setenv("SUSHIRO_DATA_HOME", t.TempDir())
+	if err := SavePreferences(UserPreferences{StorePriority: []string{"3006"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"enabled":true,"interval_minutes":5}`,
+		`{"enabled":true,"store_ids":[],"use_preference_stores":true}`,
+	} {
+		if err := os.WriteFile(queueBaselinePath(), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := LoadQueueBaselineConfig()
+		if !cfg.Enabled || !cfg.UsePreferenceStores || strings.Join(queueBaselineStoreIDs(cfg), ",") != "3006" {
+			t.Fatalf("legacy preference selection changed: %+v", cfg)
+		}
+	}
+}
+
+func TestQueueBaselineExplicitSelectionExcludesOldReminderStores(t *testing.T) {
+	t.Setenv("SUSHIRO_DATA_HOME", t.TempDir())
+	if err := SavePreferences(UserPreferences{SelectedStores: []string{"3006"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveQueueAlertConfig(QueueAlertConfig{Rules: []QueueAlertRule{{Enabled: true, StoreID: "3050", Type: queueAlertCalledReach, TargetNo: 100, NotifyAtNo: 90}}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := QueueBaselineConfig{Enabled: true, IntervalMinutes: 5, StoreIDs: []string{"1012"}, UsePreferenceStores: false}
+	if err := SaveQueueBaselineConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg = LoadQueueBaselineConfig()
+	if got := strings.Join(queueBaselineStoreIDs(cfg), ","); got != "1012" {
+		t.Fatalf("explicit selection added old stores: %s", got)
+	}
+	if status := sharedQueueCollectionStatus(time.Now()); strings.Join(status.StoreIDs, ",") != "1012" || status.IntervalSeconds != 300 {
+		t.Fatalf("old reminder affected selected stores or cadence: %+v", status)
+	}
+	cfg.UsePreferenceStores = true
+	if got := strings.Join(queueBaselineStoreIDs(cfg), ","); got != "1012,3050" {
+		t.Fatalf("legacy reminder selection changed: %s", got)
+	}
+	if seconds := queueBaselineIntervalSeconds(cfg, queueBaselineStoreIDs(cfg)); seconds != 60 {
+		t.Fatalf("legacy reminder cadence changed: %d", seconds)
+	}
+	if got := queueAlertStoreIDs(); len(got) != 1 || got[0] != "3050" {
+		t.Fatalf("editing records deleted reminder settings: %v", got)
 	}
 }
 

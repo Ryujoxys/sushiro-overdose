@@ -129,14 +129,17 @@ func buildRecordView(rows []QueueBaselineRecord, pack *historyBundle, settings r
 		s := &out.Stores[i]
 		known := knownStores[s.ID]
 		// Legacy snapshots may omit metadata. Turning off historical samples
-		// must not remove the city needed to find the user's recorded stores.
+		// must not remove the city or area needed to find recorded stores.
 		if s.Name == "" {
 			s.Name = known.Name
 		}
 		if s.City == "" {
 			s.City = known.City
 		}
-		stores[s.ID] = historyStore{ID: s.ID, Name: s.Name, City: s.City}
+		if s.Area == "" {
+			s.Area = known.Area
+		}
+		stores[s.ID] = historyStore{ID: s.ID, Name: s.Name, City: s.City, Area: s.Area}
 	}
 	for _, s := range stores {
 		out.AvailableStores = append(out.AvailableStores, s)

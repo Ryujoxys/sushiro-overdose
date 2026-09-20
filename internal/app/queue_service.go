@@ -198,9 +198,11 @@ func handlePublicQueueService(w http.ResponseWriter, r *http.Request) {
 			}
 			queueServiceControlMu.Unlock()
 		case "pause":
+			queueServiceControlMu.Lock()
 			cfg := LoadQueueBaselineConfig()
 			cfg.Enabled = false
 			err = SaveQueueBaselineConfig(cfg)
+			queueServiceControlMu.Unlock()
 		default:
 			writeError(w, 400, "未知服务操作")
 			return

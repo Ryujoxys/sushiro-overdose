@@ -209,7 +209,7 @@ func TestPublicCollectionEvaluatesAlertsAfterTicketIssuedWithoutAuth(t *testing.
 	client := &QueueLiveClient{baseURL: server.URL, httpClient: server.Client()}
 	before := notificationCountForTest("desktop")
 	for i := 0; i < 2; i++ {
-		count, err := collectQueueBaselineWithClient(context.Background(), QueueBaselineConfig{Enabled: true}, client)
+		count, err := collectQueueBaselineWithClient(context.Background(), QueueBaselineConfig{Enabled: true, StoreIDs: []string{"1012"}}, client)
 		if err != nil || count != 1 {
 			t.Fatalf("collection = %d, %v", count, err)
 		}
