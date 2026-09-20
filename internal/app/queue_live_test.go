@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -14,7 +15,7 @@ func TestDecodeQueueLiveStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode array: %v", err)
 	}
-	if len(stores) != 1 || stores[0].ID != 1012 || stores[0].Wait != 3 {
+	if len(stores) != 1 || stores[0].ID != 1012 || stores[0].Wait != 3 || stores[0].NameKana != "深圳" {
 		t.Fatalf("stores = %#v", stores)
 	}
 
@@ -25,6 +26,48 @@ func TestDecodeQueueLiveStores(t *testing.T) {
 	}
 	if len(stores) != 1 || stores[0].ID != 3014 || stores[0].Wait != 12 {
 		t.Fatalf("stores = %#v", stores)
+	}
+}
+
+func TestFilterQueueLiveStoresRecognizesOnlyExactCityKeywords(t *testing.T) {
+	stores := []QueueLiveStore{
+		{ID: 1, Name: "海岸城店", NameKana: "深圳", Address: "南山区文心五路", Area: "南山区", Wait: 10, StoreStatus: "OPEN"},
+		{ID: 2, Name: "金狮广场店", NameKana: "青岛", Address: "青岛市深圳路", Area: "崂山区", Wait: 80, StoreStatus: "OPEN"},
+		{ID: 3, Name: "天利名城店", NameKana: "深圳市", Address: "南山区海德三道", Area: "南山区", Wait: 0, StoreStatus: "CLOSED"},
+		{ID: 4, Name: "深圳大厦店", NameKana: "北京", Address: "朝阳区商业街", Area: "朝阳区", Wait: 3, StoreStatus: "OPEN"},
+	}
+	for _, tc := range []struct {
+		name  string
+		query QueueLiveStoreQuery
+		want  []int
+	}{
+		{"exact city excludes other-city address and name", QueueLiveStoreQuery{Keyword: "深圳"}, []int{1, 3}},
+		{"city suffix alias", QueueLiveStoreQuery{Keyword: "深圳市"}, []int{1, 3}},
+		{"city whitespace", QueueLiveStoreQuery{Keyword: " 深圳市 "}, []int{1, 3}},
+		{"city filter before result limit", QueueLiveStoreQuery{Keyword: "深圳", Limit: 1}, []int{1}},
+		{"city and open waiting filters", QueueLiveStoreQuery{Keyword: "深圳", OpenOnly: true, WaitingOnly: true}, []int{1}},
+		{"city and store ids intersect", QueueLiveStoreQuery{Keyword: "深圳", StoreIDs: []string{"2", "3"}}, []int{3}},
+		{"address keyword remains searchable", QueueLiveStoreQuery{Keyword: "深圳路"}, []int{2}},
+		{"store keyword remains searchable", QueueLiveStoreQuery{Keyword: "海岸城"}, []int{1}},
+		{"area keyword remains searchable", QueueLiveStoreQuery{Keyword: "南山区"}, []int{1, 3}},
+		{"partial city is not inferred", QueueLiveStoreQuery{Keyword: "深"}, []int{2, 1, 4, 3}},
+		{"explicit city keeps address search", QueueLiveStoreQuery{City: "青岛", Keyword: "深圳"}, []int{2}},
+		{"unrecognized city name is not guessed", QueueLiveStoreQuery{Keyword: "南山市"}, []int{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := []int{}
+			for _, store := range filterQueueLiveStores(stores, tc.query) {
+				got = append(got, store.ID)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("stores = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// A keyword appearing only in an address is not enough to establish a city.
+	got := filterQueueLiveStores(stores[1:2], QueueLiveStoreQuery{Keyword: "深圳"})
+	if len(got) != 1 || got[0].ID != 2 {
+		t.Fatalf("unknown city keyword should retain address search: %+v", got)
 	}
 }
 

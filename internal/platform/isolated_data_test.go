@@ -13,7 +13,7 @@ func TestIsolatedDataCannotModifySystemAutoStart(t *testing.T) {
 		}
 	}
 	for _, change := range []func() error{
-		InstallSamplingAutoStart, RemoveSamplingAutoStart, InstallMCPAutoStart, RemoveMCPAutoStart,
+		InstallSamplingAutoStart, RemoveSamplingAutoStart, RepairSamplingAutoStart, InstallMCPAutoStart, RemoveMCPAutoStart,
 	} {
 		if err := change(); !errors.Is(err, errIsolatedAutoStart) {
 			t.Fatalf("autostart did not reject isolated environment: %v", err)

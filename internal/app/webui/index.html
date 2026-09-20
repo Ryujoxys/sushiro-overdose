@@ -22,13 +22,28 @@
 </header>
 <main id="main" class="shell main" tabindex="-1">
   <section id="page-records" aria-labelledby="records-title">
-    <div class="page-heading"><div><h1 id="records-title">我的记录</h1><p>先看历史，再积累自己的记录。</p></div><button class="button quiet" data-action="refresh">刷新</button></div>
+    <div class="page-heading"><div><h1 id="records-title">我的记录</h1><p>选好门店，慢慢积累自己的排队规律。</p></div><button class="button quiet" data-action="refresh">刷新</button></div>
     <div id="records-error" class="notice error" role="alert" hidden></div>
+    <div class="record-layout">
+      <div class="card store-card">
+        <div class="section-heading"><h2>记录哪些店</h2><button class="button secondary small" data-action="pick-records">选择门店</button></div>
+        <div id="record-stores" class="store-list"><p class="empty" role="status">正在读取本机记录…</p></div>
+      </div>
+      <aside class="card service-card">
+        <div class="section-heading"><h2>本地记录</h2><span id="service-status" class="badge">读取中</span></div>
+        <p id="service-summary" class="muted">选好门店后开始。</p>
+        <div class="record-controls"><label class="field"><span class="sr-only">记录间隔</span><select id="record-interval"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option></select></label><button id="record-toggle" class="button primary" data-action="toggle-recording" disabled>开始记录</button></div>
+        <label class="check-row"><input id="autostart" type="checkbox">登录电脑后自动记录</label>
+        <button id="repair-autostart" class="button secondary small" data-action="repair-autostart" hidden>更新自启动位置</button>
+        <p id="service-detail" class="caption" role="status"></p>
+        <p class="caption">关闭窗口继续记录，电脑休眠时暂停。</p>
+      </aside>
+    </div>
     <div id="record-overview" class="metrics" aria-live="polite"></div>
     <section class="card analysis-card" aria-labelledby="analysis-title">
-      <div class="section-heading"><div><h2 id="analysis-title">排队规律</h2><p id="analysis-source" class="muted">正在读取记录…</p></div><a id="export-records" class="button secondary small" href="/api/records/export?days=all">导出我的记录</a></div>
+      <div class="section-heading"><div><h2 id="analysis-title">排队规律</h2><p id="analysis-source" class="muted">正在读取记录…</p></div><div class="export-action"><a id="export-records" class="button secondary small" aria-disabled="true" tabindex="-1">导出当前筛选</a><span id="export-hint" class="caption">只导出个人记录</span></div></div>
       <div class="filters">
-        <label class="field">门店<select id="analysis-store"><option value="">选择门店</option></select></label>
+        <div id="analysis-store-picker" class="field store-combobox"><label for="analysis-store-search">门店</label><input id="analysis-store-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="analysis-store-options" placeholder="搜索店名或城市" autocomplete="off"><select id="analysis-store" hidden aria-hidden="true" tabindex="-1"><option value="">选择门店</option></select><div id="analysis-store-popup" class="store-popup" hidden><div id="analysis-store-options" role="listbox" aria-label="图表门店"></div><p id="analysis-store-empty" class="empty" hidden>没有找到，换个关键词试试。</p></div><span id="analysis-store-count" class="sr-only" role="status"></span></div>
         <label class="field">范围<select id="analysis-days"><option value="all">全部历史</option><option value="7">近 7 天</option><option value="28">近 28 天</option><option value="90">近 90 天</option><option value="365">近一年</option></select></label>
         <label class="field">日期类型<select id="analysis-date-type"><option value="all">全部日期</option><option value="weekday">工作日</option><option value="weekend">周末（含周五晚）</option><option value="workday">调休工作日</option><option value="holiday">节假日</option></select></label>
         <label class="field">按日查看<select id="analysis-date"><option value="">全部日期</option></select></label>
@@ -39,21 +54,6 @@
       <div id="analysis-inspection" class="chart-inspection" hidden><div id="analysis-readout" class="chart-readout" role="status" aria-live="polite"></div><label class="chart-time-field">查看时段<input id="analysis-time" type="range" min="0" max="0" step="1" value="0"></label><p class="caption">堂食最大叫号，不分桌型；以当天门店叫号为准。</p></div>
       <div id="record-table"></div>
     </section>
-    <div class="record-layout">
-      <div class="card store-card">
-        <div class="section-heading"><h2>记录哪些店</h2><button class="button secondary small" data-action="pick-records">选择门店</button></div>
-        <div id="record-stores" class="store-list"><p class="empty" role="status">正在读取本机记录…</p></div>
-      </div>
-      <aside class="card service-card">
-        <div class="section-heading"><h2>本地记录</h2><span id="service-status" class="badge">读取中</span></div>
-        <p id="service-summary" class="muted">选好门店后开始。</p>
-        <label class="field">记录间隔<select id="record-interval"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option></select></label>
-        <button id="record-toggle" class="button primary wide" data-action="toggle-recording" disabled>开始记录</button>
-        <label class="check-row"><input id="autostart" type="checkbox">登录电脑后自动记录</label>
-        <p id="service-detail" class="caption" role="status"></p>
-        <p class="caption">电脑休眠时不记录。暂停不会删除数据。</p>
-      </aside>
-    </div>
   </section>
   <section id="page-queue" aria-labelledby="queue-title" hidden>
     <div class="page-heading"><div><h1 id="queue-title">今天，去哪家吃</h1><p>看排队不用认证，确认后才取号。</p></div><button class="button secondary" data-action="query-ticket">查看已有号码</button></div>
@@ -64,7 +64,7 @@
         <h2>本次用餐</h2>
         <div class="fields"><label class="field">成人<input id="ticket-adult" type="number" min="0" max="10" value="2" inputmode="numeric"></label><label class="field">儿童<input id="ticket-child" type="number" min="0" max="10" value="0" inputmode="numeric"></label><label class="field">座位<select id="ticket-table"><option value="T">桌位</option><option value="C">吧台</option></select></label></div>
         <label class="field">用餐时间<select id="meal-mode"><option value="now">尽快吃</option><option value="target">想几点吃</option></select></label>
-        <div id="meal-fields" class="fields" hidden><label class="field">想几点吃<input id="meal-time" type="time" value="18:30"></label><label class="field">路程（分钟，选填）<input id="travel-minutes" type="number" min="0" max="240" step="1" placeholder="例如 20" inputmode="numeric"></label></div>
+        <div id="meal-fields" class="fields" hidden><label class="field">想几点吃<input id="meal-time" type="time" value="18:30"></label></div>
         <div id="meal-plan" class="plan" aria-live="polite">选好门店后查看预计时间。</div>
         <button id="take-ticket" class="button primary wide" data-action="review-ticket" disabled>核对并取号</button>
         <p class="caption">取号时间是建议，不保证准点入座。</p>
@@ -74,11 +74,12 @@
   <section id="page-settings" aria-labelledby="settings-title" hidden>
     <div class="page-heading"><div><h1 id="settings-title">设置</h1><p id="version"></p></div></div>
     <div class="settings-grid">
-      <section class="card"><h2>数据在本机</h2><p class="muted">记录保存在这台电脑，随时可以导出。</p><code id="data-path">正在读取…</code><a class="button secondary" href="/api/records/export?days=365">导出近一年记录</a><p class="caption">只导出自己的门店记录，不含内置历史和账号凭证。</p></section>
+      <section class="card"><h2>数据在本机</h2><code id="data-path">正在读取…</code><a id="backup-records" class="button secondary" aria-disabled="true" tabindex="-1">备份全部记录</a><p id="backup-hint" class="caption">所有门店、所有日期，不含内置历史和账号凭证。</p></section>
       <section class="card"><h2>手动取号账号</h2><p id="account-state" class="muted">还未读取</p><div class="actions"><button class="button secondary" data-action="connect-account">连接账号</button><button class="button quiet" data-action="reset-account">断开账号</button></div><p class="caption">只记录数据，不需要连接账号。</p></section>
       <section class="card"><h2>遇到问题</h2><div class="actions"><button class="button secondary" data-action="repair-proxy">恢复系统代理</button><a class="button secondary" href="/api/diagnostics/bundle">导出诊断包</a></div><p class="caption">恢复代理不会删除记录。</p></section>
-      <details class="card license-card"><summary>开源许可</summary><pre>{{OPEN_SOURCE_NOTICES}}</pre></details>
+      <section class="card"><h2>应用与后台</h2><p class="muted">关窗口不停止后台记录。更新程序前，可在这里全部退出。</p><button class="button secondary" data-action="quit-app">退出应用及后台记录</button><p class="caption">保留记录和自启动设置。</p></section>
     </div>
+    <details class="license-card"><summary>开源许可</summary><pre>{{OPEN_SOURCE_NOTICES}}</pre></details>
   </section>
 </main>
 <footer class="shell footer">SUSHIRO Overdose · 本地记录，以门店实际叫号为准</footer>
@@ -97,11 +98,14 @@
 <dialog id="auth-dialog" aria-labelledby="auth-title">
   <div class="dialog-heading"><h2 id="auth-title">连接寿司郎账号</h2><button class="icon-button" data-action="close-auth" aria-label="停止连接并关闭">×</button></div>
   <p class="muted">获取本人的小程序凭证，仅保存在本机。</p>
-  <label class="field">连接方式<select id="auth-method"><option value="desktop">电脑微信</option><option value="mobile">手机微信</option></select></label>
+  <label class="field">连接方式<select id="auth-method"><option value="desktop">电脑微信</option><option value="mobile">iPhone 微信</option><option value="android">安卓微信（导入凭证）</option></select></label>
   <p id="auth-instructions" class="notice"></p>
   <button id="auth-start" class="button primary wide" data-action="start-auth">开始连接</button>
+  <button id="auth-stop" class="button secondary wide" data-action="stop-auth" hidden>停止连接</button>
   <div id="auth-progress" role="status" aria-live="polite"></div>
+  <p id="auth-error" class="notice error" role="alert" hidden></p>
   <div id="mobile-guide" hidden></div>
+  <button id="auth-verify" class="button secondary wide" data-action="verify-auth" hidden>验证连接</button>
   <button id="auth-continue" class="button primary wide" data-action="auth-continue" hidden>返回取号确认</button>
   <details id="auth-import"><summary>已有抓包凭证？</summary><label class="field">粘贴 JSON、curl 或请求头<textarea id="auth-text" rows="5" autocomplete="off" spellcheck="false"></textarea></label><button class="button secondary" data-action="import-auth">导入凭证</button></details>
 </dialog>

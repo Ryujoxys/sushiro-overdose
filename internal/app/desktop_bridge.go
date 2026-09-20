@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ var desktopMethods = map[string]string{
 	"/api/mobile-auth": "GET", "/api/mobile-auth/start": "POST", "/api/mobile-auth/stop": "POST",
 	"/api/engine/capture": "POST", "/api/engine/stop": "POST",
 	"/api/auth/import": "POST", "/api/auth/reset": "POST", "/api/repair-proxy": "POST",
+	"/api/auth/verify": "POST",
 }
 
 func desktopPath(raw string) (*url.URL, error) {
@@ -112,6 +114,31 @@ func (b *DesktopBridge) prepareClose() bool {
 	return true
 }
 
+func (b *DesktopBridge) abortClose() {
+	b.lifecycle.Lock()
+	b.closing = false
+	b.lifecycle.Unlock()
+}
+
+// Quit is separate from Request so the exit request does not count itself as
+// a pending write. The backend still checks CSRF and every active mutation.
+func (b *DesktopBridge) Quit() error {
+	status, data, err := b.request("POST", "/api/app/quit", "{}", 10*time.Second, 1<<20)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		var response struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &response) == nil && response.Error != "" {
+			return errors.New(response.Error)
+		}
+		return errors.New("暂时无法退出，请稍后重试")
+	}
+	return nil
+}
+
 func (b *DesktopBridge) request(method, resource, body string, timeout time.Duration, limit int64) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(b.backend.ctx, timeout)
 	defer cancel()
@@ -179,6 +206,12 @@ func (b *DesktopBridge) Export(resource string) (bool, error) {
 		return false, err
 	}
 	if status != http.StatusOK {
+		var response struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &response) == nil && response.Error != "" {
+			return false, errors.New(response.Error)
+		}
 		return false, fmt.Errorf("导出失败（%d），请重试", status)
 	}
 	if err := b.backend.ctx.Err(); err != nil {

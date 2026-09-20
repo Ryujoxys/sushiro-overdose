@@ -70,7 +70,11 @@ internal/
 
 默认页面是“我的记录”，选门店、启停服务、查看样本与历史等待分布。“手动取号”单独展示实时数据、用餐偏好和确认；“想几点吃”仅提供建议。
 
-`webui/app.js` 管理记录和只读查询，`auth_ticket.js` 管理认证、确认、单次提交及取消。认证完成必须返回确认框；请求结果不明时先查号，不能重试写请求。所有写请求带 CSRF token。
+`webui/app.js` 管理记录和只读查询，`auth_ticket.js` 管理认证、确认、单次提交及取消。认证后回到原查询或取号确认，不自动提交；收到凭证与验证通过分开展示。请求结果不明时先查号，不能重试写请求。所有写请求带 CSRF token。
+
+`ticket_confirmation.go` 为查询到的号码签发短期、单次取消令牌，绑定凭证指纹、认证代次和票据身份。取消在认证生命周期锁内重新查询核对，再调用一次官方取消。官方接口仅按账号取消，无法消除手机端在核对后换号的外部竞态。
+
+`webui/store_select.js` 管理图表门店搜索和键盘选择，目录与曲线数据分开缓存；筛选失败不保留错店曲线。后台刷新不重建未变化图表，并避让正在编辑的筛选与图表焦点。
 
 `webui/record_chart.js` 单独管理叫号/等待曲线、范围带、时段标注、键盘/触屏交互和样本表。两种指标使用各自的单位及有效样本数；叫号字段来自公开堂食叫号，不能用等待时间、排队桌数或预约号推算。
 
@@ -80,13 +84,15 @@ internal/
 
 `queue_service.go` 是独立的公开采集生命周期、CLI 和 `/api/queue/service` 控制入口。`--queue-collector-child` 在凭证迁移之前分流，绝不启动认证采样、认证引擎或取号。用户登录自启动沿用旧系统注册项名称以兼容升级，但执行新入口；旧 child 参数也指向纯公开服务。
 
-`queue_collection_state.go` 负责跨进程心跳、热配置、主流程避让和共享采集间隔；`queue_service.lock` 持有整个服务生命周期，`queue_collection.lock` 只锁一次采集。`platform/file_lock*.go` 使用操作系统文件锁，崩溃时自动释放，但不删除锁文件，避免 inode 分裂。JSONL 写入/裁剪、叫号提醒去重也分别持有文件锁。
+`queue_collection_state.go` 负责跨进程心跳、热配置、主流程避让和共享采集间隔；`queue_service.lock` 持有整个服务生命周期，`queue_collection.lock` 只锁一次采集。`platform/file_lock*.go` 使用操作系统文件锁，崩溃时自动释放，但不删除锁文件，避免 inode 分裂。JSONL 追加和叫号提醒去重也分别持有文件锁；原始快照不按行数自动裁剪。
+
+`app_exit.go` 协调界面写操作和退出，`queue_service_control.go` 使用同一数据目录内的会话令牌通知后台停止，不按进程名称强杀。退出不改记录配置或自启动偏好。旧版后台不支持会话令牌时要求用旧版 `collect stop` 停止。`platform/autostart_health.go` 只读检查注册目标，位置异常由用户显式更新。
 
 `queue_model.go` 将本机公开快照转换为持久化统计模型，复用 `QueueBaselineExport` 协议 1。原始文件或节假日表变化、模型超过一天时失效；看板可回退现场聚合，采集成功后更新模型。不读取用户票号/凭证、不触发网络写操作。
 
 ## 约定
 
-前端已拆为 `internal/app/webui/index.html`、`app.css`、`auth_ticket.js`、`app.js`，由 `web_static.go` 嵌入；不再修改 Go 字符串中的整页脚本。默认端口为 `39871`，以 `internal/core/ports.go` 为准。前端用 Node 行为测试和可选 Playwright 浏览器检查覆盖认证、确认、防连点、状态切换及响应式。
+前端已拆为 `internal/app/webui/index.html`、`app.css`、`auth_ticket.js`、`record_chart.js`、`store_select.js`、`app.js`，由 `web_static.go` 嵌入；不再修改 Go 字符串中的整页脚本。默认端口为 `39871`，以 `internal/core/ports.go` 为准。前端用 Node 行为测试和可选 Playwright 浏览器检查覆盖认证、确认、防连点、状态切换及响应式。
 
 个人模型的提供者只有本机 JSONL，`queue_baseline_local.go` 生成统一基准信封；历史曲线可选固定离线包，不影响实时/预测 API。`cloud_retired.go` 对旧云端路径返回 410。MCP 只调用本机接口。`collector/` 是独立的历史服务端采集工具，不由桌面端启动。`scripts/export-history-bundle.mjs` 是维护者显式执行的只读导出工具，不加入构建或发布。未来开放边界见 [数据协议](docs/local-data-contract.md)，包质量与更新方法见 [离线历史](docs/bundled-history.md)，线上停服步骤见 [停服清单](docs/cloudflare-github-turso.md)。
 

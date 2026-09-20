@@ -81,7 +81,7 @@ main.go (桌面版默认启动原生窗口)
 | `web_queue_live.go` | 实时排队 API（公开门店等位/区域/单店详情） |
 | `local_records.go` | 本机公开快照查询、等待分布、样本覆盖与 JSONL 导出 |
 | `history_bundle.go`、`record_view.go` | 固定历史包嵌入和校验、图表半小时代表值合并、历史开关持久化；不参与取号预测或个人模型 |
-| `webui/record_chart.js` | 叫号与等待曲线切换、时段数值标注、范围和样本解释；鼠标、键盘、触屏均可查看 |
+| `webui/record_chart.js`、`webui/store_select.js` | 叫号与等待曲线、时段数值及样本解释、可搜索图表门店；鼠标、键盘、触屏均可查看 |
 | `automation_retired.go` | 旧自动抢号 API 返回 410，不执行或写计划 |
 | `netticket.go` | 手动取号结果与旧文件兼容，强制禁用旧计划 |
 | `cloud_retired.go` | 已下线的云端 API 统一返回 410，不跳转或保存会话 |
@@ -232,7 +232,7 @@ main.go (桌面版默认启动原生窗口)
 | GET/POST | `/api/records/settings` | 包含历史数据开关，仅 POST 写入本机，GET 不写文件 |
 | POST | `/api/queue/ticket` | 用户显式确认后手动取号一次，不自动重试 |
 | GET | `/api/queue/ticket/status` | 只读查询当前排队号 |
-| POST | `/api/queue/ticket/cancel` | 用户显式确认后取消当前排队号 |
+| POST | `/api/queue/ticket/cancel` | 用户显式确认后携带 cancel_token，核对账号会话与当前号码再取消一次 |
 | GET | `/api/insights` | 历史洞察与推荐 |
 | GET | `/api/queue/trends` | 本地到店预测：推荐时段、实际过号、全局过号、信息收集权限与数据新鲜度 |
 | GET/POST | `/api/queue/service` | 公开采集服务与本机模型状态；显式启用后台、自启动、暂停和关闭自启动 |
@@ -246,6 +246,8 @@ main.go (桌面版默认启动原生窗口)
 | GET/POST | `/api/config` | 读取/保存通知配置 |
 | POST | `/api/auth/import` | 手动导入凭证参数，支持 JSON、curl、raw headers |
 | POST | `/api/auth/reset` | 停止认证、删除本机凭证并清内存 client；不删除公开记录、不取消号码 |
+| POST | `/api/auth/verify` | 显式只读验证已保存凭证，不取号、不取消 |
+| POST | `/api/app/quit` | 停止本数据目录后台并退出，保留数据和自启动；原生界面用 DesktopBridge.Quit |
 | GET/POST | `/api/mobile-ua` | 读取/手动保存移动端 UA |
 | POST | `/api/mobile-ua/capture/start` | 启动手机扫码 UA 采集页 |
 | POST | `/api/mobile-ua/capture/stop` | 停止手机扫码 UA 采集 |

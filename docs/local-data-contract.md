@@ -61,6 +61,14 @@
 
 `queue_collection_state.json` 保存共享的上次采集时间、错误、避让原因、门店集合和进程心跳。心跳超过两分钟或进程不存在时不能显示运行中。`queue_service.lock`、`queue_collection.lock`、`*.jsonl.lock` 和 `queue_alerts.lock` 均为本机 OS 锁文件，不包含凭证；正常释放只关句柄、不删文件。
 
+## 个人记录保留与备份
+
+`queue_baseline.jsonl` 和 `queue_observations.jsonl` 不再按总行数自动删除历史；维持原文件路径和格式。此前已被旧版本裁剪的数据无法自动恢复，长期分月存储另行设计。
+
+`/api/records` 的 `export_record_count` 是当前门店、时间范围、日期和日型下的个人原始快照数，`total_record_count` 是全部有效去重个人快照数，均不含内置历史，不能与半小时曲线样本数混用。`stores` / `available_stores` 保留城市元数据供本地搜索使用。
+
+图表导出携带当前筛选；设置的 `/api/records/export?days=all` 不附加其他筛选，备份所有有效个人记录。空导出返回 HTTP 409 和中文错误，不生成空附件。本轮未增加导入恢复协议。
+
 ## 隐私与重新开放条件
 
 协议只能接收公开门店快照。`QueueSession`、个人票号、微信标识、手机号、Authorization、应用 session、设备 UA 和原始抓包不得进入信封。当前没有自动导出或上传端点。

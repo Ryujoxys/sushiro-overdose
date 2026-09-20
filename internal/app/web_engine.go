@@ -185,10 +185,15 @@ func syncLocalNetTicketState(ticket ReservationRecord) {
 }
 
 func clearLocalNetTicketState() {
+	netTicketMu.Lock()
+	defer netTicketMu.Unlock()
+	clearLocalNetTicketStateLocked()
+}
+
+func clearLocalNetTicketStateLocked() {
 	if err := clearActiveNetTicketSlot(); err != nil {
 		LogMessage(time.Now(), "清除排队号状态失败: "+err.Error())
 	}
-	netTicketMu.Lock()
 	plan := LoadNetTicketPlan()
 	if strings.TrimSpace(plan.Status) == "success" || strings.TrimSpace(plan.Status) == "issued_unknown" || plan.Number != "" || plan.TicketID != 0 {
 		plan.Status = "idle"
@@ -199,7 +204,6 @@ func clearLocalNetTicketState() {
 			LogMessage(time.Now(), "保存排队号计划失败: "+err.Error())
 		}
 	}
-	netTicketMu.Unlock()
 }
 
 func clearStaleLocalNetTicketState(now time.Time) {
@@ -528,8 +532,10 @@ func handleQueueTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "缺少门店 ID")
 		return
 	}
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
 	if isMainFlowRunning() || mobileAuthCapture.isActive() {
-		writeError(w, http.StatusConflict, "请先完成或停止当前捕获/预约操作，再取号")
+		writeError(w, http.StatusConflict, "请先完成或停止当前认证，再取号")
 		return
 	}
 	// 写操作前强制重新读盘刷新凭证：取号是会产生真实副作用的操作（占用排队号），
@@ -548,9 +554,17 @@ func handleQueueTicket(w http.ResponseWriter, r *http.Request) {
 	client = NewClient(settings)
 
 	// 手动请求串行化，避免连点或多个窗口同时创建排队号。
-	// 锁内完成「探活 → create → 更新 plan」，拿到结果出锁再写 HTTP 响应，不持锁做 IO。
+	// 锁内完成「探活 → create → 更新 plan」，拿到结果出锁再写 HTTP 响应。
 	netTicketMu.Lock()
 	result := takeNetTicketLocked(r.Context(), client, storeID)
+	if result.body != nil {
+		switch ticket := result.body["ticket"].(type) {
+		case ReservationRecord:
+			result.body["cancel_token"] = issueTicketConfirmation(settings, authLifecycle.generation, ticket)
+		case NetTicketPlan:
+			result.body["cancel_token"] = issueTicketConfirmation(settings, authLifecycle.generation, ReservationRecord{Kind: "net_ticket", Status: "WAITING", TicketID: ticket.TicketID, Number: ticket.Number, StoreID: ticket.StoreID})
+		}
+	}
 	netTicketMu.Unlock()
 	result.write(w)
 }
@@ -660,12 +674,18 @@ func handleQueueTicketStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
 	refreshWebClient()
 	client := getWebClient()
-	writeQueueTicketStatus(w, r, client)
+	writeQueueTicketStatusForAuth(w, r, client, getWebSettings(), authLifecycle.generation)
 }
 
 func writeQueueTicketStatus(w http.ResponseWriter, r *http.Request, client *Client) {
+	writeQueueTicketStatusForAuth(w, r, client, getWebSettings(), authGeneration())
+}
+
+func writeQueueTicketStatusForAuth(w http.ResponseWriter, r *http.Request, client *Client, settings Settings, generation uint64) {
 	if client == nil {
 		writeError(w, http.StatusBadRequest, "尚未获取通行证，请先获取通行证")
 		return
@@ -673,19 +693,22 @@ func writeQueueTicketStatus(w http.ResponseWriter, r *http.Request, client *Clie
 	ticket, err := client.GetNetTicketStatus(r.Context())
 	if err != nil {
 		if !IsHTTPStatus(err, http.StatusNotFound) && isNoCurrentNetTicketError(err) {
+			noteAuthResult(nil)
 			writeJSON(w, map[string]any{"ok": true, "ticket": nil, "plan": LoadNetTicketPlan()})
 			return
 		}
+		noteAuthResult(err)
 		writeError(w, http.StatusBadGateway, friendlyNetTicketError(err))
 		return
 	}
+	noteAuthResult(nil)
 	// Reading official state must not complete an unrelated plan or replay its
 	// success notification. Only explicit ticket creation owns those effects.
 	if !netTicketLooksSuccessful(ticket) {
 		writeJSON(w, map[string]any{"ok": true, "ticket": nil, "plan": LoadNetTicketPlan()})
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "ticket": ticket, "plan": LoadNetTicketPlan()})
+	writeJSON(w, map[string]any{"ok": true, "ticket": ticket, "plan": LoadNetTicketPlan(), "cancel_token": issueTicketConfirmation(settings, generation, ticket)})
 }
 
 // handleCancelNetTicket 取消当前排队号（cancelNetTicket，只需 wechatId）。
@@ -694,10 +717,29 @@ func handleCancelNetTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
+	var request struct {
+		CancelToken string `json:"cancel_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || strings.TrimSpace(request.CancelToken) == "" {
+		writeError(w, http.StatusBadRequest, "请先查询并确认要取消的号码")
+		return
+	}
+	authLifecycle.Lock()
+	defer authLifecycle.Unlock()
+	if isMainFlowRunning() || mobileAuthCapture.isActive() {
+		writeError(w, http.StatusConflict, "请先完成或停止当前认证，再查询并确认取消号码")
+		return
+	}
+	netTicketMu.Lock()
+	defer netTicketMu.Unlock()
 	refreshWebClient()
 	client := getWebClient()
 	if client == nil {
 		writeError(w, http.StatusBadRequest, "尚未获取通行证，无法取消")
+		return
+	}
+	if err := checkTicketConfirmation(r.Context(), request.CancelToken, getWebSettings(), authLifecycle.generation, client.GetNetTicketStatus); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 	if err := client.CancelNetTicket(r.Context()); err != nil {
@@ -708,7 +750,7 @@ func handleCancelNetTicket(w http.ResponseWriter, r *http.Request) {
 	markAuthHealthy()
 	// 取消成功后清掉本地取号计划状态和排队号槽，避免继续显示已取消的号。
 	// clearLocalNetTicketState 会清排队号槽 + NetTicketPlan，预约槽不受影响。
-	clearLocalNetTicketState()
+	clearLocalNetTicketStateLocked()
 	writeJSON(w, map[string]any{"ok": true})
 }
 

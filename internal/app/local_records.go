@@ -15,6 +15,7 @@ import (
 type localRecordStore struct {
 	ID      int                 `json:"id"`
 	Name    string              `json:"name"`
+	City    string              `json:"city,omitempty"`
 	Samples int                 `json:"samples"`
 	Days    int                 `json:"days"`
 	Latest  QueueBaselineRecord `json:"latest"`
@@ -55,6 +56,8 @@ type localRecordsResponse struct {
 	LocalSamples         int                 `json:"local_samples"`
 	HistorySamples       int                 `json:"history_samples"`
 	History              recordHistoryStatus `json:"history"`
+	ExportRecordCount    int                 `json:"export_record_count"`
+	TotalRecordCount     int                 `json:"total_record_count"`
 }
 
 type localRecordsQuery struct {
@@ -112,6 +115,9 @@ func filterLocalRecords(rows []QueueBaselineRecord, q localRecordsQuery, now tim
 		if err != nil || row.StoreID <= 0 {
 			continue
 		}
+		if q.store != 0 && row.StoreID != q.store {
+			continue
+		}
 		if !recordDateMatches(at, queueTrendDateType(at.In(SushiroTimezone), holidays, workdays), q, now, true) {
 			continue
 		}
@@ -154,7 +160,13 @@ func summarizeLocalRecords(rows []QueueBaselineRecord, selected int) localRecord
 		s := stores[row.StoreID]
 		s.Samples++
 		storeDays[row.StoreID][day] = true
-		s.Name, s.Latest = row.Name, row
+		s.Latest = row
+		if row.Name != "" {
+			s.Name = row.Name
+		}
+		if row.City != "" {
+			s.City = row.City
+		}
 		if selected != 0 && row.StoreID != selected {
 			continue
 		}
@@ -210,6 +222,10 @@ func handleLocalRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	pack, packErr := loadBundledHistory()
 	out := buildRecordView(rows, pack, settings, q, now)
+	// The initial chart chooses a default store, so count that same selection.
+	q.store = out.SelectedStore
+	out.ExportRecordCount = len(filterLocalRecords(rows, q, now))
+	out.TotalRecordCount = len(rows)
 	if packErr != nil {
 		out.History.Error = "内置历史读取失败，当前只显示本机记录"
 	}
@@ -231,14 +247,15 @@ func handleLocalRecordsExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "本机记录读取失败")
 		return
 	}
+	if len(rows) == 0 {
+		writeError(w, http.StatusConflict, "当前筛选下没有可导出的个人记录。")
+		return
+	}
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="sushiro-records.jsonl"`)
 	w.Header().Set("Cache-Control", "no-store")
 	enc := json.NewEncoder(w)
 	for _, row := range rows {
-		if q.store != 0 && q.store != row.StoreID {
-			continue
-		}
 		if err := enc.Encode(row); err != nil {
 			return
 		}

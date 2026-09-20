@@ -37,7 +37,7 @@ type QueueLiveClient struct {
 type QueueLiveStore struct {
 	ID                int     `json:"id"`
 	Name              string  `json:"name"`
-	NameKana          string  `json:"nameKana"`
+	NameKana          string  `json:"nameKana"` // City label in the public China API, not a phonetic store name.
 	Address           string  `json:"address"`
 	Area              string  `json:"area"`
 	Latitude          float64 `json:"latitude,omitempty"`
@@ -261,6 +261,19 @@ func decodeQueueLiveStores(body []byte) ([]QueueLiveStore, error) {
 
 func filterQueueLiveStores(stores []QueueLiveStore, query QueueLiveStoreQuery) []QueueLiveStore {
 	allowed := stringSet(query.StoreIDs)
+	keyword := strings.TrimSpace(query.Keyword)
+	keywordCity := ""
+	// Only infer a city from an exact existing label. Explicit city filters keep
+	// their keyword available for street/store searches within that city.
+	if query.City == "" {
+		city := queueLiveCityKey(keyword)
+		for _, store := range stores {
+			if city != "" && queueLiveCityKey(store.NameKana) == city {
+				keywordCity = city
+				break
+			}
+		}
+	}
 	out := make([]QueueLiveStore, 0, len(stores))
 	for _, store := range stores {
 		id := strconv.Itoa(store.ID)
@@ -273,7 +286,11 @@ func filterQueueLiveStores(stores []QueueLiveStore, query QueueLiveStoreQuery) [
 		if query.Area != "" && !strings.Contains(store.Area, query.Area) {
 			continue
 		}
-		if query.Keyword != "" && !queueLiveStoreContains(store, query.Keyword) {
+		if keywordCity != "" {
+			if queueLiveCityKey(store.NameKana) != keywordCity {
+				continue
+			}
+		} else if keyword != "" && !queueLiveStoreContains(store, keyword) {
 			continue
 		}
 		if query.OpenOnly && !strings.EqualFold(store.StoreStatus, "OPEN") {
@@ -297,6 +314,10 @@ func filterQueueLiveStores(stores []QueueLiveStore, query QueueLiveStoreQuery) [
 		out = out[:query.Limit]
 	}
 	return out
+}
+
+func queueLiveCityKey(city string) string {
+	return strings.TrimSuffix(strings.TrimSpace(city), "市")
 }
 
 func queueLiveStoreContains(store QueueLiveStore, keyword string) bool {

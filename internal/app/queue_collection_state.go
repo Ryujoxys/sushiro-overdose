@@ -71,7 +71,7 @@ func (c *QueueBaselineCollector) collectTick(ctx context.Context) {
 			runErr = errors.Join(runErr, rebuildLocalQueueModel(time.Now()))
 		}
 		state.LastError = ""
-		if runErr != nil {
+		if runErr != nil && !(ctx.Err() != nil && errors.Is(runErr, context.Canceled)) {
 			state.LastError = runErr.Error()
 		}
 	}

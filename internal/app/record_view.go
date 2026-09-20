@@ -115,18 +115,28 @@ func buildRecordView(rows []QueueBaselineRecord, pack *historyBundle, settings r
 	out.Dates = []string{}
 	out.History.Included = settings.IncludeHistory
 	stores := map[int]historyStore{}
+	knownStores := map[int]historyStore{}
 	if pack != nil {
 		out.History.historyMetadata = pack.historyMetadata
-		if settings.IncludeHistory {
-			for _, s := range pack.Stores {
-				if len(pack.byStore[s.ID]) > 0 {
-					stores[s.ID] = s
-				}
+		for _, s := range pack.Stores {
+			knownStores[s.ID] = s
+			if settings.IncludeHistory && len(pack.byStore[s.ID]) > 0 {
+				stores[s.ID] = s
 			}
 		}
 	}
-	for _, s := range out.Stores {
-		stores[s.ID] = historyStore{ID: s.ID, Name: s.Name}
+	for i := range out.Stores {
+		s := &out.Stores[i]
+		known := knownStores[s.ID]
+		// Legacy snapshots may omit metadata. Turning off historical samples
+		// must not remove the city needed to find the user's recorded stores.
+		if s.Name == "" {
+			s.Name = known.Name
+		}
+		if s.City == "" {
+			s.City = known.City
+		}
+		stores[s.ID] = historyStore{ID: s.ID, Name: s.Name, City: s.City}
 	}
 	for _, s := range stores {
 		out.AvailableStores = append(out.AvailableStores, s)

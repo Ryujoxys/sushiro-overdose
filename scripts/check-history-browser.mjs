@@ -63,7 +63,7 @@ try{
   await page.reload();await page.getByText('还没有本机记录',{exact:true}).waitFor();
   assert.equal(await page.locator('#include-history').isChecked(),false);
   const off=await records();assert.equal(off.history_samples,0);assert.equal(off.points.length,0);assert.equal(off.called_points.length,0);assert.equal(off.history.included,false);
-  const exportResponse=await page.request.get(origin+'/api/records/export?days=all');assert.equal(await exportResponse.text(),'');
+  const exportResponse=await page.request.get(origin+'/api/records/export?days=all');assert.equal(exportResponse.status(),409);assert.match((await exportResponse.json()).error,/没有可导出的个人记录/);
   await shot('history-off');
   await page.locator('#include-history').check();await page.locator('#record-chart svg').waitFor();
   assert.deepEqual(external,[]);assert.deepEqual(errors,[]);

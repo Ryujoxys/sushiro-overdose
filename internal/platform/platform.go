@@ -99,15 +99,18 @@ func OpenBrowser(url string) error {
 	return openBrowser(url)
 }
 
-// AutoStartStatus 描述「开机/登录自启取号」的能力与当前状态。
+// AutoStartStatus 描述登录自启动的能力与当前状态。
 // Supported=false 表示该平台不支持自启（如某些 Linux 桌面）；Enabled 表示当前是否已注册自启；
-// Path 是自启条目指向的可执行路径；Message/Error 供 UI 展示诊断信息。
+// Path 是注册条目位置，TargetPath 是其指向的程序，Message/Error 供 UI 展示诊断信息。
 type AutoStartStatus struct {
-	Supported bool   `json:"supported"`
-	Enabled   bool   `json:"enabled"`
-	Path      string `json:"path,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Supported   bool   `json:"supported"`
+	Enabled     bool   `json:"enabled"`
+	Path        string `json:"path,omitempty"`
+	Message     string `json:"message,omitempty"`
+	Error       string `json:"error,omitempty"`
+	TargetPath  string `json:"target_path,omitempty"`
+	CurrentPath string `json:"current_path,omitempty"`
+	NeedsUpdate bool   `json:"needs_update"`
 }
 
 // SamplingAutoStartStatus 查询当前平台自启状态。不同平台语义不同
@@ -133,6 +136,22 @@ func RemoveSamplingAutoStart() error {
 		return errIsolatedAutoStart
 	}
 	return removeSamplingAutoStart()
+}
+
+// RepairSamplingAutoStart updates an existing registration without starting it.
+func RepairSamplingAutoStart() error {
+	if HasCustomDataHome() {
+		return errIsolatedAutoStart
+	}
+	status := samplingAutoStartStatus()
+	return repairRegisteredAutoStart(status, repairSamplingAutoStart)
+}
+
+func repairRegisteredAutoStart(status AutoStartStatus, repair func() error) error {
+	if !status.Enabled {
+		return errors.New("尚未开启登录自启动，请先开启")
+	}
+	return repair()
 }
 
 // MCPAutoStartStatus 查询 MCP 助手开机自启状态。

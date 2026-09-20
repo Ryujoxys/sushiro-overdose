@@ -148,6 +148,7 @@ type webBackend struct {
 	server *http.Server
 	done   chan error
 	once   sync.Once
+	exit   *appExitState
 }
 
 func startWebBackend(parent context.Context, activation http.HandlerFunc) (*webBackend, error) {
@@ -179,6 +180,9 @@ func startWebBackend(parent context.Context, activation http.HandlerFunc) (*webB
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	backend := &webBackend{URL: "http://" + listener.Addr().String(), ctx: ctx, cancel: cancel, server: server, done: make(chan error, 1)}
+	backend.exit = &appExitState{stop: stopPublicQueueService, quit: backend.Close}
+	mux.HandleFunc("/api/app/quit", backend.exit.handleQuit)
+	server.Handler = webSecurityMiddleware(backend.exit.middleware(mux))
 	tokens, ok := tryLoadConfig()
 	if ok {
 		setWebSettings(tokens.ToSettingsWithPrefs(LoadPreferences()))
@@ -197,6 +201,7 @@ func (b *webBackend) Close() {
 		sampler.Stop()
 		mobileUACapture.stop()
 		mobileAuthCapture.stop("")
+		queueBaselineCollector.wait()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := b.server.Shutdown(shutdownCtx); err != nil {

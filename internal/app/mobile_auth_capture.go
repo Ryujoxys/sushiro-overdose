@@ -94,6 +94,10 @@ func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
 		status := engine.GetState().Status
 		return nil, fmt.Errorf("当前主流程正在运行（%s），请先停止后再启动手机凭证捕获", status)
 	}
+	hosts := usableMobileAuthHosts(localIPv4s())
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("没有可供手机连接的局域网地址，请让电脑连接 Wi-Fi 或有线网络；也可以改用电脑微信或导入凭证")
+	}
 	doneActivity := markMainFlowActive("mobile-auth-capturing")
 
 	caCert, caKey, err := LoadOrGenerateCA()
@@ -110,10 +114,6 @@ func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
 	}
 
 	token := newMobileUAToken()
-	hosts := localIPv4s()
-	if len(hosts) == 0 {
-		hosts = []string{"127.0.0.1"}
-	}
 	guideMux := http.NewServeMux()
 	guideServer := &http.Server{
 		Handler:           guideMux,
@@ -321,6 +321,10 @@ func (m *mobileAuthCaptureManager) status() map[string]any {
 }
 
 func (m *mobileAuthCaptureManager) statusLocked() map[string]any {
+	addresses := make([]map[string]string, 0, len(m.urls))
+	for i, url := range m.urls {
+		addresses = append(addresses, map[string]string{"host": m.hosts[i], "url": url, "qr_svg": qrSVG(url)})
+	}
 	out := map[string]any{
 		"active":     m.proxy != nil,
 		"saved":      m.saved,
@@ -328,6 +332,7 @@ func (m *mobileAuthCaptureManager) statusLocked() map[string]any {
 		"hosts":      m.hosts,
 		"proxy_port": m.proxyPort,
 		"guide_urls": m.urls,
+		"addresses":  addresses,
 		"qr_svg":     m.qr,
 		"started":    m.startedAt,
 		"expires":    m.expiresAt,
@@ -366,6 +371,17 @@ func mobileAuthGuideURLs(hosts []string, port int, token string) []string {
 		urls = append(urls, fmt.Sprintf("http://%s:%d/mobile-auth/%s", host, port, token))
 	}
 	return urls
+}
+
+func usableMobileAuthHosts(hosts []string) []string {
+	var result []string
+	for _, host := range hosts {
+		ip := net.ParseIP(host)
+		if ip != nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast() {
+			result = append(result, host)
+		}
+	}
+	return result
 }
 
 type mobileAuthGuideData struct {
@@ -428,17 +444,17 @@ ul{padding-left:20px}
 <li>点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。</li>
 <li>电脑提示捕获完成后，立刻关闭手机 Wi-Fi 代理（改回「关闭」）。</li>
 </ol>
-<div class="ok">装好信任后，回电脑端点「我已装好证书，验证一下」继续。</div>
+<div class="ok">安装并信任证书后，继续设置代理并打开小程序。电脑收到凭证后会提示关闭手机代理，再点电脑上的「验证连接」。</div>
 </div>
 
 <div id="t-android" class="panel">
-<div class="warn">安卓 7+ 默认不信任用户装的证书，直接走代理多半抓不到。安卓推荐用抓包 App（Reqable）自带证书 + 浏览器信任，步骤如下：</div>
+<div class="warn">安卓微信可能不信任用户证书，安装证书不代表能够读取小程序请求。已有可用抓包工具时，可按下面方式手动导入；无法读取请求请改用电脑微信。</div>
 <ol class="steps">
-<li>手机装「Reqable」（或 HttpCanary），打开它，按引导装好它的 CA 证书并信任。</li>
-<li>在 Reqable 里开始抓包，过滤 <code>crm-cn-prd.sushiro.com.cn</code>。</li>
+<li>回电脑的连接窗口，点「停止连接」，再选择「安卓手机（手动导入）」。无需设置手机 Wi-Fi 代理。</li>
+<li>在已配置可用的抓包工具里过滤 <code>crm-cn-prd.sushiro.com.cn</code>。</li>
 <li>打开微信进寿司郎小程序，点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。</li>
-<li>在 Reqable 找到那条请求，导出为 cURL 或复制请求头。</li>
-<li>把导出的内容发到电脑（微信文件传输助手），粘进电脑端「拿通行证」第 4 步。</li>
+<li>找到查询请求，导出为 cURL 或复制请求头。不要提交真实订单。</li>
+<li>将内容传到自己的电脑，粘进「已有抓包凭证？」并点「导入凭证」，随后点「验证连接」。这些内容含登录凭证，不要发给其他人。</li>
 </ol>
 <div class="ok">安卓这条路不用设 Wi-Fi 代理、不用回这页——抓完直接回电脑粘贴。</div>
 </div>

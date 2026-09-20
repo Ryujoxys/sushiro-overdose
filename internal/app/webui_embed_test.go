@@ -30,12 +30,16 @@ func TestAssembleIndexHTMLFromEmbeddedSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read record_chart.js: %v", err)
 	}
+	storeSelect, err := webuiFS.ReadFile("webui/store_select.js")
+	if err != nil {
+		t.Fatalf("read store_select.js: %v", err)
+	}
 	logo, err := webuiFS.ReadFile("webui/logo.b64")
 	if err != nil {
 		t.Fatalf("read logo.b64: %v", err)
 	}
 
-	got := assembleIndexHTML(string(html), string(css), string(flow)+"\n"+string(chart)+"\n"+string(js), strings.TrimSpace(string(logo)))
+	got := assembleIndexHTML(string(html), string(css), string(flow)+"\n"+string(chart)+"\n"+string(storeSelect)+"\n"+string(js), strings.TrimSpace(string(logo)))
 	if got != indexHTML {
 		t.Fatalf("assembleIndexHTML != package indexHTML (init path diverged): len(got)=%d len(indexHTML)=%d", len(got), len(indexHTML))
 	}
@@ -51,6 +55,7 @@ func TestAssembleIndexHTMLFromEmbeddedSources(t *testing.T) {
 		"github.com/wailsapp/wails/v2",
 		"function renderRecordChart(",
 		"function initRecordChart(",
+		"function initAnalysisStorePicker(",
 		"init();",
 		"</html>",
 	} {

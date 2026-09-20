@@ -292,12 +292,6 @@ func appendQueueObservation(observation QueueObservation) error {
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		return err
 	}
-	// 周期性裁剪：每 queueJSONLTrimInterval 次追加检查一次行数上限，
-	// 防止长期运行无限膨胀拖慢所有 loader。
-	queueObservationWriteCounter++
-	if queueObservationWriteCounter%queueJSONLTrimInterval == 0 {
-		trimJSONLFileLocked(queueObservationPath(), queueObservationMaxLines, time.Now())
-	}
 	// 叫号推进了 → 回填可能已被叫到的开放预测，积累「预测 vs 实际」回测样本。
 	// 放在写盘成功之后、best-effort：失败不影响观测写入。
 	if observation.DisplayCalledNo > 0 {

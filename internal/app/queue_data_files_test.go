@@ -3,6 +3,10 @@ package app
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
+	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,38 +75,60 @@ func TestJSONLReadCacheMissingFileReturnsNil(t *testing.T) {
 	}
 }
 
-func TestTrimJSONLFileKeepsLatestLines(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	path := filepath.Join(home, "trim.jsonl")
-	var lines []string
-	for i := 0; i < 30; i++ {
-		lines = append(lines, `{"n":`+string(rune('0'+i%10))+`}`)
-	}
-	writeLines(t, path, lines...)
-	trimJSONLFileLocked(path, 10, time.Now())
-	kept, err := readAllLines(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kept) != 10 {
-		t.Fatalf("kept %d lines, want 10", len(kept))
-	}
-	if kept[0] != lines[20] || kept[9] != lines[29] {
-		t.Fatalf("trim kept wrong slice: first=%s want=%s", kept[0], lines[20])
-	}
-}
-
-func TestTrimJSONLFileNoopUnderLimit(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	path := filepath.Join(home, "noop.jsonl")
-	writeLines(t, path, `{"a":1}`, `{"a":2}`)
-	trimJSONLFileLocked(path, 10, time.Now())
-	kept, err := readAllLines(path)
-	if err != nil || len(kept) != 2 {
-		t.Fatalf("under-limit trim should be noop: %d lines, err=%v", len(kept), err)
+func TestQueueSnapshotsRetainAllRecordsBeyondFormerLimit(t *testing.T) {
+	const formerLimit, formerTrimInterval = 100000, 200
+	start := time.Now().Add(-time.Duration(formerLimit+formerTrimInterval+60) * time.Second).Truncate(time.Second)
+	for _, kind := range []string{"baseline", "observation"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("SUSHIRO_DATA_HOME", t.TempDir())
+			path, storeID := queueBaselineRecordsPath(), "3006"
+			if kind == "observation" {
+				path, storeID = queueObservationPath(), `"3006"`
+			}
+			var source strings.Builder
+			for i := 0; i < formerLimit; i++ {
+				fmt.Fprintf(&source, "{\"store_id\":%s,\"collected_at\":%q,\"wait_minutes\":30,\"store_status\":\"OPEN\"}\n", storeID, start.Add(time.Duration(i)*time.Second).Format(time.RFC3339))
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := AtomicWriteFile(path, []byte(source.String()), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Cross the former trim cadence as well as the former row limit.
+			for i := 0; i < formerTrimInterval; i++ {
+				at := start.Add(time.Duration(formerLimit+i) * time.Second).Format(time.RFC3339)
+				var err error
+				if kind == "baseline" {
+					err = appendQueueBaselineRecords([]QueueBaselineRecord{{StoreID: 3006, CollectedAt: at, WaitMinutes: 30, StoreStatus: "OPEN"}})
+				} else {
+					err = appendQueueObservation(QueueObservation{StoreID: "3006", CollectedAt: at, WaitMinutes: 30, StoreStatus: "OPEN"})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := formerLimit + formerTrimInterval
+			if count := bytes.Count(raw, []byte{'\n'}); count != want || !bytes.HasPrefix(raw, []byte(source.String())) {
+				t.Fatalf("old snapshots were changed or lost: count=%d, want=%d", count, want)
+			}
+			if kind == "baseline" {
+				rows, err := readLocalRecords(localRecordsQuery{}, time.Now())
+				if err != nil || len(rows) != want || rows[0].CollectedAt != start.Format(time.RFC3339) {
+					t.Fatalf("all-history query: count=%d, err=%v", len(rows), err)
+				}
+				w := httptest.NewRecorder()
+				handleLocalRecordsExport(w, httptest.NewRequest("GET", "/api/records/export?days=all", nil))
+				if w.Code != http.StatusOK || bytes.Count(w.Body.Bytes(), []byte{'\n'}) != want {
+					t.Fatalf("all-history backup: status=%d, count=%d", w.Code, bytes.Count(w.Body.Bytes(), []byte{'\n'}))
+				}
+			} else if rows := loadQueueObservations(); len(rows) != want || rows[0].CollectedAt != start.Format(time.RFC3339) {
+				t.Fatalf("observation query lost old snapshots: count=%d", len(rows))
+			}
+		})
 	}
 }

@@ -44,6 +44,16 @@ func runPublicQueueService(ctx context.Context) error {
 		return err
 	}
 	defer removeSamplingPID(os.Getpid())
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	control, err := newQueueServiceControl()
+	if err != nil {
+		return err
+	}
+	defer control.close()
+	controlDone := make(chan struct{})
+	go func() { defer close(controlDone); control.watch(ctx, cancel) }()
+	defer func() { cancel(); <-controlDone }()
 	queueBaselineCollector.Start(ctx)
 	<-ctx.Done()
 	queueBaselineCollector.wait()
@@ -170,6 +180,10 @@ func handlePublicQueueService(w http.ResponseWriter, r *http.Request) {
 			err = setPublicQueueAutoStart(true)
 		case "disable_autostart":
 			err = setPublicQueueAutoStart(false)
+		case "repair_autostart":
+			queueServiceControlMu.Lock()
+			err = platform.RepairSamplingAutoStart()
+			queueServiceControlMu.Unlock()
 		case "start":
 			queueServiceControlMu.Lock()
 			cfg := LoadQueueBaselineConfig()

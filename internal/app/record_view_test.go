@@ -50,6 +50,41 @@ func TestRecordViewLocalRepresentativeWinsWithoutFrequencyBias(t *testing.T) {
 	}
 }
 
+func TestRecordViewKeepsCitiesForPersonalStoreSearch(t *testing.T) {
+	reliabilityHome(t)
+	pack := fixtureHistory(t)
+	pack.Stores = []historyStore{{ID: 1, Name: "历史店名", City: "深圳"}}
+	for _, tc := range []struct {
+		name, city, want string
+	}{
+		{"local city", "广州", "广州"},
+		{"legacy fallback", "", "深圳"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []QueueBaselineRecord{
+				{StoreID: 1, Name: "海岸城", City: tc.city, CollectedAt: "2026-09-18T11:00:00+08:00", StoreStatus: "OPEN", WaitMinutes: 12},
+				{StoreID: 1, CollectedAt: "2026-09-18T11:05:00+08:00", StoreStatus: "OPEN", WaitMinutes: 15},
+			}
+			for _, includeHistory := range []bool{true, false} {
+				got := buildRecordView(rows, pack, recordViewSettings{includeHistory}, localRecordsQuery{store: 1}, historyTestNow())
+				if len(got.Stores) != 1 || got.Stores[0].Name != "海岸城" || got.Stores[0].City != tc.want {
+					t.Fatalf("personal metadata lost (history=%t): %+v", includeHistory, got.Stores)
+				}
+				if len(got.AvailableStores) != 1 || got.AvailableStores[0].Name != "海岸城" || got.AvailableStores[0].City != tc.want {
+					t.Fatalf("search metadata lost (history=%t): %+v", includeHistory, got.AvailableStores)
+				}
+				if !includeHistory && got.HistorySamples != 0 {
+					t.Fatal("metadata fallback reenabled historical samples")
+				}
+			}
+		})
+	}
+	got := buildRecordView([]QueueBaselineRecord{{StoreID: 2, Name: "新店", City: "广州", CollectedAt: "2026-09-18T11:00:00+08:00", StoreStatus: "OPEN", WaitMinutes: 12}}, nil, recordViewSettings{}, localRecordsQuery{store: 2}, historyTestNow())
+	if len(got.AvailableStores) != 1 || got.AvailableStores[0].City != "广州" {
+		t.Fatalf("new local store city missing without bundle: %+v", got.AvailableStores)
+	}
+}
+
 func TestRecordViewFiltersAndOptOutNeverFallback(t *testing.T) {
 	reliabilityHome(t)
 	pack := fixtureHistory(t)
@@ -125,7 +160,7 @@ func TestHistoryReadDoesNotWriteIntoPersonalRecordsOrExport(t *testing.T) {
 	w := httptest.NewRecorder()
 	handleLocalRecords(w, httptest.NewRequest("GET", "/api/records", nil))
 	var view localRecordsResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil || len(view.Points) == 0 {
+	if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil || len(view.Points) == 0 || view.ExportRecordCount != 0 || view.TotalRecordCount != 0 {
 		t.Fatalf("first curve missing: %s", w.Body.String())
 	}
 	for _, path := range []string{queueBaselineRecordsPath(), queueModelPath(), recordViewSettingsPath()} {
@@ -135,8 +170,8 @@ func TestHistoryReadDoesNotWriteIntoPersonalRecordsOrExport(t *testing.T) {
 	}
 	w = httptest.NewRecorder()
 	handleLocalRecordsExport(w, httptest.NewRequest("GET", "/api/records/export?days=all", nil))
-	if w.Code != 200 || w.Body.Len() != 0 {
-		t.Fatal("bundle leaked into personal export", w.Body.String())
+	if w.Code != http.StatusConflict || w.Header().Get("Content-Disposition") != "" {
+		t.Fatal("bundled history must not enable a personal export", w.Code, w.Body.String())
 	}
 }
 

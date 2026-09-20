@@ -53,8 +53,12 @@ function renderRecordTable(data,open) {
     return '<tr><td>'+escapeHTML(recordTimeRange(time))+'</td><td>'+(c?Math.round(c.median)+' 号':'未记录')+'</td><td>'+(c?Math.floor(c.lower)+'–'+Math.ceil(c.upper)+' 号':'未记录')+'</td><td>'+(w?Math.round(w.median)+' 分钟':'未记录')+'</td><td>'+(c?.days||0)+' 天 / '+(w?.days||0)+' 天</td></tr>';
   }).join('')+'</tbody></table></div></details>';
 }
+let recordChartSignature='';
 function renderRecordChart(data) {
   const called=state.analysisMetric!=='wait',points=recordChartPoints(),id=el('analysis-store').value;
+  const signature=JSON.stringify([id,el('analysis-date').value,called,el('record-chart').clientWidth,data.points,data.called_points,data.history?.included,data.history?.quality_note,data.history_samples]);
+  if(signature===recordChartSignature)return;
+  recordChartSignature=signature;
   const tableOpen=el('record-table').querySelector('details')?.open;
   const singleDate=el('analysis-date').value;
   renderRecordTable(data,tableOpen);

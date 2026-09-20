@@ -345,6 +345,8 @@ func samplingAutoStartStatus() AutoStartStatus {
 	if _, err := os.Stat(path); err == nil {
 		status.Enabled = true
 		status.Message = "已配置 LaunchAgent，登录后会静默启动采样"
+		data, _ := os.ReadFile(path)
+		status = checkAutoStartTarget(status, plistCollectorTarget(data))
 	} else if os.IsNotExist(err) {
 		status.Message = "未配置系统开机自启动"
 	} else {
@@ -354,6 +356,12 @@ func samplingAutoStartStatus() AutoStartStatus {
 }
 
 func installSamplingAutoStart() error {
+	return writeSamplingAutoStart(true)
+}
+
+func repairSamplingAutoStart() error { return writeSamplingAutoStart(false) }
+
+func writeSamplingAutoStart(activate bool) error {
 	path := darwinSamplingLaunchAgentPath()
 	if path == "" {
 		return fmt.Errorf("无法定位 LaunchAgents 目录")
@@ -386,6 +394,9 @@ func installSamplingAutoStart() error {
 `
 	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
 		return err
+	}
+	if !activate {
+		return nil
 	}
 	_ = exec.Command("launchctl", "unload", path).Run()
 	return exec.Command("launchctl", "load", path).Run()

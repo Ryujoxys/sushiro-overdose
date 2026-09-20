@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const root=new URL('../internal/app/webui/',import.meta.url);
-const source=fs.readFileSync(new URL('app.js',root),'utf8')+'\n'+fs.readFileSync(new URL('record_chart.js',root),'utf8')+'\n'+fs.readFileSync(new URL('auth_ticket.js',root),'utf8');
+const source=['app.js','record_chart.js','store_select.js','auth_ticket.js'].map(name=>fs.readFileSync(new URL(name,root),'utf8')).join('\n');
 {
   const bindings={app:{DesktopBridge:{}}};
   const browserGlobal=vm.createContext({go:bindings});
@@ -14,27 +14,30 @@ const source=fs.readFileSync(new URL('app.js',root),'utf8')+'\n'+fs.readFileSync
 function fixture() {
   const nodes=new Map(),calls=[];
   function node(id) {
-    if(!nodes.has(id))nodes.set(id,{id,value:'',hidden:false,disabled:false,open:false,textContent:'',innerHTML:'',options:[],dataset:{},style:{},
-      showModal(){this.open=true;},close(){this.open=false;},focus(){},scrollIntoView(){},replaceChildren(){},append(){},setAttribute(){},removeAttribute(){}});
+    if(!nodes.has(id))nodes.set(id,{id,value:'',hidden:false,disabled:false,open:false,textContent:'',innerHTML:'',options:[],dataset:{},style:{},attributes:{},listeners:{},classList:{toggle(){}},
+      showModal(){this.open=true;},close(){this.open=false;},focus(){},select(){},scrollIntoView(){},getBoundingClientRect(){return {top:100,bottom:146};},replaceChildren(){},append(){},add(option){this.options.push(option);},querySelector(){return null;},querySelectorAll(){return[];},contains(){return false;},closest(){return null;},addEventListener(name,fn){this.listeners[name]=fn;},setAttribute(key,value){this.attributes[key]=value;},getAttribute(key){return this.attributes[key];},removeAttribute(key){delete this.attributes[key];}});
     return nodes.get(id);
   }
   let respond=async(path)=> {
-    if(path==='/api/status')return {has_config:true,platform:'darwin',version:'test',engine:{status:'idle'},auth_health:{status:'unknown'}};
-    if(path==='/api/queue/ticket')return {ticket:{number:'A128',store_id:'1012'}};
+    if(path==='/api/status')return {has_config:true,platform:'darwin',version:'test',engine:{status:'idle'},auth_health:{status:'ok'}};
+    if(path==='/api/queue/ticket')return {ticket:{number:'A128',store_id:'1012'},cancel_token:'ticket-confirmation'};
     if(path==='/api/queue/ticket/status')return {ticket:null};
+    if(path==='/api/queue/service')return {config:{store_ids:['1012'],enabled:false,interval_minutes:5},state:{store_ids:['1012']},autostart:{},model:{}};
+    if(path.startsWith('/api/records?'))return {stores:[],available_stores:[{id:1012,name:'测试店'}],selected_store:1012,points:[],called_points:[],export_record_count:0,total_record_count:0};
     if(path.startsWith('/api/queue/live'))return {store_id:'1012',store_name:'测试店',store_status:'OPEN',online_open:true,called_no:112,wait_groups:15,server_wait_minutes:30};
     if(path.startsWith('/api/queue/plan'))return {meal_range:{early:'18:20',late:'18:40'}};
     if(path.startsWith('/api/queue/advisor'))return {eta:{estimated_called_at_range:{early:'18:20',late:'18:40'},wait_minutes_range:{low:30,high:50}}};
     return {};
   };
-  const ctx=vm.createContext({console,URL,URLSearchParams,AbortController,
+  const ctx=vm.createContext({console,URL,URLSearchParams,AbortController,Option:function(text,value){this.text=text;this.value=value;},
     setTimeout(){return 1;},clearTimeout(){},setInterval(){},clearInterval(){},
-    location:{hash:'#queue'},history:{replaceState(){}},window:{addEventListener(){}},
-    document:{getElementById:node,querySelector(){return {content:'test-token'};},querySelectorAll(){return[];},addEventListener(){},activeElement:null},
+    location:{hash:'#queue'},history:{replaceState(){}},window:{innerHeight:800,addEventListener(){}},
+    document:{getElementById:node,querySelector(selector){return selector.includes('meta')?{content:'test-token'}:null;},querySelectorAll(){return[];},addEventListener(){},activeElement:null,createElement(tag){return node('created-'+tag);}},
     fetch:async(path,options)=>{calls.push({path,options});return {ok:true,json:()=>respond(path,options)};}
   });
   vm.runInContext(source,ctx);
   node('ticket-adult').value='2';node('ticket-child').value='0';node('ticket-table').value='T';node('meal-mode').value='now';
+  node('analysis-store-popup').hidden=true;node('analysis-days').value='all';node('analysis-date-type').value='all';
   vm.runInContext("state.selectedStore='1012';state.live={online_open:true};",ctx);
   return {ctx,node,calls,run:code=>vm.runInContext(code,ctx),setRespond:fn=>{respond=fn;}};
 }
@@ -88,7 +91,7 @@ function fixture() {
  assert.equal(f.node('auth-dialog').open,true);
  assert.equal(f.node('auth-method').value,'mobile');
  assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'opening auth started a proxy or created a ticket');
- f.setRespond(async()=>({has_config:true,engine:{status:'idle'},auth_health:{status:'unknown'}}));
+ f.setRespond(async()=>({has_config:true,engine:{status:'idle'},auth_health:{status:'ok'}}));
  await f.run('finishAuth()');
  assert.equal(f.node('ticket-dialog').open,true);
  assert.equal(f.calls.filter(c=>c.path==='/api/queue/ticket').length,0,'auth completion submitted without confirmation');
@@ -158,4 +161,133 @@ function fixture() {
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(prevented,true);assert.equal(saved,1);assert.equal(f.node('toast').textContent,'','cancelled export reported success');
 }
-console.log('Web UI behavior: passed (browser/native API, native export, explicit auth, one-shot ticket, unknown result, stale search, auth cleanup).');
+{
+ const f=fixture();
+ f.run("state.records={available_stores:[{id:1012,name:'海岸城店',city:'深圳'},{id:3006,name:'测试 <店>',city:'广州'}]};state.stores=new Map(state.records.available_stores.map(s=>[String(s.id),s]));syncAnalysisStore('1012');");
+ assert.equal(f.node('analysis-store-search').value,'海岸城店');
+ const positions=[];f.node('analysis-store-popup').classList.toggle=(name,value)=>positions.push({name,value});
+ f.node('analysis-store-search').getBoundingClientRect=()=>({top:650,bottom:700});
+ f.run('openAnalysisStores()');
+ assert.ok(positions.some(p=>p.name==='above'&&p.value),'dropdown near window bottom did not open upward');
+ f.run('closeAnalysisStores()');
+ assert.equal(f.run("filterAnalysisStores('深圳').join(',')"),'1012');
+ assert.equal(f.run("filterAnalysisStores('广州 测试').join(',')"),'3006');
+ assert.equal(f.run("filterAnalysisStores('不存在').length"),0);
+ f.run("openAnalysisStores();renderAnalysisStoreOptions('测试');");
+ assert.match(f.node('analysis-store-options').innerHTML,/测试 &lt;店&gt;/);
+ assert.equal(f.node('analysis-store').value,'1012','typing changed the selected store');
+ f.run("renderAnalysisStoreOptions('不存在')");
+ assert.equal(f.node('analysis-store-empty').hidden,false);
+ f.run("renderAnalysisStoreOptions('测试');analysisStoreKeydown({key:'ArrowDown',preventDefault(){}})");
+ assert.equal(f.node('analysis-store-search').attributes['aria-activedescendant'],'analysis-store-option-0');
+ f.run("analysisStoreKeydown({key:'Escape',preventDefault(){},stopPropagation(){}})");
+ assert.equal(f.node('analysis-store-popup').hidden,true);
+ assert.equal(f.node('analysis-store-search').value,'海岸城店');
+ await f.run("selectAnalysisStore('3006')");
+ assert.equal(f.node('analysis-store').value,'3006');
+ assert.ok(f.calls.some(c=>c.path.includes('/api/records?')&&c.path.includes('store=3006')));
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'selecting chart store wrote settings');
+}
+{
+ const f=fixture();
+ await f.run('refreshRecords()');
+ assert.equal(f.node('export-records').attributes['aria-disabled'],'true');
+ assert.equal(f.node('backup-records').attributes['aria-disabled'],'true');
+ f.run('state.records.export_record_count=2;state.records.total_record_count=7;renderRecords();renderAnalysis();');
+ assert.equal(f.node('export-records').attributes['aria-disabled'],'false');
+ assert.ok(f.node('export-records').href.includes('store=1012'));
+ assert.equal(f.node('backup-records').href,'/api/records/export?days=all');
+ assert.match(f.node('record-overview').innerHTML,/已选/);
+ assert.match(f.node('service-summary').textContent,/尚未开始/);
+}
+{
+ const f=fixture();
+ await f.run('loadLive()');
+ const before=f.calls.filter(c=>c.path.startsWith('/api/queue/live')).length;
+ f.run("navigatePage('records');navigatePage('queue');");
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.calls.filter(c=>c.path.startsWith('/api/queue/live')).length,before+1,'reentering queue did not refresh');
+ f.setRespond(async()=>{throw new Error('断网');});
+ await f.run('loadLive()');
+ assert.equal(f.run('state.liveStale'),true);
+ assert.match(f.node('live-store').innerHTML,/未更新：断网/);
+ assert.match(f.node('live-store').innerHTML,/112/,'failed refresh discarded last reading');
+ assert.equal(f.node('take-ticket').disabled,true);
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'refresh made a write');
+}
+{
+ const f=fixture();
+ f.run("state.page='queue'");
+ let resolve;
+ f.setRespond(path=>path.startsWith('/api/queue/live')?new Promise(done=>{resolve=done;}):Promise.resolve({}));
+ const first=f.run('loadLive()');await new Promise(done=>setImmediate(done));
+ await f.run('loadLive()');
+ assert.equal(f.calls.filter(c=>c.path.startsWith('/api/queue/live')).length,1,'overlapping poll requests');
+ resolve({store_id:'1012',store_name:'测试店',online_open:true});await first;
+}
+{
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("state.analysisStores.push({id:3006,name:'另一家店',city:'广州'});state.stores.set('3006',{name:'另一家店',city:'广州'});syncAnalysisStore('3006');");
+ f.setRespond(async()=>{throw new Error('离线');});
+ await f.run('refreshRecords()');
+ assert.equal(f.run('state.records'),null,'failed changed filter kept old chart data');
+ assert.equal(f.node('export-records').attributes['aria-disabled'],'true');
+ assert.equal(f.run("filterAnalysisStores('').length"),2,'failed switch lost store catalog');
+ f.run('renderAnalysis()');
+ assert.match(f.node('record-chart').innerHTML,/读取失败/);
+}
+{
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run('state.records.export_record_count=2;renderAnalysis();');
+ const before=f.run('state.records');
+ const pending=[];f.setRespond(path=>new Promise(resolve=>pending.push({path,resolve})));
+ const refresh=f.run('refreshRecords({background:true})');
+ await new Promise(resolve=>setImmediate(resolve));
+ f.ctx.document.activeElement={closest:()=>({})};
+ pending.forEach(p=>p.resolve({}));await refresh;
+ assert.equal(f.run('state.records'),before,'background response interrupted an active chart interaction');
+ assert.equal(f.node('export-records').attributes['aria-disabled'],'false','deferred refresh disabled a usable export');
+ f.ctx.document.activeElement={closest:selector=>selector.includes('button')?{}:null};
+ assert.equal(f.run('recordsInteractionActive()'),false,'a focused start button stopped periodic refresh');
+}
+{
+ const f=fixture();
+ f.run("showAuthVerificationState({auth_health:{status:'stale',reason:'凭证已过期'}})");
+ assert.equal(f.node('auth-continue').hidden,true);
+ assert.equal(f.node('auth-verify').hidden,false);
+ assert.match(f.node('auth-progress').textContent,/验证失败/);
+ f.node('auth-text').value='已粘贴的本人凭证';
+ f.run("authModeRunning='mobile';el('auth-dialog').showModal()");
+ await f.run('stopAuth()');
+ assert.equal(f.node('auth-text').value,'已粘贴的本人凭证');
+ assert.equal(f.node('auth-dialog').open,true);
+ f.node('auth-method').value='android';
+ const writes=f.calls.length;await f.run('startAuth()');
+ assert.equal(f.calls.length,writes,'Android import started an unnecessary proxy');
+ assert.equal(f.node('auth-import').open,true);
+}
+{
+ const f=fixture();let connected=false;
+ f.setRespond(async path=>{
+   if(path==='/api/status')return {has_config:connected,platform:'windows',auth_health:{status:connected?'ok':'unknown'}};
+   if(path==='/api/queue/ticket/status')return {ticket:null};
+   return {};
+ });
+ await f.run('queryTicket()');
+ assert.equal(f.run('authReturnIntent'),'query');
+ connected=true;await f.run('finishAuth()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/queue/ticket/status').length,1,'auth did not return to the original query');
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'resuming query wrote a ticket');
+}
+{
+ const f=fixture();
+ f.run("showTicket({ticket:{number:'A128',store_id:'1012'},cancel_token:'expected-ticket'});confirmDialog=async()=>true;");
+ await f.run('cancelTicket()');
+ const cancel=f.calls.find(c=>c.path==='/api/queue/ticket/cancel');
+ assert.deepEqual(JSON.parse(cancel.options.body),{cancel_token:'expected-ticket'});
+ await f.run('cancelTicket()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/queue/ticket/cancel').length,1,'cleared ticket can still cancel');
+}
+console.log('Web UI behavior: passed (search, keyboard, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge).');

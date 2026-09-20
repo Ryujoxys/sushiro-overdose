@@ -133,6 +133,16 @@ func samplingAutoStartStatus() AutoStartStatus {
 	if _, err := os.Stat(path); err == nil {
 		status.Enabled = true
 		status.Message = "已配置 systemd user 开机启动采样"
+		data, _ := os.ReadFile(path)
+		target := ""
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "ExecStart=") {
+				command := strings.NewReplacer("%%", "%", `\"`, `"`, `\\`, `\`).Replace(strings.TrimPrefix(line, "ExecStart="))
+				target = collectorCommandTarget(command)
+				break
+			}
+		}
+		status = checkAutoStartTarget(status, target)
 	} else if os.IsNotExist(err) {
 		status.Message = "未配置系统开机自启动"
 	} else {
@@ -146,6 +156,12 @@ func samplingAutoStartStatus() AutoStartStatus {
 }
 
 func installSamplingAutoStart() error {
+	return writeSamplingAutoStart(true)
+}
+
+func repairSamplingAutoStart() error { return writeSamplingAutoStart(false) }
+
+func writeSamplingAutoStart(activate bool) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return err
 	}
@@ -172,6 +188,9 @@ WantedBy=default.target
 		return err
 	}
 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	if !activate {
+		return nil
+	}
 	return exec.Command("systemctl", "--user", "enable", "--now", "sushiro-overdose-sampler.service").Run()
 }
 

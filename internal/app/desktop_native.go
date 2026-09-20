@@ -53,6 +53,16 @@ func runDesktop() error {
 	ready := make(chan struct{})
 	closed := make(chan struct{})
 	bridge := &DesktopBridge{backend: backend, client: localHTTPClient()}
+	backend.exit.mu.Lock()
+	backend.exit.prepare, backend.exit.abort = bridge.prepareClose, bridge.abortClose
+	backend.exit.quit = func() {
+		select {
+		case <-ready:
+			wailsruntime.Quit(nativeContext)
+		case <-ctx.Done():
+		}
+	}
+	backend.exit.mu.Unlock()
 	bridge.saveDialog = func(name string) (string, error) {
 		select {
 		case <-ready:
@@ -124,7 +134,10 @@ func runDesktop() error {
 		},
 		OnShutdown: func(context.Context) { close(closed); backend.Close() },
 		OnBeforeClose: func(wctx context.Context) bool {
-			if ctx.Err() == nil && !bridge.prepareClose() {
+			backend.exit.mu.Lock()
+			quitting := backend.exit.closing && !backend.exit.finished
+			backend.exit.mu.Unlock()
+			if ctx.Err() == nil && (quitting || !bridge.prepareClose()) {
 				wailsruntime.EventsEmit(wctx, "desktop:busy")
 				return true
 			}

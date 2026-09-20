@@ -7,6 +7,7 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/proxy"
 import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -569,15 +570,47 @@ func samplingAutoStartStatus() AutoStartStatus {
 		Supported: true,
 		Path:      `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SushiroOverdoseSampler`,
 	}
-	cmd := exec.Command("reg", "query", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "SushiroOverdoseSampler")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Run(); err == nil {
+	command, exists, err := readSamplingAutoStartCommand()
+	if exists {
 		status.Enabled = true
 		status.Message = "已配置当前用户开机静默启动采样"
+		status = checkAutoStartTarget(status, collectorCommandTarget(command))
 	} else {
 		status.Message = "未配置系统开机自启动"
 	}
+	if err != nil {
+		status.Error = "无法读取自启动设置：" + err.Error()
+	}
 	return status
+}
+
+func readSamplingAutoStartCommand() (string, bool, error) {
+	var key syscall.Handle
+	subkey, _ := syscall.UTF16PtrFromString(`Software\Microsoft\Windows\CurrentVersion\Run`)
+	if err := syscall.RegOpenKeyEx(syscall.HKEY_CURRENT_USER, subkey, 0, syscall.KEY_READ, &key); err != nil {
+		if err == syscall.ERROR_FILE_NOT_FOUND {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer syscall.RegCloseKey(key)
+	name, _ := syscall.UTF16PtrFromString("SushiroOverdoseSampler")
+	buffer := make([]byte, 65536)
+	size, kind := uint32(len(buffer)), uint32(0)
+	if err := syscall.RegQueryValueEx(key, name, nil, &kind, &buffer[0], &size); err != nil {
+		if err == syscall.ERROR_FILE_NOT_FOUND {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if kind != syscall.REG_SZ || size%2 != 0 {
+		return "", true, nil
+	}
+	value := make([]uint16, size/2)
+	for i := range value {
+		value[i] = binary.LittleEndian.Uint16(buffer[2*i:])
+	}
+	return syscall.UTF16ToString(value), true, nil
 }
 
 func installSamplingAutoStart() error {
@@ -590,6 +623,8 @@ func installSamplingAutoStart() error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Run()
 }
+
+func repairSamplingAutoStart() error { return installSamplingAutoStart() }
 
 func removeSamplingAutoStart() error {
 	cmd := exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "SushiroOverdoseSampler", "/f")

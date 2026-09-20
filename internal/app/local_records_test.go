@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,11 +39,14 @@ func TestLocalRecordsEmptyAndExportAreReadOnly(t *testing.T) {
 		r := httptest.NewRequest("GET", path, nil)
 		if strings.Contains(path, "export") {
 			handleLocalRecordsExport(w, r)
+			if w.Code != http.StatusConflict || w.Header().Get("Content-Disposition") != "" {
+				t.Fatalf("empty export must fail without a download: %d %s", w.Code, w.Body.String())
+			}
 		} else {
 			handleLocalRecords(w, r)
-		}
-		if w.Code != 200 {
-			t.Fatalf("%s: %d", path, w.Code)
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s: %d", path, w.Code)
+			}
 		}
 	}
 	if _, err := os.Stat(queueBaselineRecordsPath()); !os.IsNotExist(err) {
@@ -62,6 +66,72 @@ func TestLocalRecordsEmptyAndExportAreReadOnly(t *testing.T) {
 	}
 	if !strings.Contains(w.Header().Get("Content-Disposition"), "attachment") {
 		t.Fatal("export not an attachment")
+	}
+}
+
+func TestLocalRecordsExportCountsMatchPersonalRawSnapshots(t *testing.T) {
+	reliabilityHome(t)
+	base := time.Now().In(time.FixedZone("CST", 8*3600)).AddDate(0, 0, -1)
+	base = time.Date(base.Year(), base.Month(), base.Day(), 12, 0, 0, 0, base.Location())
+	rows := []QueueBaselineRecord{
+		{StoreID: 1, CollectedAt: base.Format(time.RFC3339), Name: "店一", StoreStatus: "OPEN", WaitMinutes: 30},
+		{StoreID: 1, CollectedAt: base.UTC().Format(time.RFC3339), Name: "店一", StoreStatus: "OPEN", WaitMinutes: 30},
+		{StoreID: 1, CollectedAt: base.Add(5 * time.Minute).Format(time.RFC3339), Name: "店一", StoreStatus: "CLOSED", WaitMinutes: 0},
+		{StoreID: 2, CollectedAt: base.Format(time.RFC3339), Name: "店二", StoreStatus: "OPEN", WaitMinutes: 20},
+		{StoreID: 1, CollectedAt: base.AddDate(0, 0, -400).Format(time.RFC3339), Name: "店一", StoreStatus: "OPEN", WaitMinutes: 10},
+		{StoreID: 1, CollectedAt: base.AddDate(0, 0, 3).Format(time.RFC3339), Name: "店一", StoreStatus: "OPEN", WaitMinutes: 90},
+	}
+	if err := appendQueueBaselineRecords(rows); err != nil {
+		t.Fatal(err)
+	}
+	dateType := queueTrendDateType(base, nil, nil)
+	for _, tc := range []struct {
+		name, query string
+		want        int
+	}{
+		{"default-store", "days=all", 3},
+		{"selected-store", "days=all&store=2", 1},
+		{"recent", "days=7&store=1", 2},
+		{"specific-date", "days=all&store=1&date=" + base.Format("2006-01-02"), 2},
+		{"date-type", "days=7&store=1&date_type=" + dateType, 2},
+		{"different-date", "days=all&store=1&date=2000-01-01", 0},
+		{"unknown-store", "days=all&store=999999", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, includeHistory := range []bool{true, false} {
+				if err := saveRecordViewSettings(recordViewSettings{IncludeHistory: includeHistory}); err != nil {
+					t.Fatal(err)
+				}
+				w := httptest.NewRecorder()
+				handleLocalRecords(w, httptest.NewRequest("GET", "/api/records?"+tc.query, nil))
+				var view localRecordsResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &view); err != nil || w.Code != http.StatusOK {
+					t.Fatalf("view: %d %s", w.Code, w.Body.String())
+				}
+				if view.ExportRecordCount != tc.want || view.TotalRecordCount != 4 {
+					t.Fatalf("history=%t: export count=%d total=%d, want %d/4", includeHistory, view.ExportRecordCount, view.TotalRecordCount, tc.want)
+				}
+				request := httptest.NewRequest("GET", "/api/records/export?"+tc.query, nil)
+				query := request.URL.Query()
+				query.Set("store", fmt.Sprint(view.SelectedStore))
+				request.URL.RawQuery = query.Encode()
+				w = httptest.NewRecorder()
+				handleLocalRecordsExport(w, request)
+				if tc.want == 0 {
+					var result map[string]string
+					if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != http.StatusConflict || result["error"] != "当前筛选下没有可导出的个人记录。" || w.Header().Get("Content-Disposition") != "" {
+						t.Fatalf("empty export: %d %s", w.Code, w.Body.String())
+					}
+				} else if w.Code != http.StatusOK || strings.Count(w.Body.String(), "\n") != tc.want {
+					t.Fatalf("export count mismatch: %d %s", w.Code, w.Body.String())
+				}
+			}
+		})
+	}
+	w := httptest.NewRecorder()
+	handleLocalRecordsExport(w, httptest.NewRequest("GET", "/api/records/export?days=all", nil))
+	if w.Code != http.StatusOK || strings.Count(w.Body.String(), "\n") != 4 || !strings.Contains(w.Body.String(), base.AddDate(0, 0, -400).Format(time.RFC3339)) {
+		t.Fatalf("full backup must include every store and records older than one year: %d %s", w.Code, w.Body.String())
 	}
 }
 

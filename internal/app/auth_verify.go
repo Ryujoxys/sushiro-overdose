@@ -24,8 +24,13 @@ func handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func runAuthVerify(ctx context.Context) AuthVerifyResult {
+	generation := authGeneration()
 	report := RunAuthProbe(ctx, "")
 	result := AuthVerifyResult{Method: "read_only", Message: "只读检查未能确认认证可用，请查看基础接口检查结果；未取号，也未取消任何单据。"}
+	if generation != authGeneration() {
+		result.Message = "账号连接已变化，请重新验证当前凭证。"
+		return result
+	}
 	if report.Authenticated {
 		result.OK, result.Valid = true, true
 		result.Message = "认证查询通过；未创建或取消任何单据。实际预约、取号仍以提交时的官方结果为准。"
