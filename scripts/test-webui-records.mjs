@@ -243,8 +243,10 @@ function fixture() {
  assert.equal(f.node('record-toggle').disabled,true,'empty selection allowed starting collection');
  assert.equal(f.node('record-toggle').hidden,true,'start button shown before any store was chosen');
  assert.equal(f.node('service-detail').hidden,true,'normal state showed an exception line');
+ assert.equal(f.node('record-settings').hidden,false,'existing autostart could not be turned off without stores');
  f.run('state.service.autostart.enabled=false;renderService();');
  assert.equal(f.node('autostart').disabled,true,'empty selection allowed enabling autostart');
+ assert.equal(f.node('record-settings').hidden,true,'settings row shown before any store was chosen');
  f.run("openStorePicker('records')");
  assert.equal(f.node('store-selection-hint').textContent,'先搜索常去的门店。','first use described pausing a nonexistent collection');
 }
