@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -89,11 +90,36 @@ func friendlyNetworkError(err error) string {
 		return "请求超时：寿司郎接口响应较慢，请稍后重试"
 	case strings.Contains(text, "connection refused") || strings.Contains(text, "no such host") ||
 		strings.Contains(text, "unreachable") || strings.Contains(text, "不可达") ||
-		strings.Contains(text, "network") || strings.Contains(text, "dns"):
+		strings.Contains(text, "network") || strings.Contains(text, "dns") ||
+		strings.Contains(text, "connection reset") || strings.Contains(text, "broken pipe") ||
+		strings.Contains(text, "proxyconnect") || strings.Contains(text, "tls:") ||
+		strings.Contains(text, "certificate") || strings.HasSuffix(text, "eof"):
 		return "网络不可达：确认网络能访问寿司郎接口，检查代理后重试"
 	case strings.Contains(text, "unexpected end of json") || strings.Contains(text, "invalid character") ||
 		strings.Contains(text, "json"):
 		return "官方返回内容无法解析：可能是临时故障或被代理拦截，请稍后重试"
 	}
 	return err.Error()
+}
+
+// friendlyPublicQueueError explains failures of the credential-free public queue
+// API. An HTML block page (often shown to overseas VPN exits) must never reach
+// the page verbatim.
+func friendlyPublicQueueError(err error) string {
+	var apiErr *api.APIError
+	if errors.As(err, &apiErr) {
+		code := strconv.Itoa(apiErr.StatusCode)
+		html := strings.Contains(strings.ToLower(apiErr.Body), "<html")
+		switch {
+		case (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusUnavailableForLegalReasons) && html:
+			return "寿司郎服务器拒绝了这次请求（HTTP " + code + "）：如果开着海外 VPN 或代理，请关闭后重试"
+		case apiErr.StatusCode == http.StatusTooManyRequests:
+			return "请求太频繁（HTTP 429）：请稍后再试"
+		case apiErr.StatusCode >= 500:
+			return "寿司郎服务暂时不可用（HTTP " + code + "），请稍后重试"
+		case html:
+			return "寿司郎接口返回了异常页面（HTTP " + code + "），请稍后重试"
+		}
+	}
+	return friendlyNetworkError(err)
 }

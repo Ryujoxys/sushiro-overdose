@@ -1,6 +1,9 @@
 package app
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -64,5 +67,30 @@ func TestTicketAlreadyIssuedError(t *testing.T) {
 	msg := friendlyNetTicketError(err)
 	if !strings.Contains(msg, "已经发过排队号") || strings.Contains(msg, "没取到") {
 		t.Fatalf("friendly net ticket message = %q", msg)
+	}
+}
+
+func TestFriendlyPublicQueueErrorHidesBlockPages(t *testing.T) {
+	block := &api.APIError{StatusCode: 403, Body: "<html>\r\n<head><title>403 Forbidden</title></head></html>"}
+	for err, want := range map[error]string{
+		block:                                                     "海外 VPN",
+		fmt.Errorf("store 1012: %w", block):                       "海外 VPN",
+		errors.Join(block, errors.New("model")):                   "海外 VPN",
+		&api.APIError{StatusCode: 429}:                            "太频繁",
+		&api.APIError{StatusCode: 502, Body: "x"}:                 "暂时不可用",
+		&api.APIError{StatusCode: 404, Body: "<HTML>gone</HTML>"}: "异常页面",
+		context.DeadlineExceeded:                                  "请求超时",
+		errors.New(`queue request failed: Get "https://example/stores": read tcp 127.0.0.1:1->127.0.0.1:2: read: connection reset by peer`): "网络不可达",
+		errors.New(`Get "https://example": proxyconnect tcp: dial tcp: refused`):                                                            "网络不可达",
+		errors.New(`Get "https://example": EOF`):                                                                                            "网络不可达",
+	} {
+		got := friendlyPublicQueueError(err)
+		if !strings.Contains(got, want) || strings.Contains(strings.ToLower(got), "<html") {
+			t.Errorf("%v => %q, want %q", err, got, want)
+		}
+	}
+	// A JSON 403 is not a block page and keeps its original detail.
+	if got := friendlyPublicQueueError(&api.APIError{StatusCode: 403, Body: `{"error":"denied"}`}); !strings.Contains(got, "denied") {
+		t.Errorf("JSON 403 lost detail: %q", got)
 	}
 }

@@ -69,7 +69,7 @@ func (c *QueueBaselineCollector) collectTick(ctx context.Context) {
 		}
 		state.LastError = ""
 		if runErr != nil && !(ctx.Err() != nil && errors.Is(runErr, context.Canceled)) {
-			state.LastError = runErr.Error()
+			state.LastError = friendlyPublicQueueError(runErr)
 		}
 	}
 	state.HeartbeatAt = time.Now().Format(time.RFC3339)
