@@ -74,6 +74,17 @@ func runDesktop() error {
 			Filters: []wailsruntime.FileFilter{{DisplayName: "导出文件", Pattern: "*" + filepath.Ext(name)}},
 		})
 	}
+	bridge.openDialog = func() (string, error) {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return wailsruntime.OpenFileDialog(nativeContext, wailsruntime.OpenDialogOptions{
+			Title:   "选择记录备份",
+			Filters: []wailsruntime.FileFilter{{DisplayName: "记录备份 (*.jsonl)", Pattern: "*.jsonl"}},
+		})
+	}
 	bridge.openURL = func(url string) {
 		select {
 		case <-ready:

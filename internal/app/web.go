@@ -132,6 +132,7 @@ func newWebMux() *http.ServeMux {
 	mux.HandleFunc("/api/records", handleLocalRecords)
 	mux.HandleFunc("/api/records/settings", handleRecordViewSettings)
 	mux.HandleFunc("/api/records/export", handleLocalRecordsExport)
+	mux.HandleFunc("/api/records/import", handleLocalRecordsImport)
 
 	mux.HandleFunc("/api/mcp", handleMCP)
 	mux.HandleFunc("/api/mcp/autostart", handleMCPAutostart)

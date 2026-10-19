@@ -11,6 +11,10 @@ function freshness(value) {
   if(age<60000)return '刚刚更新';
   return age<3600000?Math.floor(age/60000)+' 分钟前更新':clockTime(value)+' 更新';
 }
+function chinaDate(date=new Date()) {
+  const part=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date).map(p=>[p.type,p.value]));
+  return part.year+'-'+part.month+'-'+part.day;
+}
 function chinaHHMM(date=new Date()) { return date.toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}); }
 function serviceLabel(data) {
   if(!data?.config?.enabled)return [data?.model?.sample_count?'已暂停':'未记录',''];
@@ -96,8 +100,9 @@ async function refreshRecords({background=false}={}) {
   el('record-chart').setAttribute('aria-busy','true');
   try {
     const [service,records]=await Promise.all([api('/api/queue/service'),api('/api/records?'+query)]);
+    const today=await loadTodayRecords(records);
     if(revision!==state.recordsRevision||(background&&recordsInteractionActive()))return;
-    state.service=service;state.records=records;state.analysisStores=records.available_stores||records.stores||[];
+    state.service=service;state.records=records;state.recordsToday=today;state.analysisStores=records.available_stores||records.stores||[];
     for(const s of [...(records.available_stores||[]),...(records.stores||[])])state.stores.set(String(s.id),{...state.stores.get(String(s.id)),...s});
     showError('records-error',null);renderRecords();renderService();renderAnalysis();state.recordsQuery=recordQuery().toString();
   }catch(e){if(revision===state.recordsRevision){showError('records-error',new Error('未更新：'+e.message));if(!state.records){el('record-chart').innerHTML='<p class="empty">记录暂时读取失败，请刷新重试。</p>';el('record-table').innerHTML='';el('analysis-inspection').hidden=true;el('analysis-source').textContent='';}}}
@@ -118,19 +123,31 @@ function renderSteps() {
     if(step===current)item.setAttribute('aria-current','step');else item.removeAttribute('aria-current');
   });
 }
+// Today's own snapshots are drawn over the multi-day pattern so people can compare with a usual day.
+async function loadTodayRecords(records) {
+  const today=chinaDate(),store=el('analysis-store').value||String(records.selected_store||'');
+  if(!store||el('analysis-date').value||el('analysis-date-type').value!=='all'||!(records.dates||[]).includes(today))return null;
+  const q=recordQuery();q.set('store',store);q.set('date',today);
+  try{const data=await api('/api/records?'+q);return {...data,date:today};}catch{return null;}
+}
 function renderRecords() {
   const model=state.service.model||{};
   renderSteps();
   setMarkup('record-overview',[['已保存',model.sample_count||0,'条'],['覆盖',model.day_count||0,'天'],['已选',recordIDs().length,'家店']].map(([name,n,unit])=>'<div class="metric"><span>'+name+' </span><strong>'+n+'</strong><span>'+unit+'</span></div>').join(''));
   const rows=recordIDs().map(id=>{
     const s=state.records.stores.find(row=>String(row.id)===id),latest=s?.latest;
-    return '<div class="store-row"><div><button class="store-name" data-action="analyze-store" data-id="'+escapeHTML(id)+'">'+escapeHTML(storeName(id))+'</button><p>'+escapeHTML(latest?clockTime(latest.collected_at)+' 记录 · '+s.samples+' 条':'等待第一条记录')+'</p></div><div class="store-values">'+(latest?'<b>'+escapeHTML(latest.store_status==='OPEN'?'约 '+latest.wait_minutes+' 分钟':'非营业时段')+'</b><small>最近记录，不是实时数据</small>':'<span class="badge">尚无记录</span>')+'</div></div>';
+    return '<div class="store-row"><div><button class="store-name" data-action="analyze-store" data-id="'+escapeHTML(id)+'">'+escapeHTML(storeName(id))+'</button><p>'+escapeHTML(latest?clockTime(latest.collected_at)+' 记录 · '+s.samples+' 条':'等待第一条记录')+'</p></div><div class="store-values">'+(latest?storeLatestMarkup(latest):'<span class="badge">尚无记录</span>')+'</div></div>';
   });
   setMarkup('record-stores',rows.join('')||'<div class="empty"><strong>先选常去的几家店</strong>不用连接账号，也能开始记录。</div>');
   syncAnalysisStore();
   el('data-path').textContent=state.service.data_path||'~/.sushiro/';
   setExportLink('backup-records',Number(state.records.total_record_count)>0,'/api/records/export?days=all');
   el('backup-hint').textContent=state.records.total_record_count?'全部 '+state.records.total_record_count+' 条个人记录，不含内置历史和账号凭证。':'还没有个人记录，开始记录后即可备份。';
+}
+function storeLatestMarkup(latest) {
+  if(latest.store_status!=='OPEN')return '<b>非营业时段</b><small>最近一次记录</small>';
+  const called=Number(latest.display_called_no)||0,wait='约 '+(Number(latest.wait_minutes)||0)+' 分钟';
+  return called?'<b>叫到 '+called+' 号</b><small>等'+wait+' · 非实时</small>':'<b>'+wait+'</b><small>最近一次记录 · 非实时</small>';
 }
 function renderService() {
   const data=state.service,cfg=data.config,auto=data.autostart||{},ids=recordIDs(),[label,tone]=serviceLabel(data);
@@ -212,6 +229,31 @@ async function quitApp() {
     document.querySelectorAll('button,input,select,textarea').forEach(node=>{node.disabled=true;});
   });
 }
+// Restore is additive: the server skips rows already recorded and never rewrites the file.
+async function restoreRecords() {
+  const bridge=window.go?.app?.DesktopBridge;
+  if(!bridge){el('restore-file').value='';el('restore-file').click();return;}
+  await guard('restore',async()=>{
+    const response=await bridge.ImportRecords();
+    if(response?.status)finishRestore(response.status,JSON.parse(response.body||'{}'));
+  });
+}
+async function uploadRestoreFile() {
+  const file=el('restore-file').files?.[0];
+  if(!file)return;
+  await guard('restore',async()=>{
+    el('restore-records').disabled=true;
+    try{
+      const response=await fetch('/api/records/import',{method:'POST',headers:{Accept:'application/json','Content-Type':'application/x-ndjson','X-Sushiro-CSRF':document.querySelector('meta[name="sushiro-csrf"]').content},body:file,cache:'no-store'});
+      finishRestore(response.status,await response.json().catch(()=>({})));
+    }finally{el('restore-records').disabled=false;el('restore-file').value='';}
+  });
+}
+function finishRestore(status,data) {
+  if(status<200||status>=300||data.error)throw new Error(data.error||'恢复失败，请重试。');
+  toast(data.imported?'已恢复 '+data.imported+' 条记录'+(data.duplicates?'，跳过 '+data.duplicates+' 条已有记录':''):'备份里的记录都已存在，没有新增。');
+  refreshRecords();
+}
 let searchTimer;
 function openStorePicker(mode) {
   state.pickerMode=mode;state.picker=new Set(mode==='records'?recordIDs():state.selectedStore?[state.selectedStore]:[]);
@@ -245,10 +287,13 @@ async function searchStores() {
   const revision=++state.searchRevision,q=el('store-search').value.trim();
   el('store-results').innerHTML='<p class="empty">正在找门店…</p>';
   try{
-    const data=await api('/api/queue/stores?limit=100&q='+encodeURIComponent(q));
+    // Without a keyword, chosen and usual stores come first so they need no search.
+    const mine=q?[]:[...new Set([...state.picker,...recordIDs()])];
+    const [data,usual]=await Promise.all([api('/api/queue/stores?limit=100&q='+encodeURIComponent(q)),mine.length?api('/api/queue/stores?limit=50&stores='+encodeURIComponent(mine.join(','))).catch(()=>({stores:[]})):{stores:[]}]);
     if(revision!==state.searchRevision)return;
-    for(const store of data.stores||[])state.stores.set(String(store.id),store);
-    el('store-results').innerHTML=(data.stores||[]).map(s=>'<label class="picker-row"><input type="'+(state.pickerMode==='records'?'checkbox':'radio')+'" name="picked-store" value="'+escapeHTML(s.id)+'" '+(state.picker.has(String(s.id))?'checked':'')+'><span><b>'+escapeHTML(s.name)+'</b><small>'+escapeHTML([s.name_kana||s.city,s.address].filter(Boolean).join(' · '))+'</small></span></label>').join('')||'<p class="empty">没有找到，试试城市或其他店名。</p>';
+    const seen=new Set(),list=[...(usual.stores||[]),...(data.stores||[])].filter(s=>!seen.has(String(s.id))&&seen.add(String(s.id)));
+    for(const store of list)state.stores.set(String(store.id),store);
+    el('store-results').innerHTML=list.map(s=>'<label class="picker-row"><input type="'+(state.pickerMode==='records'?'checkbox':'radio')+'" name="picked-store" value="'+escapeHTML(s.id)+'" '+(state.picker.has(String(s.id))?'checked':'')+'><span><b>'+escapeHTML(s.name)+'</b><small>'+escapeHTML([s.name_kana||s.city,s.address].filter(Boolean).join(' · '))+'</small></span></label>').join('')||'<p class="empty">没有找到，试试城市或其他店名。</p>';
     updatePicked();
   }catch(e){if(revision===state.searchRevision)el('store-results').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="retry-stores">重试</button>';}
 }
@@ -285,7 +330,7 @@ async function loadLive() {
 function renderLive(error='') {
   const panel=state.live,open=panel.store_status==='OPEN',stale=state.liveStale;
   const restoreFocus=!!document.activeElement?.closest('#live-store [data-action="refresh-live"]');
-  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(panel.store_name)+'</h3><p>'+escapeHTML(stale?'上次读取的排队状态':(open?'营业中':'当前未营业')+' · '+(panel.online_open?'可线上取号':'线上取号暂未开放'))+'</p></div><div class="live-numbers"><div><strong>'+escapeHTML(panel.called_no>0?panel.called_no:'—')+'</strong><span>'+(stale?'上次叫到':'当前叫到')+'</span></div><div><strong>'+escapeHTML(open?panel.wait_groups:'—')+'</strong><span>在等桌数</span></div><div><strong>'+escapeHTML(open?panel.server_wait_minutes:'—')+'</strong><span>官方等待 / 分钟</span></div></div>'+(stale?'<p class="notice error" role="status">未更新：'+escapeHTML(error)+'</p>':'')+'<div class="live-foot"><p class="caption">官方公开数据 · '+escapeHTML(freshness(panel.observed_at))+'</p><button class="button secondary small" data-action="refresh-live">刷新排队</button></div>');
+  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(panel.store_name)+'</h3><p>'+escapeHTML(stale?'上次读取的排队状态':(open?'营业中':'当前未营业')+' · '+(panel.online_open?'可线上取号':'线上取号暂未开放'))+'</p></div><div class="live-numbers"><div><strong>'+escapeHTML(panel.called_no>0?panel.called_no:'—')+'</strong><span>'+(stale?'上次叫到':'当前叫到')+'</span></div><div><strong>'+escapeHTML(open?panel.wait_groups:'—')+'</strong><span>在等桌数</span></div><div><strong>'+escapeHTML(open?panel.server_wait_minutes:'—')+'</strong><span>官方等待 / 分钟</span></div></div>'+(stale?'<p class="notice error" role="status">未更新：'+escapeHTML(error)+'</p>':'')+'<div class="live-foot"><p class="caption">官方公开数据 · '+escapeHTML(freshness(panel.observed_at))+'</p><div class="actions"><button class="button quiet small" data-action="live-history">看历史规律</button><button class="button secondary small" data-action="refresh-live">刷新排队</button></div></div>');
   if(restoreFocus)el('live-store').querySelector('[data-action="refresh-live"]')?.focus();
 }
 async function loadMealPlan() {
@@ -340,8 +385,9 @@ function init() {
   const actions={
     refresh:refreshRecords,'pick-records':()=>openStorePicker('records'),'pick-queue':()=>openStorePicker('queue'),
     'retry-stores':searchStores,'save-stores':savePickedStores,'close-store':closeStorePicker,'remove-picked-store':button=>removePickedStore(button.dataset.id),
-    'toggle-recording':toggleRecording,'check-update':checkUpdate,'repair-autostart':repairAutostart,'quit-app':quitApp,'refresh-live':loadLive,
+    'toggle-recording':toggleRecording,'check-update':checkUpdate,'restore-records':restoreRecords,'repair-autostart':repairAutostart,'quit-app':quitApp,'refresh-live':loadLive,
     'analyze-store':button=>{selectAnalysisStore(button.dataset.id);el('analysis-title').scrollIntoView({block:'start'});},
+    'live-history':()=>{const id=state.selectedStore;location.hash='#records';selectAnalysisStore(id).then(()=>el('analysis-title').scrollIntoView({block:'start'}));},
     'review-ticket':reviewTicket,'confirm-ticket':confirmTicket,'close-ticket':()=>{if(!state.busy.has('ticket'))el('ticket-dialog').close();},
     'query-ticket':queryTicket,'cancel-ticket':cancelTicket,'connect-account':()=>openAuth('settings'),'start-auth':startAuth,'stop-auth':stopAuth,'verify-auth':verifyAuth,'close-auth':closeAuth,'import-auth':importAuth,'auth-continue':finishAuth,
     'reset-account':()=>guard('account',async()=>{if(await confirmDialog('断开账号','只删除本机凭证，不删除排队记录，也不取消已取号码。')){await api('/api/auth/reset',{});clearTicketView();await loadStatus();toast('已断开');}}),
@@ -356,6 +402,7 @@ function init() {
   el('store-results').addEventListener('change',event=>{const input=event.target;if(input.name!=='picked-store')return;if(state.pickerMode==='queue')state.picker.clear();if(input.checked)state.picker.add(input.value);else state.picker.delete(input.value);updatePicked();});
   el('record-interval').addEventListener('change',()=>guard('config',async()=>{await saveRecordConfig();await refreshRecords();toast('记录间隔已保存');}));
   el('autostart').addEventListener('change',changeAutostart);
+  el('restore-file').addEventListener('change',uploadRestoreFile);
   for(const id of ['analysis-store','analysis-days','analysis-date-type'])el(id).addEventListener('change',()=>{el('analysis-date').value='';refreshRecords();});
   el('analysis-date').addEventListener('change',refreshRecords);
   el('include-history').addEventListener('change',changeHistory);

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ type DesktopBridge struct {
 	backend    *webBackend
 	client     *http.Client
 	saveDialog func(name string) (string, error)
+	openDialog func() (string, error)
 	openURL    func(url string)
 	exportMu   sync.Mutex
 	lifecycle  sync.Mutex
@@ -154,14 +156,18 @@ func (b *DesktopBridge) Quit() error {
 }
 
 func (b *DesktopBridge) request(method, resource, body string, timeout time.Duration, limit int64) (int, []byte, error) {
+	return b.send(method, resource, strings.NewReader(body), "application/json", timeout, limit)
+}
+
+func (b *DesktopBridge) send(method, resource string, body io.Reader, contentType string, timeout time.Duration, limit int64) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(b.backend.ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, b.backend.URL+resource, strings.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, b.backend.URL+resource, body)
 	if err != nil {
 		return 0, nil, errors.New("无法创建本地请求")
 	}
 	req.Header.Set("Origin", b.backend.URL)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("X-Sushiro-CSRF", getWebCSRFToken())
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -191,7 +197,7 @@ func (b *DesktopBridge) Export(resource string) (bool, error) {
 	name := ""
 	switch u.Path {
 	case "/api/records/export":
-		name = "sushiro-records.jsonl"
+		name = recordsExportFilename(time.Now())
 	case "/api/diagnostics/bundle":
 		if u.RawQuery != "" {
 			return false, errors.New("不支持的导出参数")
@@ -235,4 +241,32 @@ func (b *DesktopBridge) Export(resource string) (bool, error) {
 		return false, errors.New("无法保存文件，请选择可写入的位置")
 	}
 	return true, nil
+}
+
+// ImportRecords restores a backup chosen in the native open dialog. It takes no
+// path from JavaScript; cancelling the dialog returns an empty response and
+// changes nothing.
+func (b *DesktopBridge) ImportRecords() (DesktopResponse, error) {
+	if err := b.beginWrite(); err != nil {
+		return DesktopResponse{}, err
+	}
+	defer b.endWrite()
+	if !b.exportMu.TryLock() {
+		return DesktopResponse{}, errors.New("请先完成当前导入或导出")
+	}
+	defer b.exportMu.Unlock()
+	if b.openDialog == nil {
+		return DesktopResponse{}, errors.New("打开窗口尚未就绪")
+	}
+	source, err := b.openDialog()
+	if err != nil || source == "" {
+		return DesktopResponse{}, err
+	}
+	file, err := os.Open(source)
+	if err != nil {
+		return DesktopResponse{}, errors.New("无法读取所选文件")
+	}
+	defer file.Close()
+	status, data, err := b.send("POST", "/api/records/import", file, "application/x-ndjson", 2*time.Minute, 1<<20)
+	return DesktopResponse{Status: status, Body: string(data)}, err
 }

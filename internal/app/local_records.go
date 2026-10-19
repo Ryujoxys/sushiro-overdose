@@ -112,8 +112,8 @@ func filterLocalRecords(rows []QueueBaselineRecord, q localRecordsQuery, now tim
 	out := []QueueBaselineRecord{}
 	for _, row := range rows {
 		normalizeQueueBaselineRecordForRead(&row)
-		at, err := time.Parse(time.RFC3339, row.CollectedAt)
-		if err != nil || row.StoreID <= 0 {
+		key, at, ok := localRecordKey(row)
+		if !ok {
 			continue
 		}
 		if q.store != 0 && row.StoreID != q.store {
@@ -122,7 +122,6 @@ func filterLocalRecords(rows []QueueBaselineRecord, q localRecordsQuery, now tim
 		if !recordDateMatches(at, queueTrendDateType(at.In(SushiroTimezone), holidays, workdays), q, now, true) {
 			continue
 		}
-		key := strconv.Itoa(row.StoreID) + "/" + at.UTC().Format(time.RFC3339Nano)
 		if seen[key] {
 			continue
 		}
@@ -236,6 +235,11 @@ func handleLocalRecords(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// recordsExportFilename dates each backup so several exports do not overwrite one another.
+func recordsExportFilename(now time.Time) string {
+	return "sushiro-records-" + now.In(SushiroTimezone).Format("2006-01-02") + ".jsonl"
+}
+
 func handleLocalRecordsExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, 405, "GET only")
@@ -256,7 +260,7 @@ func handleLocalRecordsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="sushiro-records.jsonl"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+recordsExportFilename(time.Now())+`"`)
 	w.Header().Set("Cache-Control", "no-store")
 	enc := json.NewEncoder(w)
 	for _, row := range rows {

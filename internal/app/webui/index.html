@@ -80,7 +80,7 @@
   <section id="page-settings" aria-labelledby="settings-title" hidden>
     <div class="page-heading"><div><h1 id="settings-title">设置</h1><p id="version"></p></div></div>
     <div class="settings-grid">
-      <section class="card"><h2>数据在本机</h2><code id="data-path">正在读取…</code><a id="backup-records" class="button secondary" aria-disabled="true" tabindex="-1">备份全部记录</a><p id="backup-hint" class="caption">所有门店、所有日期，不含内置历史和账号凭证。</p></section>
+      <section class="card"><h2>数据在本机</h2><code id="data-path">正在读取…</code><div class="actions"><a id="backup-records" class="button secondary" aria-disabled="true" tabindex="-1">备份全部记录</a><button id="restore-records" class="button quiet" data-action="restore-records">从备份恢复</button></div><input id="restore-file" type="file" accept=".jsonl,application/x-ndjson,text/plain" hidden><p id="backup-hint" class="caption">所有门店、所有日期，不含内置历史和账号凭证。</p><p class="caption">恢复只补充缺少的记录，不覆盖或删除现有数据。</p></section>
       <section class="card"><h2>手动取号账号</h2><p id="account-state" class="muted">还未读取</p><div class="actions"><button class="button secondary" data-action="connect-account">连接账号</button><button class="button quiet" data-action="reset-account">断开账号</button></div><p class="caption">只记录数据，不需要连接账号。</p></section>
       <section class="card"><h2>遇到问题</h2><div class="actions"><button class="button secondary" data-action="repair-proxy">恢复系统代理</button><a class="button secondary" href="/api/diagnostics/bundle">导出诊断包</a></div><p class="caption">恢复代理不会删除记录。</p></section>
       <section class="card"><h2>应用与后台</h2><p class="muted">关窗口不停止后台记录。更新程序前，可在这里全部退出。</p><button class="button secondary" data-action="quit-app">退出应用及后台记录</button><p class="caption">保留记录和自启动设置。</p></section>

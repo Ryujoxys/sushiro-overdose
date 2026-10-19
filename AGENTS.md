@@ -82,6 +82,7 @@ main.go (桌面版默认启动原生窗口)
 | `web_queue_trends.go` | 本地到店预测 API |
 | `web_queue_live.go` | 实时排队 API（公开门店等位/区域/单店详情） |
 | `local_records.go` | 本机公开快照查询、等待分布、样本覆盖与 JSONL 导出 |
+| `local_records_import.go` | 个人备份恢复：校验、去重、只追加，不改写或删除已有记录 |
 | `history_bundle.go`、`record_view.go` | 固定历史包嵌入和校验、图表半小时代表值合并、历史开关持久化；不参与取号预测或个人模型 |
 | `webui/record_chart.js`、`webui/store_select.js` | 叫号与等待曲线、时段数值及样本解释、可搜索图表门店；鼠标、键盘、触屏均可查看 |
 | `automation_retired.go` | 旧自动抢号 API 返回 410，不执行或写计划 |
@@ -230,7 +231,8 @@ main.go (桌面版默认启动原生窗口)
 | GET | `/api/stores` | 已配置门店列表（含名称/昵称/地址） |
 | GET | `/api/calendar?store=ID` 或 `/api/calendar?stores=ID1,ID2&available=1&period=lunch` | 门店时段数据，支持多选、只看可预约、午餐/晚餐过滤 |
 | GET | `/api/reservations` | 当前预约列表 |
-| GET | `/api/records`、`/api/records/export` | 图表分析与个人 JSONL 导出，支持 days=all 或 1..365、store、date_type、date；导出不含内置历史 |
+| GET | `/api/records`、`/api/records/export` | 图表分析与个人 JSONL 导出，支持 days=all 或 1..365、store、date_type、date；导出不含内置历史，文件名带日期 |
+| POST | `/api/records/import` | 从个人 JSONL 备份恢复：逐行校验、按门店+时间去重，只追加新记录并重建本机模型；读不完整或无可用行时不写入。桌面端只能经 `DesktopBridge.ImportRecords` 的系统打开框选择文件 |
 | GET/POST | `/api/records/settings` | 包含历史数据开关，仅 POST 写入本机，GET 不写文件 |
 | POST | `/api/queue/ticket` | 用户显式确认后手动取号一次，不自动重试 |
 | GET | `/api/queue/ticket/status` | 只读查询当前排队号 |

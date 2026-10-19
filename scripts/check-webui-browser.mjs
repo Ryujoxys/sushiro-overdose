@@ -14,6 +14,7 @@ const page=await context.newPage(),errors=[],requests=[];
 page.on('pageerror',e=>errors.push(e.message));
 let selected=[],enabled=false,autostart=false,authenticated=false,hasRecords=false,uncertain=false,ticket=null,includeHistory=true,calledAvailable=true,liveFailure=false;
 const stamp=new Date().toISOString();
+const todayDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date());
 const stores=[{id:1012,name:'深圳海岸城店',city:'深圳',address:'深圳市南山区海德三道',wait:35},{id:3006,name:'深圳万象天地店',city:'深圳',address:'深圳市南山区深南大道',wait:50}];
 await page.route('**/api/**',async route=>{
   const request=route.request(),url=new URL(request.url()),body=request.postDataJSON(),key=url.pathname;
@@ -30,8 +31,13 @@ await page.route('**/api/**',async route=>{
     const id=Number(url.searchParams.get('store'))||1012;
     const date=url.searchParams.get('date'),recent=url.searchParams.get('days')==='7';
     const hasCurve=(hasRecords||includeHistory)&&!recent;
-    data={source:includeHistory?'mixed':'local',selected_store:id,local_samples:hasRecords?230:0,history_samples:includeHistory?200:0,history:{included:includeHistory,first_at:'2026-06-17T10:20:07+08:00',cutoff_at:'2026-09-06T21:30:17+08:00'},available_stores:hasRecords||includeHistory?stores:[],dates:hasCurve?['2026-09-06','2026-09-05']:[],samples:hasRecords?230:0,days:hasRecords?8:0,latest_at:hasRecords?stamp:'',stores:hasRecords?stores.map(s=>({...s,samples:230,days:8,latest:{collected_at:stamp,store_status:'OPEN',wait_minutes:s.wait}})):[],called_local_samples:hasRecords&&calledAvailable?230:0,called_history_samples:includeHistory&&calledAvailable?200:0,called_days:hasCurve&&calledAvailable?8:0,called_points:hasCurve&&id&&calledAvailable?Array.from({length:12},(_,i)=>({time:`${String(16+Math.floor(i/2)).padStart(2,'0')}:${i%2?'30':'00'}`,median:200+i*100,lower:100+i*100,upper:400+i*100,samples:date?1:20,days:date?1:8})):[],points:hasCurve&&id?[20,25,35,48,58,62,75,70,60,42,30,25].map((median,i)=>({time:`${String(16+Math.floor(i/2)).padStart(2,'0')}:${i%2?'30':'00'}`,median,upper:median+15,samples:date?1:20,days:date?1:8})):[]};
+    data={source:includeHistory?'mixed':'local',selected_store:id,local_samples:hasRecords?230:0,history_samples:includeHistory?200:0,history:{included:includeHistory,first_at:'2026-06-17T10:20:07+08:00',cutoff_at:'2026-09-06T21:30:17+08:00'},available_stores:hasRecords||includeHistory?stores:[],dates:hasCurve?[...(hasRecords?[todayDate]:[]),'2026-09-06','2026-09-05']:[],samples:hasRecords?230:0,days:hasRecords?8:0,latest_at:hasRecords?stamp:'',stores:hasRecords?stores.map((s,i)=>({...s,samples:230,days:8,latest:{collected_at:stamp,store_status:'OPEN',wait_minutes:s.wait,...(i?{}:{display_called_no:356})}})):[],called_local_samples:hasRecords&&calledAvailable?230:0,called_history_samples:includeHistory&&calledAvailable?200:0,called_days:hasCurve&&calledAvailable?8:0,called_points:hasCurve&&id&&calledAvailable?Array.from({length:12},(_,i)=>({time:`${String(16+Math.floor(i/2)).padStart(2,'0')}:${i%2?'30':'00'}`,median:200+i*100,lower:100+i*100,upper:400+i*100,samples:date?1:20,days:date?1:8})):[],points:hasCurve&&id?[20,25,35,48,58,62,75,70,60,42,30,25].map((median,i)=>({time:`${String(16+Math.floor(i/2)).padStart(2,'0')}:${i%2?'30':'00'}`,median,upper:median+15,samples:date?1:20,days:date?1:8})):[]};
     data.export_record_count=hasRecords?230:0;data.total_record_count=hasRecords?460:0;
+    if(date===todayDate&&hasRecords){
+      // Today's own records: earlier and faster than the usual curve, only up to 18:00.
+      data.called_points=Array.from({length:5},(_,i)=>({time:`${String(16+Math.floor(i/2)).padStart(2,'0')}:${i%2?'30':'00'}`,median:260+i*120,lower:260+i*120,upper:260+i*120,samples:1,days:1}));
+      data.points=[18,22,30,41,50].map((median,i)=>({time:`${String(16+Math.floor(i/2)).padStart(2,'0')}:${i%2?'30':'00'}`,median,upper:median,samples:1,days:1}));
+    }
   }else if(key==='/api/records/settings'){includeHistory=body.include_history;data={include_history:includeHistory};}
   else if(key==='/api/status')data={version:'preview',has_config:authenticated,platform:'windows',engine:{status:'idle'},auth_health:{status:authenticated?'ok':'unknown'}};
   else if(key==='/api/queue/stores')data={stores};
@@ -46,11 +52,13 @@ await page.route('**/api/**',async route=>{
   else if(key==='/api/queue/ticket/cancel'){ticket=null;data={ok:true};}
   else if(key==='/api/queue/advisor')data={current:{called_no:123},eta:{remaining_groups:25,estimated_called_at_range:{early:'18:00',late:'18:30'},wait_minutes_range:{low:35,high:65}}};
   else if(key==='/api/update')data={current_version:'preview',latest_version:'v9.9.9',update_available:true};
+  else if(key==='/api/records/import'){assert.match(request.postData()||'',/store_id/);data={imported:3,duplicates:1,invalid:0,stores:1};}
   else if(key==='/api/records/export')return route.fulfill({contentType:'application/x-ndjson',body:'{"store_id":1012}\n'});
   else throw new Error('Unexpected API call: '+key);
   await route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
 });
-const shot=async name=>page.screenshot({path:path.join(output,name+'.png'),fullPage:true,animations:'disabled'});
+// Full-page captures scroll the page; a static header keeps the sticky bar from landing mid-image.
+const shot=async name=>{await page.addStyleTag({content:'.header{position:static!important}'});await page.screenshot({path:path.join(output,name+'.png'),fullPage:true,animations:'disabled'});};
 const click=action=>page.locator(`[data-action="${action}"]`).first().click();
 const noOverflow=async()=>assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'horizontal overflow');
 try{
@@ -98,11 +106,19 @@ try{
   assert.equal(await page.locator('#backup-records').getAttribute('href'),'/api/records/export?days=all');
   assert.equal(await page.locator('#include-history').isChecked(),false,'local samples reenabled history');
   await page.locator('#include-history').check();await page.locator('#record-chart svg').waitFor();
+  await page.locator('#record-chart .legend-today').waitFor();assert.equal(await page.locator('#record-chart .chart-today').count(),1);
+  await page.locator('[data-record-point="17:00"]').hover();assert.match(await page.locator('#analysis-readout').innerText(),/今天 500 号/);
+  assert.match(await page.locator('#record-stores').innerText(),/叫到 356 号/);assert.match(await page.locator('#record-stores').innerText(),/约 50 分钟/);
   await noOverflow();await shot('records-desktop');
   await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);await noOverflow();await shot('records-mobile');
   await page.setViewportSize({width:320,height:740});await noOverflow();
   await page.setViewportSize({width:1280,height:960});
   await page.getByRole('link',{name:'手动取号',exact:true}).click();await page.getByText('官方等待 / 分钟').waitFor();await shot('manual-ticket');
+  await click('live-history');await page.waitForFunction(()=>location.hash==='#records'&&document.getElementById('analysis-store').value==='1012');
+  await page.getByRole('link',{name:'手动取号',exact:true}).click();await page.getByText('官方等待 / 分钟').waitFor();
+  await click('pick-queue');await page.locator('#store-results input[value="1012"]').waitFor();
+  assert.equal(await page.locator('#store-results input[name="picked-store"]').first().getAttribute('value'),'1012','usual store not listed first');
+  await click('close-store');
   liveFailure=true;await click('refresh-live');await page.getByText('未更新：网络未连接',{exact:true}).waitFor();assert.equal(await page.locator('#take-ticket').isDisabled(),true);await page.getByText('上次叫到',{exact:true}).waitFor();await shot('live-offline');
   liveFailure=false;await page.getByRole('link',{name:'我的记录',exact:true}).click();await page.getByRole('link',{name:'手动取号',exact:true}).click();await page.getByText('当前叫到',{exact:true}).waitFor();
   await click('review-ticket');await page.locator('#ticket-dialog').waitFor();await click('confirm-ticket');await page.locator('#auth-dialog').waitFor();
@@ -121,6 +137,9 @@ try{
   await shot('ticket-uncertain');await click('query-ticket');await page.getByText('当前没有查到排队号',{exact:true}).waitFor();
   await page.getByRole('link',{name:'设置',exact:true}).click();await noOverflow();
   assert.equal(requests.some(r=>r.key==='/api/update'),false,'update check ran without a click');
+  await page.setInputFiles('#restore-file',{name:'sushiro-records.jsonl',mimeType:'application/x-ndjson',buffer:Buffer.from('{"store_id":1012,"collected_at":"2026-09-01T18:00:00+08:00"}\n')});
+  await page.getByText('已恢复 3 条记录，跳过 1 条已有记录').waitFor();
+  assert.equal(requests.find(r=>r.key==='/api/records/import').method,'POST');
   await click('check-update');await page.getByText(/有新版本 v9\.9\.9/).waitFor();assert.equal(await page.locator('#update-link').isVisible(),true);await shot('settings');
   await page.emulateMedia({colorScheme:'dark'});await shot('settings-dark');
   await page.getByRole('link',{name:'手动取号',exact:true}).click();await page.getByText('官方等待 / 分钟').waitFor();await shot('queue-dark');

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,7 +101,7 @@ func TestDesktopExportCancelAndSave(t *testing.T) {
 	}
 	target := filepath.Join(t.TempDir(), "records.jsonl")
 	b.saveDialog = func(name string) (string, error) {
-		if name != "sushiro-records.jsonl" {
+		if name != recordsExportFilename(time.Now()) {
 			t.Errorf("unexpected suggested name %q", name)
 		}
 		return target, nil
@@ -212,5 +213,36 @@ func TestDesktopBridgeUpdateCheckIsReadOnlyAndReleasePageIsFixed(t *testing.T) {
 	}
 	if !strings.HasPrefix(releasePageURL, "https://github.com/Ryujoxys/sushiro-overdose/releases/") {
 		t.Fatalf("unexpected release page: %s", releasePageURL)
+	}
+}
+
+func TestDesktopBridgeImportUsesNativeDialogOnly(t *testing.T) {
+	var received string
+	b := testDesktopBridge(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/records/import" || r.Method != "POST" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		data, _ := io.ReadAll(r.Body)
+		received = string(data)
+		writeJSON(w, localRecordsImportResult{Imported: 1})
+	})
+	if _, err := b.Request("POST", "/api/records/import", "{}", 1000); err == nil {
+		t.Fatal("page could post an import body directly")
+	}
+	if _, err := b.ImportRecords(); err == nil {
+		t.Fatal("imported before the native dialog was ready")
+	}
+	b.openDialog = func() (string, error) { return "", nil }
+	if response, err := b.ImportRecords(); err != nil || response.Status != 0 || received != "" {
+		t.Fatalf("cancelled dialog: %+v %v %q", response, err, received)
+	}
+	source := filepath.Join(t.TempDir(), "backup.jsonl")
+	if err := os.WriteFile(source, []byte("{\"store_id\":1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.openDialog = func() (string, error) { return source, nil }
+	response, err := b.ImportRecords()
+	if err != nil || response.Status != 200 || received != "{\"store_id\":1}\n" {
+		t.Fatalf("import: %+v %v %q", response, err, received)
 	}
 }

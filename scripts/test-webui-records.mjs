@@ -14,7 +14,7 @@ const source=['app.js','record_chart.js','store_select.js','auth_ticket.js'].map
 function fixture() {
   const nodes=new Map(),calls=[];
   function node(id) {
-    if(!nodes.has(id))nodes.set(id,{id,value:'',hidden:false,disabled:false,open:false,textContent:'',innerHTML:'',options:[],dataset:{},style:{},attributes:{},listeners:{},classList:{toggle(){}},
+    if(!nodes.has(id))nodes.set(id,{id,value:'',hidden:false,disabled:false,open:false,textContent:'',innerHTML:'',options:[],dataset:{},style:{setProperty(){}},attributes:{},listeners:{},classList:{toggle(){}},
       showModal(){this.open=true;},close(){this.open=false;},focus(){},select(){},scrollIntoView(){},getBoundingClientRect(){return {top:100,bottom:146};},replaceChildren(){},append(){},add(option){this.options.push(option);},querySelector(){return null;},querySelectorAll(){return[];},contains(){return false;},closest(){return null;},addEventListener(name,fn){this.listeners[name]=fn;},setAttribute(key,value){this.attributes[key]=value;},getAttribute(key){return this.attributes[key];},removeAttribute(key){delete this.attributes[key];}});
     return nodes.get(id);
   }

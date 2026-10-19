@@ -90,6 +90,9 @@ func publicQueueServiceRunning() bool {
 	return err == platform.ErrFileLocked
 }
 
+// startQueueDaemon is replaced in tests so the HTTP flow can be exercised without a child process.
+var startQueueDaemon = startPublicQueueDaemon
+
 func startPublicQueueDaemon() error {
 	if publicQueueServiceRunning() {
 		return nil
@@ -193,7 +196,7 @@ func handlePublicQueueService(w http.ResponseWriter, r *http.Request) {
 				cfg.Enabled = true
 				err = SaveQueueBaselineConfig(cfg)
 				if err == nil {
-					err = startPublicQueueDaemon()
+					err = startQueueDaemon()
 				}
 			}
 			queueServiceControlMu.Unlock()

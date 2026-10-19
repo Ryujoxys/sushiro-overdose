@@ -19,6 +19,12 @@ function chartSegments(points) {
 function recordChartPoints() {
   return state.analysisMetric==='wait'?(state.records?.points||[]):(state.records?.called_points||[]);
 }
+// Only overlay today when the main curve spans several days; a single-day curve is already "today".
+function recordTodayPoints(called=state.analysisMetric!=='wait') {
+  const today=state.recordsToday,data=state.records;
+  if(!today||el('analysis-date').value||(called?data?.called_days:data?.days)<2)return [];
+  return (called?today.called_points:today.points)||[];
+}
 function updateRecordInspection(time) {
   const data=state.records,points=recordChartPoints(),index=points.findIndex(point=>point.time===time);
   if(index<0)return;
@@ -27,8 +33,9 @@ function updateRecordInspection(time) {
   const singleDate=!!el('analysis-date').value;
   const label=calledPointLabel(called,singleDate);
   const number=value=>Math.round(value).toLocaleString('zh-CN');
+  const todayCalled=recordTodayPoints(true).find(point=>point.time===time),todayWait=recordTodayPoints(false).find(point=>point.time===time);
   const calledDetail=called?(called.days>=3&&!singleDate?'常见范围 '+Math.floor(called.lower).toLocaleString('zh-CN')+'–'+Math.ceil(called.upper).toLocaleString('zh-CN')+' 号 · ':'')+called.days+' 天记录'+(!singleDate&&called.days<3?'，样本较少':''):'未记录，不补号';
-  el('analysis-readout').innerHTML='<span class="readout-time">'+escapeHTML(recordTimeRange(time))+'</span><div><span>'+escapeHTML(called?singleDate?'当日叫到':called.days>=3?'通常叫到':'记录叫到':'叫号')+'</span><strong>'+escapeHTML(called?(singleDate?'':'约 ')+number(called.median)+' 号':'暂无记录')+'</strong><small>'+escapeHTML(calledDetail)+'</small></div><div><span>'+(singleDate?'当日等待':'常见等待')+'</span><strong>'+escapeHTML(wait?number(wait.median)+' 分钟':'暂无记录')+'</strong><small>'+escapeHTML(wait?wait.days+' 天记录':'未记录，不补零')+'</small></div>';
+  el('analysis-readout').innerHTML='<span class="readout-time">'+escapeHTML(recordTimeRange(time))+'</span><div><span>'+escapeHTML(called?singleDate?'当日叫到':called.days>=3?'通常叫到':'记录叫到':'叫号')+'</span><strong>'+escapeHTML(called?(singleDate?'':'约 ')+number(called.median)+' 号':'暂无记录')+'</strong><small>'+escapeHTML(calledDetail)+'</small>'+(todayCalled?'<small class="readout-today">今天 '+escapeHTML(number(todayCalled.median))+' 号</small>':'')+'</div><div><span>'+(singleDate?'当日等待':'常见等待')+'</span><strong>'+escapeHTML(wait?number(wait.median)+' 分钟':'暂无记录')+'</strong><small>'+escapeHTML(wait?wait.days+' 天记录':'未记录，不补零')+'</small>'+(todayWait?'<small class="readout-today">今天 '+escapeHTML(number(todayWait.median))+' 分钟</small>':'')+'</div>';
   const marker=el('record-chart').querySelector('[data-record-point="'+time+'"]'),tip=el('record-chart').querySelector('.chart-annotation'),svg=el('record-chart').querySelector('svg');
   if(marker&&tip&&svg){
     const x=Number(marker.dataset.x),y=Number(marker.dataset.y),width=svg.viewBox.baseVal.width;
@@ -36,6 +43,7 @@ function updateRecordInspection(time) {
     tip.querySelector('text').textContent=time+' · '+(state.analysisMetric==='wait'?Math.round(wait.median)+' 分钟':Math.round(called.median)+' 号');
   }
   el('analysis-time').value=String(index);
+  el('analysis-time').style.setProperty('--fill',(points.length>1?index/(points.length-1)*100:0)+'%');
   el('analysis-time').setAttribute('aria-valuetext',recordTimeRange(time)+'，'+label+(wait?'，等待 '+Math.round(wait.median)+' 分钟':''));
   el('record-chart').querySelectorAll('[data-record-point]').forEach(node=>{
     const selected=node.dataset.recordPoint===time;
@@ -56,7 +64,8 @@ function renderRecordTable(data,open) {
 let recordChartSignature='';
 function renderRecordChart(data) {
   const called=state.analysisMetric!=='wait',points=recordChartPoints(),id=el('analysis-store').value;
-  const signature=JSON.stringify([id,el('analysis-date').value,called,el('record-chart').clientWidth,data.points,data.called_points,data.history?.included,data.history?.quality_note,data.history_samples]);
+  const todayPoints=recordTodayPoints(called);
+  const signature=JSON.stringify([id,el('analysis-date').value,called,el('record-chart').clientWidth,data.points,data.called_points,todayPoints,data.history?.included,data.history?.quality_note,data.history_samples]);
   if(signature===recordChartSignature)return;
   recordChartSignature=signature;
   const tableOpen=el('record-table').querySelector('details')?.open;
@@ -71,13 +80,14 @@ function renderRecordChart(data) {
     return;
   }
   const enough=points.filter(point=>point.days>=3).length>=3;
-  const max=Math.max(called?100:30,...points.map(point=>point.upper));
+  const max=Math.max(called?100:30,...points.map(point=>point.upper),...todayPoints.map(point=>point.median));
   const width=Math.max(260,Math.min(880,el('record-chart').clientWidth||880)),height=250,left=44,top=20,bottom=210;
   const minute=time=>Number(time.slice(0,2))*60+Number(time.slice(3));
-  const lo=minute(points[0].time),hi=Math.max(lo+30,minute(points.at(-1).time));
+  const times=[...points,...todayPoints].map(point=>minute(point.time));
+  const lo=Math.min(...times),hi=Math.max(lo+30,...times);
   const x=point=>left+(minute(point.time)-lo)/(hi-lo)*(width-left-25),y=value=>bottom-value/max*(bottom-top);
   const segments=chartSegments(points);
-  const path=key=>segments.map(segment=>segment.map((point,i)=>(i?'L':'M')+x(point).toFixed(1)+','+y(point[key]).toFixed(1)).join(' ')).join(' ');
+  const path=(key,parts=segments)=>parts.map(segment=>segment.map((point,i)=>(i?'L':'M')+x(point).toFixed(1)+','+y(point[key]).toFixed(1)).join(' ')).join(' ');
   const band=segments.map(segment=>segment.map((point,i)=>(i?'L':'M')+x(point).toFixed(1)+','+y(point.upper).toFixed(1)).join(' ')+' '+[...segment].reverse().map(point=>'L'+x(point).toFixed(1)+','+y(point.lower).toFixed(1)).join(' ')+' Z').join(' ');
   const grid=[0,.5,1].map(k=>'<line x1="'+left+'" x2="'+(width-20)+'" y1="'+y(k*max)+'" y2="'+y(k*max)+'" class="chart-grid"/><text x="4" y="'+(y(k*max)+4)+'" class="chart-label">'+Math.round(k*max)+'</text>').join('');
   const labels=points.filter((point,i)=>i===0||i===points.length-1||i%Math.max(1,Math.ceil(points.length/(width<500?3:5)))===0).map(point=>'<text text-anchor="middle" x="'+x(point)+'" y="240" class="chart-label">'+escapeHTML(point.time)+'</text>').join('');
@@ -85,8 +95,9 @@ function renderRecordChart(data) {
     const description=recordTimeRange(point.time)+'，'+(called?calledPointLabel(point,!!singleDate):'等待 '+Math.round(point.median)+' 分钟')+'，'+point.days+' 天记录';
     return '<g class="chart-point" data-record-point="'+point.time+'" data-x="'+x(point)+'" data-y="'+y(point.median)+'" role="button" tabindex="0" aria-label="'+escapeHTML(description)+'"><circle cx="'+x(point)+'" cy="'+y(point.median)+'" r="13" fill="transparent"/><circle class="chart-dot" cx="'+x(point)+'" cy="'+y(point.median)+'" r="3.5"/></g>';
   }).join('');
-  const caption=(singleDate?singleDate+' · 每半小时一条记录':called?'历史叫号 / 号，不是今天的实时叫号。':'历史等待 / 分钟，不代表今天。')+(!singleDate&&!enough?' 样本较少。':'');
-  el('record-chart').innerHTML='<p class="caption">'+escapeHTML(caption)+'</p>'+(!called&&data.history_samples&&data.history?.quality_note?'<p class="caption">'+escapeHTML(data.history.quality_note)+'</p>':'')+'<svg viewBox="0 0 '+width+' '+height+'" role="group" aria-label="'+(called?'历史堂食叫号':'历史等待分钟数')+'，可点选时段，缺失时段不连线">'+grid+(called?'<path class="chart-band" d="'+band+'"/>':'<path class="chart-upper" d="'+path('upper')+'"/>')+'<path class="chart-line" d="'+path('median')+'"/>'+markers+labels+'<g class="chart-annotation" pointer-events="none" aria-hidden="true"><rect width="180" height="28" rx="6"/><text x="90" y="19" text-anchor="middle" font-size="13"></text></g></svg><div class="legend'+(called?' called-range':'')+'"><span>'+(called?(singleDate?'当日叫到':enough?'通常叫到（中位数）':'记录叫号（中位数）'):'常见等待（中位数）')+'</span><span>'+(called?'历史范围（20%–80%）':'较长等待（80% 分位）')+'</span></div>';
+  const today=todayPoints.length?'<path class="chart-today" d="'+path('median',chartSegments(todayPoints))+'"/>'+todayPoints.map(point=>'<circle class="chart-today-dot" cx="'+x(point)+'" cy="'+y(point.median)+'" r="2.5"/>').join(''):'';
+  const caption=(singleDate?singleDate+' · 每半小时一条记录':todayPoints.length?(called?'历史叫号 / 号；深色线是今天自己记录到的叫号。':'历史等待 / 分钟；深色线是今天自己记录到的等待。'):called?'历史叫号 / 号，不是今天的实时叫号。':'历史等待 / 分钟，不代表今天。')+(!singleDate&&!enough?' 样本较少。':'');
+  el('record-chart').innerHTML='<p class="caption">'+escapeHTML(caption)+'</p>'+(!called&&data.history_samples&&data.history?.quality_note?'<p class="caption">'+escapeHTML(data.history.quality_note)+'</p>':'')+'<svg viewBox="0 0 '+width+' '+height+'" role="group" aria-label="'+(called?'历史堂食叫号':'历史等待分钟数')+'，可点选时段，缺失时段不连线">'+grid+(called?'<path class="chart-band" d="'+band+'"/>':'<path class="chart-upper" d="'+path('upper')+'"/>')+'<path class="chart-line" d="'+path('median')+'"/>'+today+markers+labels+'<g class="chart-annotation" pointer-events="none" aria-hidden="true"><rect width="180" height="28" rx="6"/><text x="90" y="19" text-anchor="middle" font-size="13"></text></g></svg><div class="legend'+(called?' called-range':'')+'"><span class="legend-median">'+(called?(singleDate?'当日叫到':enough?'通常叫到（中位数）':'记录叫号（中位数）'):'常见等待（中位数）')+'</span><span class="legend-range">'+(called?'历史范围（20%–80%）':'较长等待（80% 分位）')+'</span>'+(todayPoints.length?'<span class="legend-today">今天（本机记录）</span>':'')+'</div>';
   el('analysis-time').max=String(points.length-1);
   const wanted=minute(state.analysisTime||'18:00');
   const chosen=points.reduce((best,point)=>Math.abs(minute(point.time)-wanted)<Math.abs(minute(best.time)-wanted)?point:best,points[0]);
