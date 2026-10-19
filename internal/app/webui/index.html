@@ -25,40 +25,44 @@
   <section id="page-records" aria-labelledby="records-title">
     <div class="page-heading"><div><h1 id="records-title">我的记录</h1><p>选好门店，慢慢积累自己的排队规律。</p></div><button class="button quiet" data-action="refresh">刷新</button></div>
     <div id="records-error" class="notice error" role="alert" hidden></div>
-    <ol id="record-steps" class="steps" aria-label="开始使用" hidden>
-      <li data-step="stores"><b>选常去的店</b><span>不用登录，选几家常去的就够</span></li>
-      <li data-step="start"><b>开始记录</b><span>关掉窗口也会继续</span></li>
-      <li data-step="data"><b>看自己的规律</b><span>第一条记录通常几分钟内出现</span></li>
-    </ol>
-    <div class="record-layout">
-      <div class="card store-card">
-        <div class="section-heading"><h2>记录哪些店</h2><button id="pick-records" class="button secondary small" data-action="pick-records">选择门店</button></div>
+    <section class="card record-layout" aria-labelledby="record-status-title">
+      <ol id="record-steps" class="steps" aria-label="开始使用" hidden>
+        <li data-step="stores"><b>选常去的店</b><span>不用登录，选几家常去的就够</span></li>
+        <li data-step="start"><b>开始记录</b><span>关掉窗口也会继续</span></li>
+        <li data-step="data"><b>看规律</b><span>记录越久越准</span></li>
+      </ol>
+      <div class="record-status">
+        <div><h2 id="record-status-title" class="status-title"><span class="sr-only">记录状态：</span><span id="service-status" class="status">读取中</span></h2><p id="service-summary" class="status-sub">正在读取…</p></div>
+        <button id="record-toggle" class="button primary" data-action="toggle-recording" disabled hidden>开始记录</button>
+      </div>
+      <p id="service-detail" class="notice" role="status" hidden></p>
+      <div class="record-block">
+        <div class="section-heading"><div><h3>记录哪些店</h3><p id="record-overview" class="caption" hidden></p></div><button id="pick-records" class="button secondary small" data-action="pick-records">选择门店</button></div>
         <div id="record-stores" class="store-list"><p class="empty" role="status">正在读取本机记录…</p></div>
       </div>
-      <aside class="card service-card">
-        <div class="section-heading"><h2>本地记录</h2><span id="service-status" class="badge">读取中</span></div>
-        <p id="service-summary" class="muted">选好门店后开始。</p>
-        <div class="record-controls"><label class="field"><span class="sr-only">记录间隔</span><select id="record-interval"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option></select></label><button id="record-toggle" class="button primary" data-action="toggle-recording" disabled>开始记录</button></div>
+      <div id="record-settings" class="record-block record-settings">
+        <label class="field inline-field">记录间隔<select id="record-interval"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option></select></label>
         <label class="check-row"><input id="autostart" type="checkbox">登录电脑后自动记录</label>
         <button id="repair-autostart" class="button secondary small" data-action="repair-autostart" hidden>更新自启动位置</button>
-        <p id="service-detail" class="caption" role="status"></p>
-        <p class="caption">关闭窗口继续记录，电脑休眠时暂停。</p>
-      </aside>
-    </div>
-    <div id="record-overview" class="metrics" aria-live="polite"></div>
+        <p class="caption">关掉窗口也会继续记录，电脑休眠时暂停。</p>
+      </div>
+    </section>
     <section class="card analysis-card" aria-labelledby="analysis-title">
-      <div class="section-heading"><div><h2 id="analysis-title">排队规律</h2><p id="analysis-source" class="muted">正在读取记录…</p></div><div class="export-action"><a id="export-records" class="button secondary small" aria-disabled="true" tabindex="-1">导出当前筛选</a><span id="export-hint" class="caption">只导出个人记录</span></div></div>
+      <div class="section-heading"><div><h2 id="analysis-title">排队规律</h2><p id="analysis-source" class="muted" aria-live="polite">正在读取记录…</p></div></div>
       <div class="filters">
         <div id="analysis-store-picker" class="field store-combobox"><label for="analysis-store-search">门店</label><input id="analysis-store-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="analysis-store-options" placeholder="搜索店名或城市" autocomplete="off"><select id="analysis-store" hidden aria-hidden="true" tabindex="-1"><option value="">选择门店</option></select><div id="analysis-store-popup" class="store-popup" hidden><div id="analysis-store-options" role="listbox" aria-label="图表门店"></div><p id="analysis-store-empty" class="empty" hidden>没有找到，换个关键词试试。</p></div><span id="analysis-store-count" class="sr-only" role="status"></span></div>
-        <label class="field">范围<select id="analysis-days"><option value="all">全部历史</option><option value="7">近 7 天</option><option value="28">近 28 天</option><option value="90">近 90 天</option><option value="365">近一年</option></select></label>
-        <label class="field">日期类型<select id="analysis-date-type"><option value="all">全部日期</option><option value="weekday">工作日</option><option value="weekend">周末（含周五晚）</option><option value="workday">调休工作日</option><option value="holiday">节假日</option></select></label>
-        <label class="field">按日查看<select id="analysis-date"><option value="">全部日期</option></select></label>
+        <label class="field">时间范围<select id="analysis-days"><option value="all">全部时间</option><option value="7">近 7 天</option><option value="28">近 28 天</option><option value="90">近 90 天</option><option value="365">近一年</option></select></label>
+        <label class="field">日期类型<select id="analysis-date-type"><option value="all">全部类型</option><option value="weekday">工作日</option><option value="weekend">周末（含周五晚）</option><option value="workday">调休工作日</option><option value="holiday">节假日</option></select></label>
+        <label class="field">只看一天<select id="analysis-date"><option value="">不选</option></select></label>
+        <label class="history-chip"><input id="include-history" type="checkbox" checked disabled><span>含内置历史</span></label>
       </div>
-      <div class="history-option"><label class="check-row"><input id="include-history" type="checkbox" checked disabled>包含历史数据</label><span id="history-meta" class="caption"></span></div>
+      <p id="history-meta" class="caption filters-note"></p>
+      <div id="analysis-summary" class="analysis-summary" hidden></div>
       <fieldset class="chart-metrics"><legend class="sr-only">曲线内容</legend><label><input type="radio" name="analysis-metric" value="called" checked><span>叫到几号</span></label><label><input type="radio" name="analysis-metric" value="wait"><span>等多久</span></label></fieldset>
-      <div id="record-chart" class="chart" aria-live="polite"></div>
-      <div id="analysis-inspection" class="chart-inspection" hidden><div id="analysis-readout" class="chart-readout" role="status" aria-live="polite"></div><label class="chart-time-field">查看时段<input id="analysis-time" type="range" min="0" max="0" step="1" value="0"></label><p class="caption">堂食最大叫号，不分桌型；以当天门店叫号为准。</p></div>
+      <div id="record-chart" class="chart"></div>
+      <div id="analysis-inspection" class="chart-inspection" hidden><div id="analysis-readout" class="chart-readout" role="status" aria-live="polite"></div><label class="chart-time-field">查看时段<input id="analysis-time" type="range" min="0" max="0" step="1" value="0"></label></div>
       <div id="record-table"></div>
+      <div class="analysis-footer"><a id="export-records" class="button secondary small" aria-disabled="true" tabindex="-1">导出当前筛选</a><span id="export-hint" class="caption">只导出自己的记录</span></div>
     </section>
   </section>
   <section id="page-queue" aria-labelledby="queue-title" hidden>

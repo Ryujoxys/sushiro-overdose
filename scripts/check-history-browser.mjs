@@ -42,6 +42,9 @@ try{
   assert.equal(await page.locator('#analysis-time').inputValue(),'1');
   assert.match(await page.locator('.chart-annotation text').textContent(),new RegExp(secondPoint.time));
   await page.locator('[data-record-point="18:00"]').hover();
+  assert.match(await page.locator('#analysis-summary').innerText(),/最挤/);
+  assert.ok(await page.locator('#record-chart .chart-dot.thin').count()>0,'thin slots not marked');await page.locator('#record-chart .legend-thin').waitFor();
+  assert.equal(await page.locator('#record-chart [data-record-point][tabindex="0"]').count(),1);
   await noOverflow();await shot('history-desktop');
   await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);await noOverflow();await page.locator('[data-record-point]').last().tap();await shot('history-mobile');
   await page.setViewportSize({width:320,height:740});await page.waitForTimeout(200);await noOverflow();
@@ -57,6 +60,9 @@ try{
   assert.ok(await page.locator('#record-table tbody tr').count()>0);
   assert.match(await page.locator('#record-table tbody tr').first().innerText(),/\d+ 天 \/ 1 天/);
   assert.match(await page.locator('#analysis-readout').innerText(),/当日叫到/);
+  assert.equal(await page.locator('#analysis-summary').isHidden(),true,'single day showed a pattern summary');
+  assert.equal(await page.locator('#record-chart .legend').count(),0,'single series kept a legend');
+  assert.doesNotMatch(await page.locator('#record-table tbody').innerText(),/(\d+)–\1 号/,'degenerate range shown');
   await shot('history-single-date');
   await page.locator('#analysis-days').selectOption('7');await page.getByText('这个范围没有记录',{exact:true}).waitFor();
   await page.locator('#analysis-days').selectOption('all');await page.locator('#record-chart svg').waitFor();

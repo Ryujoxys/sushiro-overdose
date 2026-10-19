@@ -18,10 +18,31 @@ function chinaDate(date=new Date()) {
 function chinaHHMM(date=new Date()) { return date.toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}); }
 function serviceLabel(data) {
   if(!data?.config?.enabled)return [data?.model?.sample_count?'已暂停':'未记录',''];
-  if(data.state?.last_error)return ['记录遇到问题','amber'];
-  if(data.state?.paused_reason)return ['暂时避让认证','amber'];
-  if(data.state?.running)return [data.background_running?'后台记录中':'应用内记录中','green'];
-  return [data.background_running?'等待下一次记录':'等待启动','amber'];
+  if(data.state?.last_error)return ['记录出错','amber'];
+  if(data.state?.paused_reason)return ['稍后继续','amber'];
+  if(data.state?.running)return ['记录中','green'];
+  return [data.background_running?'等待下一次记录':'正在启动','amber'];
+}
+// Relative time answers "is it fresh?" without reading the clock.
+function ago(value) {
+  const age=Date.now()-new Date(value).getTime();
+  if(!value||Number.isNaN(age))return clockTime(value);
+  if(age<60000)return '刚刚';
+  if(age<3600000)return Math.floor(age/60000)+' 分钟前';
+  return age<86400000?Math.floor(age/3600000)+' 小时前':clockTime(value);
+}
+function pausedText(reason) {
+  if(/取号/.test(reason))return '正在取号，完成后自动继续记录。';
+  if(/主流程|手机/.test(reason))return '正在连接账号，完成后自动继续记录。';
+  if(/抢号/.test(reason))return '旧版后台还在运行，记录会等它结束后继续。';
+  return reason;
+}
+function storeFreshness(latest,data) {
+  const enabled=!!data?.config?.enabled;
+  if(!latest)return ['',enabled?'等待第一条记录':'还没有记录'];
+  if(!enabled)return ['',clockTime(latest.collected_at)+' 记录'];
+  const limit=Math.max(2*(Number(data.state?.interval_seconds)||Number(data.config.interval_minutes)*60||300),600)*1000;
+  return Date.now()-new Date(latest.collected_at).getTime()>limit?['amber',ago(latest.collected_at)+'，最近没有新记录']:['green',ago(latest.collected_at)+'记录'];
 }
 function ticketOptions(adult,child,table) {
   if(String(adult).trim()===''||String(child).trim()==='')throw new Error('请填写人数，没有儿童请填 0。');
@@ -92,11 +113,17 @@ function recordQuery() {
   if(el('analysis-date').value)q.set('date',el('analysis-date').value);
   return q;
 }
-function recordsInteractionActive() {return !el('analysis-store-popup').hidden||!!document.activeElement?.closest('.analysis-card input, .analysis-card select, .analysis-card [data-record-point], .analysis-card summary, .service-card select');}
+function recordsInteractionActive() {return !el('analysis-store-popup').hidden||!!document.activeElement?.closest('.analysis-card input, .analysis-card select, .analysis-card [data-record-point], .analysis-card summary, #record-interval');}
 async function refreshRecords({background=false}={}) {
   const revision=++state.recordsRevision;
   const query=recordQuery().toString();
-  if(state.recordsQuery!==query){setExportLink('export-records',false,'');state.records=null;recordChartSignature='';el('record-chart').innerHTML='<p class="empty">正在读取记录…</p>';el('record-table').innerHTML='';el('analysis-inspection').hidden=true;}
+  const changed=state.recordsQuery!==query;
+  if(changed){
+    setExportLink('export-records',false,'');state.records=null;recordChartSignature='';
+    // Refetch keeps the frame: the previous chart stays, dimmed, instead of flashing a placeholder.
+    if(state.recordsQuery===undefined)el('record-chart').innerHTML='<p class="empty">正在读取记录…</p>';
+    for(const id of ['record-chart','analysis-inspection','analysis-summary','record-table'])el(id).classList.toggle('stale',true);
+  }
   el('record-chart').setAttribute('aria-busy','true');
   try {
     const [service,records]=await Promise.all([api('/api/queue/service'),api('/api/records?'+query)]);
@@ -105,12 +132,12 @@ async function refreshRecords({background=false}={}) {
     state.service=service;state.records=records;state.recordsToday=today;state.analysisStores=records.available_stores||records.stores||[];
     for(const s of [...(records.available_stores||[]),...(records.stores||[])])state.stores.set(String(s.id),{...state.stores.get(String(s.id)),...s});
     showError('records-error',null);renderRecords();renderService();renderAnalysis();state.recordsQuery=recordQuery().toString();
-  }catch(e){if(revision===state.recordsRevision){showError('records-error',new Error('未更新：'+e.message));if(!state.records){el('record-chart').innerHTML='<p class="empty">记录暂时读取失败，请刷新重试。</p>';el('record-table').innerHTML='';el('analysis-inspection').hidden=true;el('analysis-source').textContent='';}}}
-  finally{if(revision===state.recordsRevision)el('record-chart').removeAttribute('aria-busy');}
+  }catch(e){if(revision===state.recordsRevision){showError('records-error',new Error('未更新：'+e.message));if(!state.records){el('record-chart').innerHTML='<p class="empty">记录暂时读取失败，请刷新重试。</p>';el('record-table').innerHTML='';el('analysis-inspection').hidden=true;el('analysis-summary').hidden=true;el('analysis-source').textContent='';}}}
+  finally{if(revision===state.recordsRevision){el('record-chart').removeAttribute('aria-busy');for(const id of ['record-chart','analysis-inspection','analysis-summary','record-table'])el(id).classList.toggle('stale',false);}}
 }
 function renderSteps() {
   const ids=recordIDs(),samples=Number(state.service.model?.sample_count)||0,steps=el('record-steps');
-  steps.hidden=samples>0;
+  steps.hidden=samples>0||(ids.length>0&&!!state.service.config?.enabled);
   el('record-overview').hidden=samples===0;
   el('pick-records').className='button small '+(ids.length?'secondary':'primary');
   if(steps.hidden)return;
@@ -133,34 +160,39 @@ async function loadTodayRecords(records) {
 function renderRecords() {
   const model=state.service.model||{};
   renderSteps();
-  setMarkup('record-overview',[['已保存',model.sample_count||0,'条'],['覆盖',model.day_count||0,'天'],['已选',recordIDs().length,'家店']].map(([name,n,unit])=>'<div class="metric"><span>'+name+' </span><strong>'+n+'</strong><span>'+unit+'</span></div>').join(''));
+  setMarkup('record-overview','已选 '+recordIDs().length+' 家店 · 共 '+(model.sample_count||0)+' 条 · 记了 '+(model.day_count||0)+' 天');
+  syncAnalysisStore();
+  const charted=el('analysis-store').value;
   const rows=recordIDs().map(id=>{
-    const s=state.records.stores.find(row=>String(row.id)===id),latest=s?.latest;
-    return '<div class="store-row"><div><button class="store-name" data-action="analyze-store" data-id="'+escapeHTML(id)+'">'+escapeHTML(storeName(id))+'</button><p>'+escapeHTML(latest?clockTime(latest.collected_at)+' 记录 · '+s.samples+' 条':'等待第一条记录')+'</p></div><div class="store-values">'+(latest?storeLatestMarkup(latest):'<span class="badge">尚无记录</span>')+'</div></div>';
+    const s=state.records.stores.find(row=>String(row.id)===id),latest=s?.latest,[tone,fresh]=storeFreshness(latest,state.service),current=id===charted;
+    return '<div class="store-row"'+(current?' aria-current="true"':'')+'><div><button class="store-name" data-action="analyze-store" data-id="'+escapeHTML(id)+'">'+escapeHTML(storeName(id))+'<span aria-hidden="true"> ›</span></button><p class="store-fresh"><span class="dot '+tone+'" aria-hidden="true"></span>'+escapeHTML(fresh+(s?' · 共 '+s.samples+' 条':''))+(current?'<span class="tag">图表中</span>':'')+'</p></div>'+(latest?'<p class="store-last">'+escapeHTML(storeLatestText(latest))+'</p>':'')+'</div>';
   });
   setMarkup('record-stores',rows.join('')||'<div class="empty"><strong>先选常去的几家店</strong>不用连接账号，也能开始记录。</div>');
-  syncAnalysisStore();
   el('data-path').textContent=state.service.data_path||'~/.sushiro/';
   setExportLink('backup-records',Number(state.records.total_record_count)>0,'/api/records/export?days=all');
   el('backup-hint').textContent=state.records.total_record_count?'全部 '+state.records.total_record_count+' 条个人记录，不含内置历史和账号凭证。':'还没有个人记录，开始记录后即可备份。';
 }
-function storeLatestMarkup(latest) {
-  if(latest.store_status!=='OPEN')return '<b>非营业时段</b><small>最近一次记录</small>';
-  const called=Number(latest.display_called_no)||0,wait='约 '+(Number(latest.wait_minutes)||0)+' 分钟';
-  return called?'<b>叫到 '+called+' 号</b><small>等'+wait+' · 非实时</small>':'<b>'+wait+'</b><small>最近一次记录 · 非实时</small>';
+// The last snapshot is history, not live; it reads as one small line.
+function storeLatestText(latest) {
+  if(latest.store_status!=='OPEN')return '上次：未营业';
+  const called=Number(latest.display_called_no)||0,wait='等约 '+(Number(latest.wait_minutes)||0)+' 分钟';
+  return '上次：'+(called?'叫到 '+called+' 号 · ':'')+wait;
 }
 function renderService() {
   const data=state.service,cfg=data.config,auto=data.autostart||{},ids=recordIDs(),[label,tone]=serviceLabel(data);
-  el('service-status').textContent=label;el('service-status').className='badge '+tone;
-  el('service-summary').textContent=ids.length?(cfg.enabled?'已开启 '+ids.length+' 家门店记录。':data.model?.sample_count?'已暂停，原有记录会保留。':'已选 '+ids.length+' 家门店，尚未开始。'):'先选常去的店，再开始记录。';
+  el('service-status').textContent=label;el('service-status').className='status '+tone;
+  el('service-summary').textContent=!ids.length?'还没选门店。':cfg.enabled?'每 '+(cfg.interval_minutes||5)+' 分钟记一次 · '+(data.state.last_at?'上次记录：'+ago(data.state.last_at):'等待第一条记录'):data.model?.sample_count?'已暂停，已有的记录都会保留。':'已选 '+ids.length+' 家店，尚未开始。';
   const interval=el('record-interval');
   if(![...interval.options].some(o=>Number(o.value)===cfg.interval_minutes))interval.add(new Option('每 '+cfg.interval_minutes+' 分钟',cfg.interval_minutes));
   if(document.activeElement!==interval)interval.value=cfg.interval_minutes||5;
-  el('record-toggle').textContent=cfg.enabled?'暂停记录':'开始记录';el('record-toggle').disabled=!ids.length||state.busy.has('service');
+  el('record-toggle').textContent=cfg.enabled?'暂停记录':'开始记录';el('record-toggle').className='button '+(cfg.enabled?'secondary':'primary');el('record-toggle').hidden=!ids.length;el('record-toggle').disabled=!ids.length||state.busy.has('service');
   el('autostart').checked=!!auto.enabled;el('autostart').disabled=auto.supported===false||(!ids.length&&!auto.enabled)||state.busy.has('service');
   el('autostart').title=auto.error||'单独开启，不会随开始记录自动启用';
   el('repair-autostart').hidden=!auto.needs_update;el('repair-autostart').disabled=state.busy.has('service');
-  el('service-detail').textContent=data.state.last_error||(cfg.enabled?data.state.paused_reason:'')||(auto.needs_update?'程序位置已变化，请更新自启动位置。':'')||auto.error||('最近记录：'+clockTime(data.state.last_at)+(data.background_running?'。可以关闭界面。':cfg.enabled?'。后台未就绪时，请保持界面运行。':''));
+  el('record-settings').hidden=!ids.length&&!auto.enabled&&!auto.needs_update;
+  // Only exceptions get a line here; the normal state is already in the status line.
+  const detail=data.state.last_error?'上次没记上：'+data.state.last_error+'。会自动重试。':(cfg.enabled&&data.state.paused_reason?pausedText(data.state.paused_reason):'')||(auto.needs_update?'程序位置变了，请点“更新自启动位置”。':'')||auto.error||(cfg.enabled&&!data.background_running?'后台没有运行，请先保持这个窗口打开。':'');
+  el('service-detail').textContent=detail;el('service-detail').hidden=!detail;el('service-detail').className='notice'+(data.state.last_error?' warn':'');
 }
 function setExportLink(id,enabled,path) {
   const link=el(id);link.setAttribute('aria-disabled',String(!enabled));
@@ -170,17 +202,28 @@ function renderAnalysis() {
   const data=state.records,id=el('analysis-store').value,called=state.analysisMetric!=='wait';
   if(!data)return;
   setExportLink('export-records',Number(data.export_record_count)>0,'/api/records/export?'+recordQuery());
-  el('export-hint').textContent=data.export_record_count?data.export_record_count+' 条个人记录':'当前筛选下没有个人记录';
+  el('export-hint').textContent=data.export_record_count?data.export_record_count+' 条自己的记录，不含内置历史':'当前筛选下没有自己的记录';
   el('include-history').checked=!!data.history?.included;
   el('include-history').disabled=state.busy.has('history');
-  el('history-meta').textContent=data.history?.error||(data.history?.cutoff_at?'内置历史 '+data.history.first_at.slice(0,10)+' 至 '+data.history.cutoff_at.slice(0,10)+' · 不会自动更新':'未附带历史数据');
+  const span=data.history?.cutoff_at?data.history.first_at.slice(0,10)+' 至 '+data.history.cutoff_at.slice(0,10):'';
+  el('history-meta').textContent=data.history?.error||(!span?'未附带内置历史':data.history.included?'内置历史：'+span+' 的公开数据，不再更新，不会导出。':'已关闭内置历史（'+span+'），只看自己的记录。');
   const dateSelect=el('analysis-date'),selectedDate=dateSelect.value;
   const dates=[...new Set([...(data.dates||[]),...(selectedDate?[selectedDate]:[])])].sort().reverse();
-  setMarkup('analysis-date','<option value="">全部日期</option>'+dates.map(date=>'<option value="'+escapeHTML(date)+'">'+escapeHTML(date)+'</option>').join(''));
+  setMarkup('analysis-date','<option value="">不选</option>'+dates.map(date=>'<option value="'+escapeHTML(date)+'">'+escapeHTML(date)+'</option>').join(''));
   dateSelect.value=selectedDate;
-  const own=called?data.called_local_samples:data.local_samples,history=called?data.called_history_samples:data.history_samples,days=called?data.called_days:data.days;
-  el('analysis-source').textContent=id?'本机 '+(own||0)+' · 历史 '+(history||0)+' 个时段样本 · '+(days||0)+' 天':'选择门店查看。';
+  el('analysis-source').textContent=analysisSourceText(data,id,called,selectedDate);
+  const summary=id&&!selectedDate?recordSummary(data):null;
+  el('analysis-summary').hidden=!summary;
+  setMarkup('analysis-summary',summary?'<p>'+summary.text+'</p>'+(summary.note?'<p class="caption">'+escapeHTML(summary.note)+'</p>':''):'');
   renderRecordChart(data);
+}
+// Says how much data the chart rests on, and how much of it is the user's own.
+function analysisSourceText(data,id,called,date) {
+  if(!id)return '选择门店查看。';
+  const own=Number(called?data.called_local_samples:data.local_samples)||0,history=Number(called?data.called_history_samples:data.history_samples)||0,days=Number(called?data.called_days:data.days)||0;
+  if(!own&&!history)return '这个筛选下还没有数据';
+  const pct=Math.round(own/(own+history)*100);
+  return (date?date+' 一天':days+' 天')+'的数据 · '+(!history?'全是自己的记录':!own?'全部来自内置历史':pct<1?'自己的记录不到 1%':'自己的记录占 '+pct+'%')+(!date&&days<3?' · 数据较少':'');
 }
 async function changeHistory() {
   const included=el('include-history').checked;

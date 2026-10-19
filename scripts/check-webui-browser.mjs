@@ -65,6 +65,7 @@ try{
   await page.goto(origin);await page.getByText('先选常去的几家店').waitFor();
   assert.match(await page.locator('#record-steps [aria-current="step"]').innerText(),/选常去的店/);
   assert.equal(await page.locator('#record-overview').isHidden(),true,'all-zero metrics shown to a new user');
+  assert.equal(await page.locator('#record-toggle').isHidden(),true,'disabled start button shown to a new user');
   assert.equal(requests.some(r=>r.method==='POST'),false);
   await page.locator('#record-chart svg').waitFor();
   assert.equal(await page.locator('#export-records').getAttribute('aria-disabled'),'true');
@@ -80,6 +81,9 @@ try{
   await page.getByRole('radio',{name:'叫到几号',exact:true}).check();
   await page.locator('[data-record-point="18:00"]').hover();
   assert.match(await page.locator('#analysis-readout').innerText(),/600 号/);
+  assert.equal(await page.locator('.chart-annotation text').textContent(),'18:00 · 约 600 号');
+  assert.equal(await page.locator('#record-chart [data-record-point][tabindex="0"]').count(),1,'chart added more than one tab stop');
+  assert.match(await page.locator('#analysis-summary').innerText(),/18:30–20:30 最挤/);
   await page.getByRole('radio',{name:'等多久',exact:true}).check();
   assert.match(await page.locator('#analysis-readout').innerText(),/600 号/);
   await page.getByRole('radio',{name:'叫到几号',exact:true}).check();
@@ -108,6 +112,7 @@ try{
   await page.locator('#include-history').check();await page.locator('#record-chart svg').waitFor();
   await page.locator('#record-chart .legend-today').waitFor();assert.equal(await page.locator('#record-chart .chart-today').count(),1);
   await page.locator('[data-record-point="17:00"]').hover();assert.match(await page.locator('#analysis-readout').innerText(),/今天 500 号/);
+  assert.equal(await page.locator('#service-status').innerText(),'记录中');assert.match(await page.locator('#record-stores').innerText(),/图表中/);
   assert.match(await page.locator('#record-stores').innerText(),/叫到 356 号/);assert.match(await page.locator('#record-stores').innerText(),/约 50 分钟/);
   await noOverflow();await shot('records-desktop');
   await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);await noOverflow();await shot('records-mobile');

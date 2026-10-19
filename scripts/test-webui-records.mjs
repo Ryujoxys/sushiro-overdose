@@ -57,6 +57,27 @@ function fixture() {
  assert.equal(f.run("calledPointLabel({median:123,days:1},true)"),'当日叫到 123 号');
  assert.equal(f.run("calledPointLabel(null)"),'暂无叫号记录');
  assert.equal(f.run("chartSegments([{time:'18:00'},{time:'18:30'},{time:'19:30'}]).length"),2,'missing called half-hour was interpolated');
+ assert.equal(f.run("waitWords(165)"),'约 2 小时 45 分');
+ assert.equal(f.run("waitWords(2)"),'基本不用等');
+ assert.equal(f.run("waitWords(0,false)"),'不用等');
+ assert.equal(f.run("waitWords(59)"),'约 1 小时');
+ assert.equal(f.run("recordAxisTicks(2017,true).join('/')"),'0/500/1000/1500/2000/2500');
+ assert.equal(f.run("recordAxisTicks(180,false).join('/')"),'0/60/120/180');
+ assert.equal(f.run("recordAxisTicks(30,false).join('/')"),'0/10/20/30');
+ assert.equal(f.run("recordHourTicks(630,1290,856).map(recordClock).join(' ')"),'12:00 14:00 16:00 18:00 20:00');
+ assert.equal(f.run("recordHourTicks(630,1290,258).map(recordClock).join(' ')"),'12:00 16:00 20:00');
+ assert.equal(f.run("recordThinDays([{days:76},{days:20}],false)"),38);
+ assert.equal(f.run("recordThinDays([{days:76}],true)"),0);
+ assert.equal(f.run("recordSummary({days:8,points:[20,25,35,48,58,62,75,70,60,42,30,25].map((median,i)=>({time:String(16+Math.floor(i/2)).padStart(2,'0')+(i%2?':30':':00'),median,upper:median+15,days:8}))}).text"),'<b>18:30–20:30</b> 最挤，通常要等 1 小时以上。');
+ assert.equal(f.run("recordSummary({days:9,points:[{time:'12:00',median:60,days:9},{time:'12:30',median:70,days:9},{time:'13:30',median:75,days:9},{time:'14:00',median:20,days:9}]}).text"),'<b>13:30–14:00</b> 最挤，通常要等约 1 小时 15 分。','summary bridged a missing half-hour');
+ assert.match(f.run("recordSummary({days:72,points:[{time:'12:00',median:0,days:72},{time:'12:30',median:0,days:72},{time:'13:00',median:0,days:72},{time:'18:00',median:165,days:11},{time:'18:30',median:160,days:12}]}).note"),/只有 11 天/);
+ assert.equal(f.run("recordSummary({days:2,points:[{time:'18:00',median:60,days:2}]}).text"),'等待记录还少（2 天），还看不出哪段时间挤。');
+ assert.equal(f.run("recordSummary({points:[],called_points:[]})"),null);
+ assert.equal(f.run("storeLatestText({store_status:'OPEN',display_called_no:356,wait_minutes:35})"),'上次：叫到 356 号 · 等约 35 分钟');
+ assert.equal(f.run("storeLatestText({store_status:'CLOSED'})"),'上次：未营业');
+ assert.equal(f.run("serviceLabel({config:{enabled:true},state:{running:true},background_running:true}).join('|')"),'记录中|green');
+ assert.equal(f.run("analysisSourceText({called_local_samples:0,called_history_samples:1155,called_days:76},'1',true,'')"),'76 天的数据 · 全部来自内置历史');
+ assert.equal(f.run("analysisSourceText({local_samples:230,history_samples:200,days:8},'1',false,'')"),'8 天的数据 · 自己的记录占 53%');
 }
 {
  const f=fixture();
@@ -220,6 +241,8 @@ function fixture() {
  f.run("state.service.config.store_ids=[];state.service.state.store_ids=[];state.service.autostart={enabled:true,supported:true};renderService();");
  assert.equal(f.node('autostart').disabled,false,'empty selection prevented disabling existing autostart');
  assert.equal(f.node('record-toggle').disabled,true,'empty selection allowed starting collection');
+ assert.equal(f.node('record-toggle').hidden,true,'start button shown before any store was chosen');
+ assert.equal(f.node('service-detail').hidden,true,'normal state showed an exception line');
  f.run('state.service.autostart.enabled=false;renderService();');
  assert.equal(f.node('autostart').disabled,true,'empty selection allowed enabling autostart');
  f.run("openStorePicker('records')");
