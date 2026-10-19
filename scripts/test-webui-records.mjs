@@ -73,6 +73,12 @@ function fixture() {
  assert.match(f.run("recordSummary({days:72,points:[{time:'12:00',median:0,days:72},{time:'12:30',median:0,days:72},{time:'13:00',median:0,days:72},{time:'18:00',median:165,days:11},{time:'18:30',median:160,days:12}]}).note"),/只有 11 天/);
  assert.equal(f.run("recordSummary({days:2,points:[{time:'18:00',median:60,days:2}]}).text"),'等待记录还少（2 天），还看不出哪段时间挤。');
  assert.equal(f.run("recordSummary({points:[],called_points:[]})"),null);
+ // The dinner peak has calls on 60 days but almost no published wait: the sentence must not crown lunch without saying so.
+ const blind="{days:60,points:['11:00','11:30','12:00','12:30','13:00','13:30','17:00','17:30','18:00','18:30','19:00','19:30'].map((time,i)=>({time,median:[10,40,60,70,40,10,30,0,0,0,30,10][i],days:[60,60,60,60,60,60,60,1,1,2,60,60][i]})),called_points:['11:00','11:30','12:00','12:30','13:00','13:30','17:00','17:30','18:00','18:30','19:00','19:30'].map((time,i)=>({time,median:100+i*50,days:60}))}";
+ assert.match(f.run("recordSummary("+blind+").text"),/^有等待记录的时段里，<b>12:00–13:00<\/b> 最挤/);
+ assert.match(f.run("recordSummary("+blind+").note"),/17:30–19:00 多数日子没有等待记录/);
+ assert.doesNotMatch(f.run("recordSummary({days:8,points:[20,25,35,48,58,62,75,70,60,42,30,25].map((median,i)=>({time:String(16+Math.floor(i/2)).padStart(2,'0')+(i%2?':30':':00'),median,upper:median+15,days:8})),called_points:[]}).text"),/有等待记录/);
+ assert.match(f.run("recordReadoutItem(false,{median:37.5,upper:50,days:10},{median:30},false,3)"),/约 40 分钟.*今天 30 分钟（比平时少 10 分钟）/,'today delta ignored the rounded usual value');
  assert.equal(f.run("storeLatestText({store_status:'OPEN',display_called_no:356,wait_minutes:35})"),'上次：叫到 356 号 · 等约 35 分钟');
  assert.equal(f.run("storeLatestText({store_status:'CLOSED'})"),'上次：未营业');
  assert.equal(f.run("serviceLabel({config:{enabled:true},state:{running:true},background_running:true}).join('|')"),'记录中|green');

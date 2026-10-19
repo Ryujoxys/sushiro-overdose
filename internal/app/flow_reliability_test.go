@@ -189,7 +189,8 @@ func TestReservationsProbeRejectsUnknownSuccessBody(t *testing.T) {
 
 func TestPublicCollectionEvaluatesAlertsAfterTicketIssuedWithoutAuth(t *testing.T) {
 	reliabilityHome(t)
-	if err := SaveNetTicketPlan(NetTicketPlan{Status: "success", FiredDate: time.Now().Format("2006-01-02")}); err != nil {
+	// "Today" is the store's date (UTC+8), not the test machine's; they differ for 8 hours a day.
+	if err := SaveNetTicketPlan(NetTicketPlan{Status: "success", FiredDate: time.Now().In(SushiroTimezone).Format("2006-01-02")}); err != nil {
 		t.Fatal(err)
 	}
 	if !netTicketIssuedToday(time.Now()) {

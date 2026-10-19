@@ -115,6 +115,18 @@ try{
   assert.equal(await page.locator('#service-status').innerText(),'记录中');assert.match(await page.locator('#service-summary').innerText(),/每 5 分钟记一次 · 上次记录：刚刚/);assert.match(await page.locator('#record-stores').innerText(),/图表中/);
   assert.match(await page.locator('#record-stores').innerText(),/叫到 356 号/);assert.match(await page.locator('#record-stores').innerText(),/约 50 分钟/);
   await noOverflow();await shot('records-desktop');
+  // A mouse click on the chart is not editing: the next background tick still refreshes everything.
+  await page.locator('[data-record-point="18:00"]').click();
+  let recordReads=requests.filter(r=>r.key==='/api/records').length;
+  await page.evaluate(()=>refreshVisiblePage());
+  await page.waitForTimeout(300);assert.ok(requests.filter(r=>r.key==='/api/records').length>recordReads,'chart click froze background refresh');
+  // While the store search is open, only the recording status refreshes, and it does not go stale.
+  await page.getByRole('combobox',{name:'门店',exact:true}).focus();await page.locator('#analysis-store-popup').waitFor();
+  recordReads=requests.filter(r=>r.key==='/api/records').length;enabled=false;
+  await page.evaluate(()=>refreshVisiblePage());await page.locator('#service-status',{hasText:'已暂停'}).waitFor();
+  assert.equal(requests.filter(r=>r.key==='/api/records').length,recordReads,'background refresh rebuilt the chart during interaction');
+  assert.equal(await page.locator('#analysis-store-popup').isVisible(),true);
+  enabled=true;await page.keyboard.press('Escape');await page.locator('#analysis-store-search').blur();await page.evaluate(()=>refreshVisiblePage());await page.locator('#service-status',{hasText:'记录中'}).waitFor();
   await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);await noOverflow();await shot('records-mobile');
   await page.setViewportSize({width:320,height:740});await noOverflow();
   await page.setViewportSize({width:1280,height:960});

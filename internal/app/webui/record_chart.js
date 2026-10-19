@@ -49,12 +49,16 @@ function recordSummary(data) {
   const ok=points.filter(point=>point.days>=3);
   if(ok.length<3)return {text:'等待记录还少（'+(data.days||0)+' 天），还看不出哪段时间挤。',note:''};
   const thin=recordThinDays(ok,false),peak=ok.reduce((best,point)=>point.median>best.median?point:best);
-  if(peak.median<15)return {text:peak.median<5?'全天通常不用等。':'全天通常不用久等，最多'+waitWords(peak.median)+'。',note:''};
+  const label=run=>run[0].time+'–'+recordClock(recordMinute(run.at(-1).time)+30),span=run=>escapeHTML(label(run));
+  const waitDays=new Map(points.map(point=>[point.time,point.days])),calls=data.called_points||[],callThin=recordThinDays(calls,false);
+  const blind=chartSegments(calls.filter(c=>c.days>=callThin&&(waitDays.get(c.time)||0)<3&&c.time>ok[0].time&&c.time<ok.at(-1).time));
+  const prefix=blind.length?'有等待记录的时段里，':'',blindNote=blind.length?blind.map(label).join('、')+' 多数日子没有等待记录，没算进来，可能更挤，可以看叫号曲线。':'';
+  if(peak.median<15)return {text:(prefix||'全天')+(peak.median<5?'通常不用等。':'通常不用久等，最多'+waitWords(peak.median)+'。'),note:blindNote};
   const segments=chartSegments(ok),segment=segments.find(s=>s.includes(peak));
   let i=segment.indexOf(peak),j=i;
   while(i>0&&segment[i-1].median>=peak.median*.8)i--;
   while(j<segment.length-1&&segment[j+1].median>=peak.median*.8)j++;
-  const busy=segment.slice(i,j+1),span=run=>escapeHTML(run[0].time+'–'+recordClock(recordMinute(run.at(-1).time)+30));
+  const busy=segment.slice(i,j+1);
   let quiet=null;
   for(const s of segments){
     let run=[];
@@ -66,10 +70,10 @@ function recordSummary(data) {
   }
   const low=Math.min(...busy.map(p=>p.median)),high=Math.max(...busy.map(p=>p.median)),a=Math.round(low/5)*5,b=Math.round(high/5)*5;
   const wait=a===b?waitWords(low):low>=60?' '+Math.floor(low/60)+' 小时以上':' '+a+'–'+b+' 分钟';
-  let text='<b>'+span(busy)+'</b> 最挤，通常要等'+wait;
+  let text=prefix+'<b>'+span(busy)+'</b> 最挤，通常要等'+wait;
   if(quiet)text+='；<b>'+span(quiet)+'</b> 通常'+(Math.max(...quiet.map(p=>p.median))<5?'不用等':'不到 10 分钟');
   const fewest=Math.min(...busy.map(p=>p.days));
-  return {text:text+'。',note:fewest<thin?'最挤的时段只有 '+fewest+' 天有等待记录，仅供参考。':''};
+  return {text:text+'。',note:(fewest<thin?'最挤的时段只有 '+fewest+' 天有等待记录，仅供参考。':'')+blindNote};
 }
 function recordChartPoints() {
   return state.analysisMetric==='wait'?(state.records?.points||[]):(state.records?.called_points||[]);
@@ -97,7 +101,7 @@ function recordReadoutItem(called,point,today,singleDate,thin) {
   }
   let delta='';
   if(today){
-    const diff=Math.round(today.median-point.median);
+    const diff=Math.round(today.median)-(called?Math.round(point.median):Math.round(point.median/5)*5);
     delta=called?(diff?'（比平时'+(diff>0?'多 ':'少 ')+Math.abs(diff)+' 号）':'（和平时一样）'):(Math.abs(diff)<5?'（和平时差不多）':'（比平时'+(diff>0?'多 ':'少 ')+Math.abs(diff)+' 分钟）');
   }
   return '<div class="readout-item"><span class="readout-label">'+label+'</span><strong>'+escapeHTML(value)+'</strong>'+(details.length?'<small>'+escapeHTML(details.join(' · '))+'</small>':'')+(todayText?'<small class="readout-today">'+escapeHTML(todayText+delta)+'</small>':'')+'</div>';
@@ -193,8 +197,8 @@ function renderRecordChart(data) {
   const todayAt=new Map(todayPoints.map(point=>[point.time,point])),last=todayPoints.at(-1);
   let today='';
   if(last){
-    const lx=x(last),ly=y(last.median),near=lx>right-40;
-    today='<path class="chart-today" d="'+path('median',chartSegments(todayPoints))+'"/>'+chartSegments(todayPoints).filter(s=>s.length===1&&s[0]!==last).map(s=>'<circle class="chart-today-dot" cx="'+f(x(s[0]))+'" cy="'+f(y(s[0].median))+'" r="3"/>').join('')+'<circle class="chart-today-dot" cx="'+f(lx)+'" cy="'+f(ly)+'" r="4"/><text class="chart-label chart-direct" x="'+f(near?lx-8:lx+8)+'" y="'+f(ly-8)+'" text-anchor="'+(near?'end':'start')+'">今天</text>';
+    const lx=x(last),ly=y(last.median),near=lx>right-40,ty=ly-20<top?ly+18:ly-8;
+    today='<path class="chart-today" d="'+path('median',chartSegments(todayPoints))+'"/>'+chartSegments(todayPoints).filter(s=>s.length===1&&s[0]!==last).map(s=>'<circle class="chart-today-dot" cx="'+f(x(s[0]))+'" cy="'+f(y(s[0].median))+'" r="3"/>').join('')+'<circle class="chart-today-dot" cx="'+f(lx)+'" cy="'+f(ly)+'" r="4"/><text class="chart-label chart-direct" x="'+f(near?lx-8:lx+8)+'" y="'+f(ty)+'" text-anchor="'+(near?'end':'start')+'">今天</text>';
   }
   const focus='<line class="chart-crosshair" x1="-10" x2="-10" y1="'+top+'" y2="'+bottom+'"/><circle class="chart-selected" cx="-10" cy="-10" r="5"/>'+(last?'<circle class="chart-selected-today" cx="-10" cy="-10" r="4" display="none"/>':'');
   const xs=points.map(x);

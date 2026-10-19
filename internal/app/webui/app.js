@@ -113,8 +113,14 @@ function recordQuery() {
   if(el('analysis-date').value)q.set('date',el('analysis-date').value);
   return q;
 }
-function recordsInteractionActive() {return !el('analysis-store-popup').hidden||!!document.activeElement?.closest('.analysis-card input, .analysis-card select, .analysis-card [data-record-point], .analysis-card summary, #record-interval');}
+function recordsInteractionActive() {return !el('analysis-store-popup').hidden||!!document.activeElement?.closest('.analysis-card input, .analysis-card select, .analysis-card [data-record-point]:focus-visible, .analysis-card summary, #record-interval');}
+// While the user is working in the chart or filters, a background tick refreshes only the
+// recording status, so it never goes stale and nothing moves under the pointer or focus.
+async function refreshServiceOnly() {
+  try{state.service=await api('/api/queue/service');renderService();}catch{}
+}
 async function refreshRecords({background=false}={}) {
+  if(background&&recordsInteractionActive())return refreshServiceOnly();
   const revision=++state.recordsRevision;
   const query=recordQuery().toString();
   const changed=state.recordsQuery!==query;
@@ -128,7 +134,8 @@ async function refreshRecords({background=false}={}) {
   try {
     const [service,records]=await Promise.all([api('/api/queue/service'),api('/api/records?'+query)]);
     const today=await loadTodayRecords(records);
-    if(revision!==state.recordsRevision||(background&&recordsInteractionActive()))return;
+    if(revision!==state.recordsRevision)return;
+    if(background&&recordsInteractionActive()){state.service=service;renderService();return;}
     state.service=service;state.records=records;state.recordsToday=today;state.analysisStores=records.available_stores||records.stores||[];
     for(const s of [...(records.available_stores||[]),...(records.stores||[])])state.stores.set(String(s.id),{...state.stores.get(String(s.id)),...s});
     showError('records-error',null);renderRecords();renderService();renderAnalysis();state.recordsQuery=recordQuery().toString();
@@ -167,7 +174,9 @@ function renderRecords() {
     const s=state.records.stores.find(row=>String(row.id)===id),latest=s?.latest,[tone,fresh]=storeFreshness(latest,state.service),current=id===charted;
     return '<div class="store-row"'+(current?' aria-current="true"':'')+'><div><button class="store-name" data-action="analyze-store" data-id="'+escapeHTML(id)+'">'+escapeHTML(storeName(id))+'<span aria-hidden="true"> ›</span></button><p class="store-fresh"><span class="dot '+tone+'" aria-hidden="true"></span>'+escapeHTML(fresh+(s?' · 共 '+s.samples+' 条':''))+(current?'<span class="tag">图表中</span>':'')+'</p></div>'+(latest?'<p class="store-last">'+escapeHTML(storeLatestText(latest))+'</p>':'')+'</div>';
   });
+  const focused=document.activeElement?.closest?.('#record-stores .store-name')?.dataset.id;
   setMarkup('record-stores',rows.join('')||'<div class="empty"><strong>先选常去的几家店</strong>不用连接账号，也能开始记录。</div>');
+  if(focused&&document.activeElement===document.body)[...el('record-stores').querySelectorAll('.store-name')].find(node=>node.dataset.id===focused)?.focus({preventScroll:true});
   el('data-path').textContent=state.service.data_path||'~/.sushiro/';
   setExportLink('backup-records',Number(state.records.total_record_count)>0,'/api/records/export?days=all');
   el('backup-hint').textContent=state.records.total_record_count?'全部 '+state.records.total_record_count+' 条个人记录，不含内置历史和账号凭证。':'还没有个人记录，开始记录后即可备份。';
@@ -191,8 +200,9 @@ function renderService() {
   el('repair-autostart').hidden=!auto.needs_update;el('repair-autostart').disabled=state.busy.has('service');
   el('record-settings').hidden=!ids.length&&!auto.enabled&&!auto.needs_update;
   // Only exceptions get a line here; the normal state is already in the status line.
-  const detail=data.state.last_error?'上次没记上：'+data.state.last_error+'。会自动重试。':(cfg.enabled&&data.state.paused_reason?pausedText(data.state.paused_reason):'')||(auto.needs_update?'程序位置变了，请点“更新自启动位置”。':'')||auto.error||(cfg.enabled&&!data.background_running?'后台没有运行，请先保持这个窗口打开。':'');
-  el('service-detail').textContent=detail;el('service-detail').hidden=!detail;el('service-detail').className='notice'+(data.state.last_error?' warn':'');
+  const err=cfg.enabled?data.state.last_error:'';
+  const detail=err?'上次没记上：'+err+'。会自动重试。':(cfg.enabled&&data.state.paused_reason?pausedText(data.state.paused_reason):'')||(auto.needs_update?'程序位置变了，请点“更新自启动位置”。':'')||auto.error||(cfg.enabled&&!data.background_running?'后台没有运行，请先保持这个窗口打开。':'');
+  el('service-detail').textContent=detail;el('service-detail').hidden=!detail;el('service-detail').className='notice'+(err?' warn':'');
 }
 function setExportLink(id,enabled,path) {
   const link=el(id);link.setAttribute('aria-disabled',String(!enabled));
@@ -429,7 +439,7 @@ function init() {
     refresh:refreshRecords,'pick-records':()=>openStorePicker('records'),'pick-queue':()=>openStorePicker('queue'),
     'retry-stores':searchStores,'save-stores':savePickedStores,'close-store':closeStorePicker,'remove-picked-store':button=>removePickedStore(button.dataset.id),
     'toggle-recording':toggleRecording,'check-update':checkUpdate,'restore-records':restoreRecords,'repair-autostart':repairAutostart,'quit-app':quitApp,'refresh-live':loadLive,
-    'analyze-store':button=>{selectAnalysisStore(button.dataset.id);el('analysis-title').scrollIntoView({block:'start'});},
+    'analyze-store':button=>{selectAnalysisStore(button.dataset.id);el('analysis-title').scrollIntoView({block:'start'});el('analysis-title').focus({preventScroll:true});},
     'live-history':()=>{const id=state.selectedStore;location.hash='#records';selectAnalysisStore(id).then(()=>el('analysis-title').scrollIntoView({block:'start'}));},
     'review-ticket':reviewTicket,'confirm-ticket':confirmTicket,'close-ticket':()=>{if(!state.busy.has('ticket'))el('ticket-dialog').close();},
     'query-ticket':queryTicket,'cancel-ticket':cancelTicket,'connect-account':()=>openAuth('settings'),'start-auth':startAuth,'stop-auth':stopAuth,'verify-auth':verifyAuth,'close-auth':closeAuth,'import-auth':importAuth,'auth-continue':finishAuth,
@@ -461,5 +471,5 @@ function init() {
 function refreshVisiblePage() {
   if(document.hidden||state.quitting||state.busy.size||document.querySelector('dialog[open]'))return;
   if(state.page==='queue'){loadLive();refreshTicketForecast();}
-  if(state.page==='records'&&!recordsInteractionActive())refreshRecords({background:true});
+  if(state.page==='records')refreshRecords({background:true});
 }
