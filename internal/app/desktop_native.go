@@ -74,6 +74,13 @@ func runDesktop() error {
 			Filters: []wailsruntime.FileFilter{{DisplayName: "导出文件", Pattern: "*" + filepath.Ext(name)}},
 		})
 	}
+	bridge.openURL = func(url string) {
+		select {
+		case <-ready:
+			wailsruntime.BrowserOpenURL(nativeContext, url)
+		case <-ctx.Done():
+		}
+	}
 	appMenu := menu.NewMenu()
 	if runtime.GOOS == "darwin" {
 		appMenu.Append(menu.AppMenu())
@@ -104,9 +111,10 @@ func runDesktop() error {
 		Menu:              appMenu,
 		Windows: &windows.Options{
 			WebviewUserDataPath: filepath.Join(core.AppDirPath(), "webview"),
-			Theme:               windows.Light, Messages: messages, WindowClassName: "SushiroDesktop",
+			Theme:               windows.SystemDefault, Messages: messages, WindowClassName: "SushiroDesktop",
 		},
-		Mac: &mac.Options{Appearance: mac.NSAppearanceNameAqua, About: &mac.AboutInfo{
+		// Window chrome follows the system appearance, matching the page's prefers-color-scheme.
+		Mac: &mac.Options{About: &mac.AboutInfo{
 			Title: "寿司郎 Overdose v" + Version, Message: Edition + "\n本地记录排队规律，需要时手动取号。",
 		}},
 		OnStartup: func(wctx context.Context) {

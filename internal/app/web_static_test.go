@@ -26,19 +26,6 @@ func extractEmbeddedScript(t *testing.T) string {
 	return indexHTML[i+len(open) : j]
 }
 
-func extractBetween(t *testing.T, s, start, end string) string {
-	t.Helper()
-	i := strings.Index(s, start)
-	if i < 0 {
-		t.Fatalf("找不到片段起点：%s", start)
-	}
-	j := strings.Index(s[i:], end)
-	if j < 0 {
-		t.Fatalf("找不到片段终点：%s", end)
-	}
-	return s[i : i+j]
-}
-
 // satisfiedDOMIDs 收集所有"存在的" id：模板里的 id="X"，以及 JS 里动态创建的 .id='X'。
 func satisfiedDOMIDs() map[string]bool {
 	ids := map[string]bool{}

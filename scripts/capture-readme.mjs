@@ -18,6 +18,8 @@ try {
     return route.continue();
   });
   await page.goto(origin);
+  // Element screenshots scroll the page; keep the sticky header from covering the captured card.
+  await page.addStyleTag({content:'.header{position:static!important}'});
   await page.locator('#record-chart svg').waitFor();
   await page.locator('[data-record-point="18:00"]').focus();
   await page.locator('.analysis-card').screenshot({path:path.join(output.pathname,'records.png'),animations:'disabled'});

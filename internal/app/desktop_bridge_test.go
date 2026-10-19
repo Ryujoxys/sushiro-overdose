@@ -188,3 +188,29 @@ func TestDesktopCloseWaitsForExplicitWrite(t *testing.T) {
 		t.Fatal("accepted a write after closing began")
 	}
 }
+
+func TestDesktopBridgeUpdateCheckIsReadOnlyAndReleasePageIsFixed(t *testing.T) {
+	b := testDesktopBridge(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/update" || r.Method != "GET" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		writeJSON(w, UpdateInfo{CurrentVersion: "4.0.2"})
+	})
+	if response, err := b.Request("GET", "/api/update", "", 1000); err != nil || response.Status != 200 {
+		t.Fatalf("update check failed: %+v, %v", response, err)
+	}
+	if _, err := b.Request("POST", "/api/update", "{}", 1000); err == nil {
+		t.Fatal("accepted POST update check")
+	}
+	if err := b.OpenReleasePage(); err == nil {
+		t.Fatal("opened a page before the native window was ready")
+	}
+	var opened []string
+	b.openURL = func(url string) { opened = append(opened, url) }
+	if err := b.OpenReleasePage(); err != nil || len(opened) != 1 || opened[0] != releasePageURL {
+		t.Fatalf("release page: %v, %v", opened, err)
+	}
+	if !strings.HasPrefix(releasePageURL, "https://github.com/Ryujoxys/sushiro-overdose/releases/") {
+		t.Fatalf("unexpected release page: %s", releasePageURL)
+	}
+}

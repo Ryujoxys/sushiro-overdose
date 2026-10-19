@@ -22,6 +22,7 @@ type DesktopBridge struct {
 	backend    *webBackend
 	client     *http.Client
 	saveDialog func(name string) (string, error)
+	openURL    func(url string)
 	exportMu   sync.Mutex
 	lifecycle  sync.Mutex
 	writes     int
@@ -42,8 +43,11 @@ var desktopMethods = map[string]string{
 	"/api/mobile-auth": "GET", "/api/mobile-auth/start": "POST", "/api/mobile-auth/stop": "POST",
 	"/api/engine/capture": "POST", "/api/engine/stop": "POST",
 	"/api/auth/import": "POST", "/api/auth/reset": "POST", "/api/repair-proxy": "POST",
-	"/api/auth/verify": "POST",
+	"/api/auth/verify": "POST", "/api/update": "GET",
 }
+
+// releasePageURL is the only external page the native window may open.
+const releasePageURL = "https://github.com/Ryujoxys/sushiro-overdose/releases/latest"
 
 func desktopPath(raw string) (*url.URL, error) {
 	u, err := url.ParseRequestURI(raw)
@@ -118,6 +122,16 @@ func (b *DesktopBridge) abortClose() {
 	b.lifecycle.Lock()
 	b.closing = false
 	b.lifecycle.Unlock()
+}
+
+// OpenReleasePage opens the fixed release page in the system browser. It takes
+// no URL from JavaScript, so the page cannot use it to open arbitrary links.
+func (b *DesktopBridge) OpenReleasePage() error {
+	if b.openURL == nil {
+		return errors.New("暂时无法打开浏览器，请稍后重试")
+	}
+	b.openURL(releasePageURL)
+	return nil
 }
 
 // Quit is separate from Request so the exit request does not count itself as

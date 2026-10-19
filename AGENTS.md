@@ -19,7 +19,7 @@ v4.0 的版本名称为「lite正式版」，在应用设置、CLI 和发布标�
 
 **目标平台**：原生窗口支持 macOS 12+ (amd64/arm64 Universal)、Windows 10/11 (amd64/arm64，需 WebView2)；CLI/浏览器版另支持 Linux (amd64/arm64)。
 
-后续修复使用 `v4.0.x`，当前为 `v4.0.1`。新版本附件和校验表完整公开后，Release 页面只保留最新正式版，Git tag 和代码历史全部保留。
+后续修复使用 `v4.0.x`，当前为 `v4.0.2`。新版本附件和校验表完整公开后，Release 页面只保留最新正式版，Git tag 和代码历史全部保留。
 
 ---
 
@@ -49,7 +49,7 @@ main.go (桌面版默认启动原生窗口)
 2. **记录服务模式**：`sushiro collect run` → 前台公开记录；`collect start` → 独立后台记录
 3. **浏览器模式**：显式 `sushiro web` 或不带 `desktop` 构建标签的压缩包使用浏览器。
 
-`desktop_native.go` 按 `desktop && (darwin || windows)` 编译；`desktop_bridge.go` 白名单转发本机 API，不跟随跳转、不访问外部 URL；`desktop_instance.go` 管理 OS 锁和 0600 的临时唤起令牌。不得放宽既有 HTTP Host、Origin、CSRF 校验，不对外部页面开放原生绑定。
+`desktop_native.go` 按 `desktop && (darwin || windows)` 编译；`desktop_bridge.go` 白名单转发本机 API，不跟随跳转；唯一外部页面是 `OpenReleasePage` 用系统浏览器打开的固定发布页，不接受页面传入 URL；`desktop_instance.go` 管理 OS 锁和 0600 的临时唤起令牌。不得放宽既有 HTTP Host、Origin、CSRF 校验，不对外部页面开放原生绑定。
 
 ---
 
@@ -146,8 +146,8 @@ main.go (桌面版默认启动原生窗口)
 | `queue_trends.go` | 本地排队数据结构、到店预测推荐、过号趋势聚合、节假日分类、信息收集状态提示 |
 | `sampling.go` | 后台信息收集配置、运行状态、定时 runner，仅记录历史不抢号 |
 | `sampling_cli.go` | `sample once/run` 保留认证时段采集；`start/stop/status/autostart` 兼容转到公开采集服务 |
-| `update_check.go` | GitHub Latest Release 检查与版本比较 |
-| `health.go` | 每 5 分钟验证 Token 有效性 |
+| `update_check.go` | GitHub Latest Release 检查与版本比较；仅设置页用户点击时调用，失败结果 1 分钟后可重试 |
+| `health.go` | 旧版凭证定时检查，当前无调用方（待移除） |
 | `state.go` | `State` JSON 读写，`logMessage`，`readInput` |
 | `store.go` | `StoreRegistry` 门店昵称管理 `~/.sushiro/stores.json` |
 | `diagnostics.go` | doctor 只读诊断、通知测试、本机网络/证书/端口/代理链路检查 |
@@ -257,7 +257,7 @@ main.go (桌面版默认启动原生窗口)
 | POST | `/api/mobile-auth/start` | 启动手机凭证捕获：监听局域网代理，只捕获寿司郎凭证参数，不修改 Windows 系统代理 |
 | POST | `/api/mobile-auth/stop` | 停止手机凭证捕获 |
 | GET | `/api/diagnostics` | 只读、脱敏的本机诊断信息 |
-| GET | `/api/update` | 检查 GitHub 最新 Release |
+| GET | `/api/update` | 检查 GitHub 最新 Release（设置页点击触发，桌面桥白名单只读） |
 | POST | `/api/notifications/test` | 发送通知渠道测试 |
 | POST | `/api/repair-proxy` | 恢复系统代理并清理代理 marker |
 | POST | `/api/uninstall` | 清理本地敏感数据和证书 |
@@ -298,6 +298,7 @@ main.go (桌面版默认启动原生窗口)
 - **Sushiro 品牌一致**：胶囊按钮 `border-radius: 9999px`，卡片圆角 `10px`
 - **字体**：PingFang SC → system-ui 回退链
 - **响应式**：768px 断点，移动端侧栏变顶栏
+- **深色模式**：`app.css` 在 `prefers-color-scheme: dark` 下覆盖同名变量；按钮底色用 `--red`，红色文字/描边/图表线用 `--red-text`，图表颜色只走 CSS 类，不在 JS 里写颜色值。原生窗口外观跟随系统
 
 ---
 

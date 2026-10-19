@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <meta name="sushiro-csrf" content="{{CSRF_TOKEN}}">
 <link rel="icon" type="image/png" href="data:image/png;base64,{{LOGO_BASE64}}">
 <title>SUSHIRO Overdose · lite正式版</title>
@@ -24,9 +25,14 @@
   <section id="page-records" aria-labelledby="records-title">
     <div class="page-heading"><div><h1 id="records-title">我的记录</h1><p>选好门店，慢慢积累自己的排队规律。</p></div><button class="button quiet" data-action="refresh">刷新</button></div>
     <div id="records-error" class="notice error" role="alert" hidden></div>
+    <ol id="record-steps" class="steps" aria-label="开始使用" hidden>
+      <li data-step="stores"><b>选常去的店</b><span>不用登录，选几家常去的就够</span></li>
+      <li data-step="start"><b>开始记录</b><span>关掉窗口也会继续</span></li>
+      <li data-step="data"><b>看自己的规律</b><span>第一条记录通常几分钟内出现</span></li>
+    </ol>
     <div class="record-layout">
       <div class="card store-card">
-        <div class="section-heading"><h2>记录哪些店</h2><button class="button secondary small" data-action="pick-records">选择门店</button></div>
+        <div class="section-heading"><h2>记录哪些店</h2><button id="pick-records" class="button secondary small" data-action="pick-records">选择门店</button></div>
         <div id="record-stores" class="store-list"><p class="empty" role="status">正在读取本机记录…</p></div>
       </div>
       <aside class="card service-card">
@@ -78,8 +84,8 @@
       <section class="card"><h2>手动取号账号</h2><p id="account-state" class="muted">还未读取</p><div class="actions"><button class="button secondary" data-action="connect-account">连接账号</button><button class="button quiet" data-action="reset-account">断开账号</button></div><p class="caption">只记录数据，不需要连接账号。</p></section>
       <section class="card"><h2>遇到问题</h2><div class="actions"><button class="button secondary" data-action="repair-proxy">恢复系统代理</button><a class="button secondary" href="/api/diagnostics/bundle">导出诊断包</a></div><p class="caption">恢复代理不会删除记录。</p></section>
       <section class="card"><h2>应用与后台</h2><p class="muted">关窗口不停止后台记录。更新程序前，可在这里全部退出。</p><button class="button secondary" data-action="quit-app">退出应用及后台记录</button><p class="caption">保留记录和自启动设置。</p></section>
+      <section class="card about-card" aria-labelledby="about-title"><div class="about-row"><div><h2 id="about-title">版本与更新</h2><p id="update-state" class="muted" role="status">点击检查是否有新版本。</p></div><div class="actions"><button id="check-update" class="button secondary" data-action="check-update">检查更新</button><a id="update-link" class="button primary" href="https://github.com/Ryujoxys/sushiro-overdose/releases/latest" target="_blank" rel="noopener noreferrer" hidden>前往下载</a></div></div><p class="caption">只在点击时访问 GitHub 发布页，不上传记录。升级前先在上方退出后台。</p><details class="license-card"><summary>开源许可</summary><pre>{{OPEN_SOURCE_NOTICES}}</pre></details></section>
     </div>
-    <details class="license-card"><summary>开源许可</summary><pre>{{OPEN_SOURCE_NOTICES}}</pre></details>
   </section>
 </main>
 <footer class="shell footer">SUSHIRO Overdose · 本地记录，以门店实际叫号为准</footer>

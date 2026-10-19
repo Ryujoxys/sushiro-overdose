@@ -20,8 +20,6 @@ const (
 	queueAdvisorWindow15 = 15 * time.Minute
 	queueAdvisorWindow30 = 30 * time.Minute
 	queueAdvisorWindow60 = 60 * time.Minute
-
-	queuePressureCurveLocalPreferredPoints = 8
 )
 
 type QueueTimeRange struct {
@@ -708,10 +706,7 @@ type QueuePressureCurve struct {
 	Message      string                    `json:"message,omitempty"`
 }
 
-func buildQueuePressureCurve(ctx context.Context, storeID, date string, now time.Time) QueuePressureCurve {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func buildQueuePressureCurve(_ context.Context, storeID, date string, now time.Time) QueuePressureCurve {
 	if now.IsZero() {
 		now = time.Now()
 	}

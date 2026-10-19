@@ -44,7 +44,8 @@ await page.route('**/api/**',async route=>{
     else{ticket={number:'A148',store_id:'1012'};data={ticket,cancel_token:'mock-confirmation'};}
   }else if(key==='/api/queue/ticket/status')data={ticket,cancel_token:'mock-confirmation'};
   else if(key==='/api/queue/ticket/cancel'){ticket=null;data={ok:true};}
-  else if(key==='/api/queue/advisor')data={eta:{estimated_called_at_range:{early:'18:00',late:'18:30'},wait_minutes_range:{low:35,high:65}}};
+  else if(key==='/api/queue/advisor')data={current:{called_no:123},eta:{remaining_groups:25,estimated_called_at_range:{early:'18:00',late:'18:30'},wait_minutes_range:{low:35,high:65}}};
+  else if(key==='/api/update')data={current_version:'preview',latest_version:'v9.9.9',update_available:true};
   else if(key==='/api/records/export')return route.fulfill({contentType:'application/x-ndjson',body:'{"store_id":1012}\n'});
   else throw new Error('Unexpected API call: '+key);
   await route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
@@ -54,6 +55,8 @@ const click=action=>page.locator(`[data-action="${action}"]`).first().click();
 const noOverflow=async()=>assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'horizontal overflow');
 try{
   await page.goto(origin);await page.getByText('先选常去的几家店').waitFor();
+  assert.match(await page.locator('#record-steps [aria-current="step"]').innerText(),/选常去的店/);
+  assert.equal(await page.locator('#record-overview').isHidden(),true,'all-zero metrics shown to a new user');
   assert.equal(requests.some(r=>r.method==='POST'),false);
   await page.locator('#record-chart svg').waitFor();
   assert.equal(await page.locator('#export-records').getAttribute('aria-disabled'),'true');
@@ -90,6 +93,7 @@ try{
   await click('toggle-recording');await page.getByRole('button',{name:'暂停记录'}).waitFor();assert.equal(autostart,false,'start enabled autostart implicitly');
   assert.equal(await page.locator('#analysis-store').inputValue(),'1012','saved store did not become chart selection');
   hasRecords=true;await click('refresh');await page.locator('#record-chart svg').waitFor();
+  assert.equal(await page.locator('#record-steps').isHidden(),true,'onboarding stayed after records arrived');
   assert.equal(await page.locator('#export-records').getAttribute('aria-disabled'),'false');
   assert.equal(await page.locator('#backup-records').getAttribute('href'),'/api/records/export?days=all');
   assert.equal(await page.locator('#include-history').isChecked(),false,'local samples reenabled history');
@@ -108,13 +112,20 @@ try{
   await shot('auth-needed');await page.setViewportSize({width:390,height:844});await noOverflow();await shot('auth-mobile');await page.setViewportSize({width:1280,height:960});await page.locator('#auth-import summary').click();await page.locator('#auth-text').fill('mock credentials');await click('import-auth');
   await page.locator('#auth-continue').waitFor();await click('auth-continue');await page.locator('#ticket-dialog').waitFor();
   assert.equal(requests.filter(r=>r.key==='/api/queue/ticket').length,0,'auth auto-submitted ticket');
-  await click('confirm-ticket');await page.getByText('A148',{exact:true}).waitFor();assert.equal(requests.filter(r=>r.key==='/api/queue/ticket').length,1);await shot('ticket-result');
+  await click('confirm-ticket');await page.getByText('A148',{exact:true}).waitFor();assert.equal(requests.filter(r=>r.key==='/api/queue/ticket').length,1);
+  await page.getByText('还差 25 号').waitFor();await shot('ticket-result');
   await click('cancel-ticket');await page.locator('#confirm-dialog [data-answer="yes"]').click();await page.getByText('已取消排队号',{exact:true}).waitFor();
   assert.equal(requests.find(r=>r.key==='/api/queue/ticket/cancel').body.cancel_token,'mock-confirmation');
   uncertain=true;await click('review-ticket');await click('confirm-ticket');await page.getByText('操作结果还未确认',{exact:true}).waitFor();
   await click('refresh-live');await page.getByText('官方等待 / 分钟').waitFor();assert.equal(await page.locator('#take-ticket').isDisabled(),true);
   await shot('ticket-uncertain');await click('query-ticket');await page.getByText('当前没有查到排队号',{exact:true}).waitFor();
-  await page.getByRole('link',{name:'设置',exact:true}).click();await noOverflow();await shot('settings');
+  await page.getByRole('link',{name:'设置',exact:true}).click();await noOverflow();
+  assert.equal(requests.some(r=>r.key==='/api/update'),false,'update check ran without a click');
+  await click('check-update');await page.getByText(/有新版本 v9\.9\.9/).waitFor();assert.equal(await page.locator('#update-link').isVisible(),true);await shot('settings');
+  await page.emulateMedia({colorScheme:'dark'});await shot('settings-dark');
+  await page.getByRole('link',{name:'手动取号',exact:true}).click();await page.getByText('官方等待 / 分钟').waitFor();await shot('queue-dark');
+  await page.getByRole('link',{name:'我的记录',exact:true}).click();await page.locator('#record-chart svg').waitFor();await page.locator('[data-record-point="18:00"]').hover();await shot('records-dark');
+  await page.setViewportSize({width:390,height:844});await page.waitForTimeout(200);await noOverflow();await shot('records-dark-mobile');await page.emulateMedia({colorScheme:'light'});
   assert.deepEqual(errors,[]);
-  console.log('Browser QA passed: desktop/mobile, recording start, no implicit autostart, offline history, date filters, persisted opt-out, chart, auth confirmation, manual ticket, cancel, unknown result. Screenshots: '+output);
+  console.log('Browser QA passed: desktop/mobile, onboarding, recording start, no implicit autostart, offline history, date filters, persisted opt-out, chart, auth confirmation, manual ticket, ticket progress, cancel, unknown result, update check, dark mode. Screenshots: '+output);
 }finally{await browser.close();}

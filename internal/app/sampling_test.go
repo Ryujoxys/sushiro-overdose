@@ -260,3 +260,27 @@ func TestSamplingWindowUsesCSTNotLocalTime(t *testing.T) {
 		t.Fatalf("next window = %v (UTC), want %v", next.UTC(), want)
 	}
 }
+
+func TestUpdateCheckRetriesFailedResultSoon(t *testing.T) {
+	previous := Version
+	t.Cleanup(func() {
+		Version = previous
+		updateCache.Lock()
+		updateCache.info, updateCache.checkedAt = UpdateInfo{}, time.Time{}
+		updateCache.Unlock()
+	})
+	Version = "dev" // Never reaches the network in tests.
+	prime := func(age time.Duration) {
+		updateCache.Lock()
+		updateCache.info, updateCache.checkedAt = UpdateInfo{Error: "offline"}, time.Now().Add(-age)
+		updateCache.Unlock()
+	}
+	prime(10 * time.Second)
+	if info := CheckLatestRelease(context.Background()); info.Error != "offline" {
+		t.Fatalf("recent failure should stay cached: %+v", info)
+	}
+	prime(2 * time.Minute)
+	if info := CheckLatestRelease(context.Background()); info.Error != "" {
+		t.Fatalf("old failure was not retried: %+v", info)
+	}
+}

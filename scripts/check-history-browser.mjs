@@ -32,7 +32,8 @@ try{
   assert.equal(initial.stores.length,0);assert.ok(initial.available_stores.length>0);
   assert.match(await page.locator('#history-meta').innerText(),/2026-06-17.*2026-09-06/);
   assert.equal(requests.some(r=>r.method==='POST'),false,'entry wrote settings or began collection');
-  assert.match(await page.locator('#record-overview').innerText(),/已保存\s*0/);
+  assert.equal(await page.locator('#record-overview').isHidden(),true,'all-zero metrics shown to a new user');
+  assert.match(await page.locator('#record-steps [aria-current="step"]').innerText(),/选常去的店/);
   assert.equal(await page.getByRole('radio',{name:'叫到几号',exact:true}).isChecked(),true);
   const firstPoint=initial.called_points[0],secondPoint=initial.called_points[1];
   await page.locator('[data-record-point="'+firstPoint.time+'"]').focus();

@@ -1,7 +1,8 @@
 let ticketDraft=null,authReturnIntent='settings',authModeRunning='',authPollTimer=null,authSavedAt='',authPollBusy=false,authMobileAddresses=[],authSessionRevision=0;
 
+function ticketStoreID(ticket) { return String(ticket?.monitored_store_id||ticket?.store_id||ticket?.storeId||''); }
 function clearTicketView() {
-  state.currentTicket=null;state.cancelToken='';state.ticketUncertain=false;state.ticketForecastRevision=(state.ticketForecastRevision||0)+1;
+  state.currentTicket=null;state.cancelToken='';state.ticketUncertain=false;state.ticketProgressBase=null;state.ticketForecastRevision=(state.ticketForecastRevision||0)+1;
   el('ticket-result').hidden=true;el('ticket-result').replaceChildren();
   el('take-ticket').disabled=!state.live?.online_open||!!state.liveStale;
 }
@@ -43,9 +44,9 @@ function showTicketUncertain(message) {
 function showTicket(result) {
   state.ticketUncertain=false;navigatePage('queue');const ticket=result.ticket||{},number=ticket.number;
   if(!number){state.ticketUncertain=true;showTicketUncertain('官方没有返回明确号码，请在小程序核对。');return;}
-  const id=String(ticket.monitored_store_id||ticket.store_id||ticket.storeId||'');
+  const id=ticketStoreID(ticket);
   state.currentTicket=ticket;state.cancelToken=result.cancel_token||'';const box=el('ticket-result');box.hidden=false;
-  box.innerHTML='<div class="section-heading"><h2>'+escapeHTML(id?storeName(id):'我的排队')+'</h2><span class="badge green">'+(result.recovered?'已有号码':'已取到号')+'</span></div><div class="ticket-number">'+escapeHTML(number)+'</div><p class="muted">以官方小程序和门店叫号为准。</p><label class="field">路程（分钟，选填）<input id="travel-minutes" type="number" min="0" max="240" step="1" value="'+escapeHTML(state.ticketTravelMinutes??'')+'" placeholder="例如 20" inputmode="numeric"></label><div id="ticket-forecast" class="plan">正在读取预计入座时间…</div><p id="ticket-result-error" class="notice error" role="alert" hidden></p><div class="actions"><button class="button secondary" data-action="query-ticket">刷新号码</button><button id="cancel-current-ticket" class="button quiet" data-action="cancel-ticket" '+(state.cancelToken?'':'disabled')+'>取消这个号</button></div>'+(state.cancelToken?'':'<p class="caption">取消前请刷新号码；若官方未返回完整票据，请在小程序取消。</p>');
+  box.innerHTML='<div class="section-heading"><h2>'+escapeHTML(id?storeName(id):'我的排队')+'</h2><span class="badge green">'+(result.recovered?'已有号码':'已取到号')+'</span></div><div class="ticket-body"><div class="ticket-main"><div class="ticket-number">'+escapeHTML(number)+'</div><div id="ticket-progress" class="ticket-progress"></div><p class="caption">以官方小程序和门店叫号为准。</p></div><div class="ticket-side"><div id="ticket-forecast" class="plan">正在读取预计入座时间…</div><label class="field travel-field">路程（分钟，选填）<input id="travel-minutes" type="number" min="0" max="240" step="1" value="'+escapeHTML(state.ticketTravelMinutes??'')+'" placeholder="例如 20" inputmode="numeric"></label></div></div><p id="ticket-result-error" class="notice error" role="alert" hidden></p><div class="actions"><button class="button secondary" data-action="query-ticket">刷新号码</button><button id="cancel-current-ticket" class="button quiet" data-action="cancel-ticket" '+(state.cancelToken?'':'disabled')+'>取消这个号</button></div>'+(state.cancelToken?'':'<p class="caption">取消前请刷新号码；若官方未返回完整票据，请在小程序取消。</p>');
   el('travel-minutes').addEventListener('change',()=>loadTicketForecast(id,number));box.focus();
   if(id){state.selectedStore=id;loadLive();loadTicketForecast(id,number);}else el('ticket-forecast').textContent='门店尚未确认，请到官方小程序核对。';
 }
@@ -64,6 +65,20 @@ async function queryTicket() {
     }
   });
 }
+function refreshTicketForecast() {
+  const ticket=state.currentTicket,id=ticketStoreID(ticket);
+  if(ticket&&id&&el('ticket-forecast'))loadTicketForecast(id,ticket.number);
+}
+// Progress counts from the first number seen for this ticket, so it only moves forward with the queue.
+function renderTicketProgress(number,data) {
+  const box=el('ticket-progress');if(!box)return;
+  const called=Number(data.current?.called_no)||0,target=Number(String(number).match(/\d+/)?.[0])||0;
+  if(!called||!target){box.replaceChildren();return;}
+  if(target<called){box.innerHTML='<p class="notice error">当前已叫到 '+called+' 号，这个号可能已过号，请在小程序确认。</p>';return;}
+  const key=String(number),base=state.ticketProgressBase?.number===key?state.ticketProgressBase:(state.ticketProgressBase={number:key,called});
+  const start=Math.min(base.called,called),percent=Math.round((called-start)/Math.max(1,target-start)*100),remaining=target-called;
+  box.innerHTML='<p>当前叫到 <b>'+called+'</b> 号 · '+(remaining?'还差 <b>'+remaining+'</b> 号':'<b>正在叫这个号</b>')+'</p><div class="meter" aria-hidden="true"><span style="width:'+Math.min(100,percent)+'%"></span></div>';
+}
 async function loadTicketForecast(id,number) {
   const revision=state.ticketForecastRevision=(state.ticketForecastRevision||0)+1;
   try{
@@ -73,6 +88,7 @@ async function loadTicketForecast(id,number) {
     state.ticketTravelMinutes=raw;
     const data=await api('/api/queue/advisor?store='+encodeURIComponent(id)+'&target_no='+target+'&travel_minutes='+travel);
     const box=el('ticket-forecast');if(!box||revision!==state.ticketForecastRevision)return;
+    renderTicketProgress(number,data);
     const eta=data.eta||{},window=eta.wait_minutes_range,range=eta.estimated_called_at_range;
     box.textContent='记录还不足，暂时算不准这个号码的入座时间。';
     if(range)box.innerHTML='预计入座<strong>'+escapeHTML(range.early+'–'+range.late)+'</strong>'+(window?'还需 '+window.low+'–'+window.high+' 分钟。':'')+'以门店叫号为准。'+(eta.arrival_suggestion?'<p>'+escapeHTML(eta.arrival_suggestion)+'</p>':'');
@@ -82,7 +98,7 @@ async function cancelTicket() {
   await guard('ticket-cancel',async()=>{
     const ticket=state.currentTicket,token=state.cancelToken;
     if(!ticket||!token){toast('请先刷新号码，再确认取消。');return;}
-    const id=String(ticket.monitored_store_id||ticket.store_id||ticket.storeId||'');
+    const id=ticketStoreID(ticket);
     if(!await confirmDialog('取消 '+ticket.number+' 号',(id?storeName(id)+'。':'')+'取消后无法恢复。确认前会重新核对当前号码。'))return;
     if(state.currentTicket!==ticket||state.cancelToken!==token){toast('号码已变化，请刷新后重新确认。');return;}
     el('cancel-current-ticket').disabled=true;

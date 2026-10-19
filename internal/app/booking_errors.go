@@ -5,38 +5,9 @@ import api "github.com/Ryujoxys/sushiro-overdose/internal/api"
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
-	"time"
 )
-
-const reservationServerErrorCooldown = 30 * time.Second
-
-func bookingSlotKey(storeID, date, start string) string {
-	return storeID + "|" + date + "|" + start
-}
-
-func isTemporaryBookingSkipped(skips map[string]time.Time, key string, now time.Time) bool {
-	if skips == nil {
-		return false
-	}
-	until, ok := skips[key]
-	if !ok {
-		return false
-	}
-	if now.Before(until) {
-		return true
-	}
-	delete(skips, key)
-	return false
-}
-
-func markTemporaryBookingSkip(skips map[string]time.Time, key string, now time.Time) {
-	if skips != nil {
-		skips[key] = now.Add(reservationServerErrorCooldown)
-	}
-}
 
 func isOfficialServerHTTPError(err error) bool {
 	return api.IsHTTPStatus(err, http.StatusInternalServerError)
@@ -125,11 +96,4 @@ func friendlyNetworkError(err error) string {
 		return "官方返回内容无法解析：可能是临时故障或被代理拦截，请稍后重试"
 	}
 	return err.Error()
-}
-
-func bookingServerErrorLog(slotLabel string, err error) string {
-	if isCredentialRefreshLikelyError(err) {
-		return fmt.Sprintf("%s — %s，仍会短暂跳过当前时段 %d 秒；建议立即重置通行证", slotLabel, friendlyOfficialAPIError(err), int(reservationServerErrorCooldown.Seconds()))
-	}
-	return fmt.Sprintf("%s — %s，跳过当前时段 %d 秒后再试", slotLabel, friendlyOfficialAPIError(err), int(reservationServerErrorCooldown.Seconds()))
 }

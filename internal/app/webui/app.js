@@ -5,6 +5,12 @@ const state = {page:'records', analysisMetric:'called', analysisTime:'', service
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function storeName(id) { return state.stores.get(String(id))?.name || state.records?.stores?.find(s=>String(s.id)===String(id))?.name || '门店 '+id; }
 function clockTime(value) { if(!value)return '还没有'; const d=new Date(value); return Number.isNaN(d.getTime())?'时间未知':d.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}); }
+function freshness(value) {
+  const age=Date.now()-new Date(value).getTime();
+  if(!value||Number.isNaN(age))return clockTime(value);
+  if(age<60000)return '刚刚更新';
+  return age<3600000?Math.floor(age/60000)+' 分钟前更新':clockTime(value)+' 更新';
+}
 function chinaHHMM(date=new Date()) { return date.toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}); }
 function serviceLabel(data) {
   if(!data?.config?.enabled)return [data?.model?.sample_count?'已暂停':'未记录',''];
@@ -49,6 +55,7 @@ function handleDesktopDownload(event) {
   if(link.getAttribute('aria-disabled')==='true'){event.preventDefault();return;}
   const bridge=window.go?.app?.DesktopBridge;
   if(!bridge)return;
+  if(link.id==='update-link'){event.preventDefault();guard('update-open',()=>bridge.OpenReleasePage());return;}
   const resource=link.getAttribute('href');
   if(!/^\/api\/(records\/export|diagnostics\/bundle)(\?|$)/.test(resource))return;
   event.preventDefault();
@@ -96,8 +103,24 @@ async function refreshRecords({background=false}={}) {
   }catch(e){if(revision===state.recordsRevision){showError('records-error',new Error('未更新：'+e.message));if(!state.records){el('record-chart').innerHTML='<p class="empty">记录暂时读取失败，请刷新重试。</p>';el('record-table').innerHTML='';el('analysis-inspection').hidden=true;el('analysis-source').textContent='';}}}
   finally{if(revision===state.recordsRevision)el('record-chart').removeAttribute('aria-busy');}
 }
+function renderSteps() {
+  const ids=recordIDs(),samples=Number(state.service.model?.sample_count)||0,steps=el('record-steps');
+  steps.hidden=samples>0;
+  el('record-overview').hidden=samples===0;
+  el('pick-records').className='button small '+(ids.length?'secondary':'primary');
+  if(steps.hidden)return;
+  const done={stores:ids.length>0,start:!!state.service.config?.enabled,data:false};
+  let current='';
+  steps.querySelectorAll('li').forEach(item=>{
+    const step=item.dataset.step,finished=done[step];
+    if(!finished&&!current)current=step;
+    item.classList.toggle('done',finished);
+    if(step===current)item.setAttribute('aria-current','step');else item.removeAttribute('aria-current');
+  });
+}
 function renderRecords() {
   const model=state.service.model||{};
+  renderSteps();
   setMarkup('record-overview',[['已保存',model.sample_count||0,'条'],['覆盖',model.day_count||0,'天'],['已选',recordIDs().length,'家店']].map(([name,n,unit])=>'<div class="metric"><span>'+name+' </span><strong>'+n+'</strong><span>'+unit+'</span></div>').join(''));
   const rows=recordIDs().map(id=>{
     const s=state.records.stores.find(row=>String(row.id)===id),latest=s?.latest;
@@ -120,7 +143,7 @@ function renderService() {
   el('autostart').checked=!!auto.enabled;el('autostart').disabled=auto.supported===false||(!ids.length&&!auto.enabled)||state.busy.has('service');
   el('autostart').title=auto.error||'单独开启，不会随开始记录自动启用';
   el('repair-autostart').hidden=!auto.needs_update;el('repair-autostart').disabled=state.busy.has('service');
-  el('service-detail').textContent=data.state.last_error||data.state.paused_reason||(auto.needs_update?'程序位置已变化，请更新自启动位置。':'')||auto.error||('最近记录：'+clockTime(data.state.last_at)+(data.background_running?'。可以关闭界面。':cfg.enabled?'。后台未就绪时，请保持界面运行。':''));
+  el('service-detail').textContent=data.state.last_error||(cfg.enabled?data.state.paused_reason:'')||(auto.needs_update?'程序位置已变化，请更新自启动位置。':'')||auto.error||('最近记录：'+clockTime(data.state.last_at)+(data.background_running?'。可以关闭界面。':cfg.enabled?'。后台未就绪时，请保持界面运行。':''));
 }
 function setExportLink(id,enabled,path) {
   const link=el(id);link.setAttribute('aria-disabled',String(!enabled));
@@ -262,7 +285,7 @@ async function loadLive() {
 function renderLive(error='') {
   const panel=state.live,open=panel.store_status==='OPEN',stale=state.liveStale;
   const restoreFocus=!!document.activeElement?.closest('#live-store [data-action="refresh-live"]');
-  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(panel.store_name)+'</h3><p>'+escapeHTML(stale?'上次读取的排队状态':(open?'营业中':'当前未营业')+' · '+(panel.online_open?'可线上取号':'线上取号暂未开放'))+'</p></div><div class="live-numbers"><div><strong>'+escapeHTML(panel.called_no>0?panel.called_no:'—')+'</strong><span>'+(stale?'上次叫到':'当前叫到')+'</span></div><div><strong>'+escapeHTML(open?panel.wait_groups:'—')+'</strong><span>在等桌数</span></div><div><strong>'+escapeHTML(open?panel.server_wait_minutes:'—')+'</strong><span>官方等待 / 分钟</span></div></div><p class="caption">官方公开数据 · '+escapeHTML(clockTime(panel.observed_at))+'</p>'+(stale?'<p class="notice error" role="status">未更新：'+escapeHTML(error)+'</p>':'')+'<button class="button quiet small" data-action="refresh-live">刷新排队</button>');
+  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(panel.store_name)+'</h3><p>'+escapeHTML(stale?'上次读取的排队状态':(open?'营业中':'当前未营业')+' · '+(panel.online_open?'可线上取号':'线上取号暂未开放'))+'</p></div><div class="live-numbers"><div><strong>'+escapeHTML(panel.called_no>0?panel.called_no:'—')+'</strong><span>'+(stale?'上次叫到':'当前叫到')+'</span></div><div><strong>'+escapeHTML(open?panel.wait_groups:'—')+'</strong><span>在等桌数</span></div><div><strong>'+escapeHTML(open?panel.server_wait_minutes:'—')+'</strong><span>官方等待 / 分钟</span></div></div>'+(stale?'<p class="notice error" role="status">未更新：'+escapeHTML(error)+'</p>':'')+'<div class="live-foot"><p class="caption">官方公开数据 · '+escapeHTML(freshness(panel.observed_at))+'</p><button class="button secondary small" data-action="refresh-live">刷新排队</button></div>');
   if(restoreFocus)el('live-store').querySelector('[data-action="refresh-live"]')?.focus();
 }
 async function loadMealPlan() {
@@ -295,6 +318,20 @@ async function loadStatus(){
   el('account-state').textContent=!state.status.has_config?'未连接':state.status.auth_health?.status==='stale'?'连接需重新验证':state.status.auth_health?.status==='ok'?'已连接':'凭证已保存，尚未验证';
   return state.status;
 }
+async function checkUpdate() {
+  await guard('update',async()=>{
+    const button=el('check-update'),box=el('update-state');
+    button.disabled=true;box.textContent='正在检查…';el('update-link').hidden=true;
+    try{
+      const info=await api('/api/update',undefined,{timeout:15000});
+      if(info.update_available){box.textContent='有新版本 '+info.latest_version+'，当前 v'+info.current_version+'。';el('update-link').hidden=false;}
+      else if(info.error)box.textContent='暂时无法连接 GitHub，请稍后重试。';
+      else if(!info.latest_version)box.textContent='开发版本，不检查更新。';
+      else box.textContent='已是最新版本 v'+info.current_version+'。';
+    }catch(e){box.textContent='暂时无法检查：'+e.message;}
+    finally{button.disabled=false;}
+  });
+}
 function init() {
   initRecordChart();
   initAnalysisStorePicker();
@@ -303,7 +340,7 @@ function init() {
   const actions={
     refresh:refreshRecords,'pick-records':()=>openStorePicker('records'),'pick-queue':()=>openStorePicker('queue'),
     'retry-stores':searchStores,'save-stores':savePickedStores,'close-store':closeStorePicker,'remove-picked-store':button=>removePickedStore(button.dataset.id),
-    'toggle-recording':toggleRecording,'repair-autostart':repairAutostart,'quit-app':quitApp,'refresh-live':loadLive,
+    'toggle-recording':toggleRecording,'check-update':checkUpdate,'repair-autostart':repairAutostart,'quit-app':quitApp,'refresh-live':loadLive,
     'analyze-store':button=>{selectAnalysisStore(button.dataset.id);el('analysis-title').scrollIntoView({block:'start'});},
     'review-ticket':reviewTicket,'confirm-ticket':confirmTicket,'close-ticket':()=>{if(!state.busy.has('ticket'))el('ticket-dialog').close();},
     'query-ticket':queryTicket,'cancel-ticket':cancelTicket,'connect-account':()=>openAuth('settings'),'start-auth':startAuth,'stop-auth':stopAuth,'verify-auth':verifyAuth,'close-auth':closeAuth,'import-auth':importAuth,'auth-continue':finishAuth,
@@ -333,6 +370,6 @@ function init() {
 }
 function refreshVisiblePage() {
   if(document.hidden||state.quitting||state.busy.size||document.querySelector('dialog[open]'))return;
-  if(state.page==='queue')loadLive();
+  if(state.page==='queue'){loadLive();refreshTicketForecast();}
   if(state.page==='records'&&!recordsInteractionActive())refreshRecords({background:true});
 }

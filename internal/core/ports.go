@@ -43,11 +43,6 @@ func FirstAvailableLocalPort(preferred, attempts int) (int, bool) {
 	return port, true
 }
 
-// listenLocalPort 在 127.0.0.1 上尝试 listen 单个端口（未导出，仅本包内部用）。
-func listenLocalPort(port int) (net.Listener, error) {
-	return listenHostPort("127.0.0.1", port)
-}
-
 // listenHostPort 在指定 host:port 上 listen。host 为空时默认 127.0.0.1（只绑本地，避免暴露到外网）。
 func listenHostPort(host string, port int) (net.Listener, error) {
 	if host == "" {

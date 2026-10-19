@@ -246,10 +246,6 @@ func queueSessionPath() string {
 	return filepath.Join(AppDirPath(), queueSessionFile)
 }
 
-func queueStatsPath() string {
-	return filepath.Join(AppDirPath(), queueStatsFile)
-}
-
 func queueHolidayPath() string {
 	return filepath.Join(AppDirPath(), queueHolidayFile)
 }
@@ -1515,12 +1511,6 @@ func displayTrendTime(raw string) string {
 		return raw[:2] + ":" + raw[2:4]
 	}
 	return raw
-}
-
-func sameLocalDate(a, b time.Time) bool {
-	ay, am, ad := a.Date()
-	by, bm, bd := b.Date()
-	return ay == by && am == bm && ad == bd
 }
 
 func updateLatest(target *string, t time.Time) {

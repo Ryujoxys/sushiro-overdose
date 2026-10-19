@@ -24,9 +24,9 @@
 
 | Windows | macOS |
 | :--- | :--- |
-| **[下载 64 位 EXE](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0.1/Sushiro-Overdose-4.0.1-windows-amd64.exe)** | **[下载 DMG](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0.1/Sushiro-Overdose-4.0.1-macOS.dmg)** |
+| **[下载 64 位 EXE](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0.2/Sushiro-Overdose-4.0.2-windows-amd64.exe)** | **[下载 DMG](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0.2/Sushiro-Overdose-4.0.2-macOS.dmg)** |
 | Windows 10 / 11，下载后双击 | macOS 12+，拖入「应用程序」 |
-| [ARM64 版本](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0.1/Sushiro-Overdose-4.0.1-windows-arm64.exe) | 同一个安装包支持 Intel / Apple 芯片 |
+| [ARM64 版本](https://github.com/Ryujoxys/sushiro-overdose/releases/download/v4.0.2/Sushiro-Overdose-4.0.2-windows-arm64.exe) | 同一个安装包支持 Intel / Apple 芯片 |
 
 Linux、命令行版和文件校验值见[完整下载列表](https://github.com/Ryujoxys/sushiro-overdose/releases/latest)。不用部署网站。
 
@@ -71,7 +71,7 @@ Linux、命令行版和文件校验值见[完整下载列表](https://github.com
 <details>
 <summary><strong>数据与开发文档</strong></summary>
 
-[数据与历史包](docs/bundled-history.md) · [开发与构建](CONTRIBUTING.md) · [代码架构](ARCHITECTURE.md) · [更新说明](docs/release-notes-4.0.1.md)
+[数据与历史包](docs/bundled-history.md) · [开发与构建](CONTRIBUTING.md) · [代码架构](ARCHITECTURE.md) · [更新说明](docs/release-notes-4.0.2.md)
 
 应用需要联网读取门店公开排队数据，不连接共享数据库，也不上传个人记录。
 

@@ -1329,58 +1329,6 @@ func queueDashboardTrendFromSnapshots(byStoreBucket map[string]queueDashboardSna
 	return out
 }
 
-func buildQueueDashboardBaselineTrend(query QueueDashboardQuery, rollups []QueueBaselineRollup, storeFilter map[string]bool, now time.Time) []QueueDashboardTrendPoint {
-	type acc struct {
-		queueGroups float64
-		waitMinutes float64
-		openStores  float64
-		samples     int
-	}
-	byBucket := map[string]*acc{}
-	for _, rollup := range rollups {
-		storeID := strconv.Itoa(rollup.StoreID)
-		if !queueDashboardStoreAllowed(storeID, storeFilter) || !queueDashboardRollupDateTypeAllowed(rollup.DateType, query.DateType, false) {
-			continue
-		}
-		if !queueDashboardBucketInWindow(rollup.TimeBucket, now, query.WindowHours) {
-			continue
-		}
-		a := byBucket[rollup.TimeBucket]
-		if a == nil {
-			a = &acc{}
-			byBucket[rollup.TimeBucket] = a
-		}
-		samples := maxInt(rollup.SampleCount, 1)
-		if rollup.QueueGroupsTypical != nil {
-			a.queueGroups += *rollup.QueueGroupsTypical
-		}
-		if rollup.WaitTypicalMinutes != nil {
-			a.waitMinutes += *rollup.WaitTypicalMinutes
-		}
-		a.openStores += rollup.OpenRate
-		a.samples += samples
-	}
-	buckets := make([]string, 0, len(byBucket))
-	for bucket := range byBucket {
-		buckets = append(buckets, bucket)
-	}
-	sort.Strings(buckets)
-	out := make([]QueueDashboardTrendPoint, 0, len(buckets))
-	for _, bucket := range buckets {
-		a := byBucket[bucket]
-		out = append(out, QueueDashboardTrendPoint{
-			Bucket:           bucket,
-			Label:            bucket,
-			TotalQueueGroups: int(math.Round(a.queueGroups)),
-			TotalWaitMinutes: int(math.Round(a.waitMinutes)),
-			OpenStores:       int(math.Round(a.openStores)),
-			SampleCount:      a.samples,
-			Source:           "remote_baseline",
-		})
-	}
-	return out
-}
-
 func buildQueueDashboardRollupViews(query QueueDashboardQuery, rollups []QueueBaselineRollup, storeFilter map[string]bool) ([]QueueDashboardWeekday, []QueueDashboardHeatmapPoint, []QueueDashboardDateType) {
 	weekdayAcc := map[int]*queueDashboardRollupAcc{}
 	heatmapAcc := map[string]*queueDashboardRollupAcc{}
@@ -1660,22 +1608,6 @@ func queueDashboardTimeBucket(at time.Time, minutes int) time.Time {
 	}
 	minute := (at.Minute() / minutes) * minutes
 	return time.Date(at.Year(), at.Month(), at.Day(), at.Hour(), minute, 0, 0, at.Location())
-}
-
-func queueDashboardBucketInWindow(bucket string, now time.Time, windowHours int) bool {
-	seconds := ParseTimeSeconds(compactTrendTime(bucket))
-	if seconds < 0 {
-		return false
-	}
-	if windowHours <= 0 {
-		windowHours = queueDashboardDefaultWindowHours
-	}
-	current := now.Hour()*3600 + now.Minute()*60 + now.Second()
-	start := current - windowHours*3600
-	if start >= 0 {
-		return seconds >= start && seconds <= current
-	}
-	return seconds >= 0 && seconds <= current || seconds >= 24*3600+start
 }
 
 func queueDashboardRollupDateTypeAllowed(dateType, filter string, includeHolidayInAll bool) bool {

@@ -314,11 +314,6 @@ func queueAlertStoreIDs() []string {
 	return UniqueNonEmptyStrings(ids)
 }
 
-// collectQueueBaseline 拉取本地选定门店快照并落盘，返回写入条数。
-func collectQueueBaseline(ctx context.Context) (int, error) {
-	return collectQueueBaselineWithConfig(ctx, LoadQueueBaselineConfig())
-}
-
 // collectQueueBaselineWithConfig 拉取本地选定门店的公开快照并落盘，返回写入条数。
 // 单店失败不中断整体，保留已采集数据并返回错误，状态页不隐藏部分失败。
 // 注意双重写入：每店快照既写基准记录(queue_baseline.jsonl)，又顺手写一份排队观测

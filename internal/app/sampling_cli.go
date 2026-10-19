@@ -130,9 +130,6 @@ func autoStartSummary(status AutoStartStatus) string {
 	return "未启用"
 }
 
-// Old installed startup entries remain compatible, but no longer start a ticket scheduler.
-func cmdSamplerDaemon() { cmdPublicQueueDaemon() }
-
 func readSamplingPID() string {
 	data, err := os.ReadFile(samplingPidFilePath())
 	if err != nil {

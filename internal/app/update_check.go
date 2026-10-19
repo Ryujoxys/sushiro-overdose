@@ -29,7 +29,12 @@ var updateCache = struct {
 
 func CheckLatestRelease(ctx context.Context) UpdateInfo {
 	updateCache.Lock()
-	if !updateCache.checkedAt.IsZero() && time.Since(updateCache.checkedAt) < 30*time.Minute {
+	// A failed check is retried soon, so a later click is not stuck on an old network error.
+	ttl := 30 * time.Minute
+	if updateCache.info.Error != "" {
+		ttl = time.Minute
+	}
+	if !updateCache.checkedAt.IsZero() && time.Since(updateCache.checkedAt) < ttl {
 		info := updateCache.info
 		updateCache.Unlock()
 		return info

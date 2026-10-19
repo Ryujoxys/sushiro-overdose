@@ -361,15 +361,6 @@ func (e *BookingEngine) recoverEngineRun(runName string) {
 	}
 }
 
-// abortStart 用于 Start* 入口在校验阶段就失败时的统一回滚：取消刚建的 ctx、走 finishRun
-// 回收句柄、关闭 done 通知等待者。注意 done 在这里 close，因此调用它的入口不会再 defer close。
-func (e *BookingEngine) abortStart(done chan struct{}, cancel context.CancelFunc) {
-	if cancel != nil {
-		cancel()
-	}
-	e.finishRun(done)
-}
-
 func (e *BookingEngine) addLog(msg string) {
 	e.addLogLevel(msg, "info")
 }
@@ -420,13 +411,6 @@ func (e *BookingEngine) StartCapture() error {
 		e.runCaptureSession(ctx, generation)
 	}()
 	return nil
-}
-
-// runCapture 是抓凭证主流程：装 CA 证书 → 起 MITM 代理 → 设系统代理 → 每秒轮询凭证是否抓全。
-// 收到 ctx.Done（Stop/ResetCapture）即拆代理回 idle；抓全后落盘 SaveLocalConfig，自检仅作
-// 诊断不影响保存。接口发现模式（APIDiscoveryEnabled）下抓全后保持代理运行，方便用户继续点接口。
-func (e *BookingEngine) runCapture(ctx context.Context) {
-	e.runCaptureSession(ctx, authGeneration())
 }
 
 func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64) {
@@ -732,19 +716,6 @@ func (e *BookingEngine) cleanupProxy() {
 // ResetCapture follows the same draining boundary as Stop.
 func (e *BookingEngine) ResetCapture() {
 	e.Stop()
-}
-
-func normalizeBookingTime(t string) string {
-	digits := strings.Map(func(r rune) rune {
-		if r >= '0' && r <= '9' {
-			return r
-		}
-		return -1
-	}, t)
-	if len(digits) == 4 {
-		return digits + "00"
-	}
-	return digits
 }
 
 // isRunningLocked is called with e.mu held.

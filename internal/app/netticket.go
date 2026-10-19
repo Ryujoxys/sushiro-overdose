@@ -68,10 +68,7 @@ func SaveNetTicketPlan(p NetTicketPlan) error {
 }
 
 // normalizeNetTicketPlan 禁用所有旧自动计划，保留已经取得的号码。
-func normalizeNetTicketPlan(p NetTicketPlan, now time.Time) NetTicketPlan {
-	if now.IsZero() {
-		now = time.Now()
-	}
+func normalizeNetTicketPlan(p NetTicketPlan, _ time.Time) NetTicketPlan {
 	if p.Status == "" {
 		p.Status = "idle"
 	}
@@ -167,17 +164,4 @@ func applyNetTicketSuccess(ctx context.Context, client *Client, plan *NetTicketP
 // 既要看起来成功，又不能是预约订座（订座记录不算排队号）。用于 recoverExistingNetTicket 的降级判断。
 func netTicketLooksSuccessful(ticket ReservationRecord) bool {
 	return reservationRecordLooksSuccessful(ticket) && !reservationRecordIsReservation(ticket)
-}
-
-// currentAuthedClient 从本地配置构造一个带凭证的 API 客户端（headless 守护也能用）。
-func currentAuthedClient() *Client {
-	tokens, err := LoadLocalConfig()
-	if err != nil {
-		return nil
-	}
-	if tokens.ValidateForReservation() != nil {
-		return nil
-	}
-	prefs := LoadPreferences()
-	return NewClient(tokens.ToSettingsWithPrefs(prefs))
 }

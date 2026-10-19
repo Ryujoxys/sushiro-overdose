@@ -1,9 +1,5 @@
 package app
 
-import . "github.com/Ryujoxys/sushiro-overdose/internal/platform"
-
-import . "github.com/Ryujoxys/sushiro-overdose/internal/proxy"
-
 import . "github.com/Ryujoxys/sushiro-overdose/internal/api"
 
 import . "github.com/Ryujoxys/sushiro-overdose/internal/notify"
@@ -312,92 +308,6 @@ func sendNotification(title, content string) {
 	if n != nil {
 		n.Send(context.Background(), title, content)
 	}
-}
-
-func runCapturePhase(ctx context.Context) (*CapturedTokens, error) {
-	doneActivity := markMainFlowActive("capturing")
-	defer doneActivity()
-
-	// Load or generate CA certificate
-	caCert, caKey, err := LoadOrGenerateCA()
-	if err != nil {
-		return nil, fmt.Errorf("CA证书加载失败: %w", err)
-	}
-
-	// Check if cert is trusted, offer to install
-	trusted, _ := IsCertTrusted()
-	if !trusted {
-		fmt.Println("\n首次运行需要安装CA证书（用于拦截HTTPS流量）")
-		fmt.Println("安装后需要输入登录密码确认")
-		if err := InstallCert(); err != nil {
-			return nil, fmt.Errorf("证书安装失败: %w", err)
-		}
-		fmt.Println("证书安装成功!")
-	}
-
-	tokens := NewCapturedTokens()
-
-	// Start MITM proxy
-	proxy, err := StartProxy(caCert, caKey, tokens)
-	if err != nil {
-		return nil, fmt.Errorf("启动代理失败: %w", err)
-	}
-	defer proxy.Close()
-	actualPort := proxy.Port()
-
-	// Set system proxy
-	if err := markProxyActive(actualPort, os.Getpid()); err != nil {
-		return nil, err
-	}
-	if err := SetSystemProxy(actualPort); err != nil {
-		if restoreErr := ClearSystemProxy(); restoreErr == nil {
-			markProxyInactive()
-		}
-		return nil, fmt.Errorf("设置系统代理失败: %w", err)
-	}
-	fmt.Printf("系统代理已设置 (127.0.0.1:%d)\n", actualPort)
-	fmt.Println("请彻底关闭 PC 微信后重新打开，在寿司郎小程序里选任意门店点一次「排队」或「预约」（不必真的提交）")
-
-	// Ensure proxy is cleared on exit
-	defer func() {
-		if err := ClearSystemProxy(); err != nil {
-			fmt.Println("代理恢复失败，已保留恢复标记:", err)
-			return
-		}
-		markProxyInactive()
-		fmt.Println("系统代理已清除")
-	}()
-
-	// Wait for capture with skip channel
-	skipCapture := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			close(skipCapture)
-		default:
-			var buf [1]byte
-			os.Stdin.Read(buf[:])
-			close(skipCapture)
-		}
-	}()
-
-	if err := WaitForCapture(ctx, tokens, skipCapture); err != nil {
-		return nil, err
-	}
-
-	// Prompt phone number if not captured
-	tokens.Lock()
-	phone := tokens.PhoneNumber
-	tokens.Unlock()
-	if phone == "" {
-		fmt.Print("\n请输入手机号: ")
-		input := ReadInput()
-		tokens.Lock()
-		tokens.PhoneNumber = input
-		tokens.Unlock()
-	}
-
-	return tokens, nil
 }
 
 func tryLoadConfig() (*CapturedTokens, bool) {
