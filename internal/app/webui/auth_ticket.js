@@ -85,6 +85,13 @@ function renderTicketProgress(number,data) {
 }
 // Without live data the ticket card asks for the number the mini program is calling now and
 // estimates from this store's usual calling speed; times are always the server's HH:MM fields.
+// A number typed on the ticket card was seen at one moment. The 30-second refresh keeps that
+// moment instead of treating the number as called just now, or the estimate would slide later on every refresh.
+function ticketCalledAt(number,called) {
+  const key=String(number)+'|'+called;
+  if(state.ticketCalled?.key!==key)state.ticketCalled={key,at:new Date()};
+  return state.ticketCalled.at.toISOString().replace(/\.\d+Z$/,'Z');
+}
 async function loadTicketForecast(id,number) {
   const revision=state.ticketForecastRevision=(state.ticketForecastRevision||0)+1;
   try{
@@ -96,12 +103,14 @@ async function loadTicketForecast(id,number) {
     if(field&&liveUsable)field.hidden=true;
     const called=field&&!field.hidden?String(el('ticket-called').value??'').trim():'';
     if(called&&(!/^\d+$/.test(called)||Number(called)<1||Number(called)>99999)){el('ticket-forecast').textContent='叫到的号码请填 1 到 99999 之间的整数。';return;}
-    const q=new URLSearchParams({store:id,target_no:target,travel_minutes:String(travel)});if(called)q.set('called_no',called);
+    const q=new URLSearchParams({store:id,target_no:target,travel_minutes:String(travel)});
+    if(called){q.set('called_no',called);q.set('called_at',ticketCalledAt(number,called));}
     const data=await api('/api/queue/advisor?'+q);
     const box=el('ticket-forecast');if(!box||revision!==state.ticketForecastRevision)return;
     renderTicketProgress(number,data);
     if(data.needs_called_no){if(field)field.hidden=false;box.textContent='实时叫号暂时拿不到。在下面填上小程序里现在叫到几号，就能推算这个号几点叫到。';return;}
-    box.innerHTML=etaHTML(data)||escapeHTML(data.message||'记录还不足，暂时算不准这个号码几点叫到。');
+    const eta=etaHTML(data);
+    box.innerHTML=eta?eta+(called&&data.called_at_hhmm?'<p class="caption">'+escapeHTML('按 '+data.called_at_hhmm+' 填的叫到 '+called+' 号推算。')+'</p>':''):escapeHTML(data.message||'记录还不足，暂时算不准这个号码几点叫到。');
   }catch(e){const box=el('ticket-forecast');if(box&&revision===state.ticketForecastRevision)box.textContent='预计时间暂未更新，请以官方号码状态为准。';}
 }
 async function cancelTicket() {
@@ -266,7 +275,11 @@ function renderLiveSession() {
 }
 async function refreshLiveSession() {
   try{state.liveSession=await api('/api/live-session');renderLiveSession();}
-  catch{el('live-session-detail').textContent='连接状态暂时读取失败，请稍后再试。';}
+  catch{
+    // A failed first read must not keep saying "读取中"; a state read earlier stays as it was.
+    if(!state.liveSession){el('live-session-state').textContent='暂时读不到';el('live-session-state').className='status';}
+    el('live-session-detail').textContent='连接状态暂时读取失败，请稍后再试。';
+  }
   return state.liveSession;
 }
 function gotoLiveSettings() {
@@ -284,8 +297,10 @@ async function startLiveCapture(mode) {
   await guard('live-capture',async()=>{
     showError('live-error',null);
     const revision=++liveCaptureRevision;
-    liveCaptureBaseline=state.liveSession?.captured_at||'';
     liveCaptureMode=mode;liveCaptureNote(mode==='mobile'?'正在准备手机连接…':'正在准备证书和临时代理，请在系统弹窗中授权。');
+    // Compare against the connection saved right now, not one read minutes ago, so an older save is never taken for this capture's.
+    try{const current=await api('/api/live-session');if(revision===liveCaptureRevision)state.liveSession=current;}catch{}
+    liveCaptureBaseline=state.liveSession?.captured_at||'';
     try{
       const result=await api(mode==='mobile'?'/api/mobile-auth/start':'/api/engine/capture',{},{timeout:30000});
       if(revision!==liveCaptureRevision)return;
@@ -299,28 +314,38 @@ async function startLiveCapture(mode) {
     scheduleLivePoll();
   });
 }
+function isNewLiveConnection(session) { return !!(session?.connected&&session.captured_at&&session.captured_at!==liveCaptureBaseline); }
+async function readCaptureSession(revision) {
+  const session=await api('/api/live-session');
+  if(revision!==liveCaptureRevision)return null;
+  state.liveSession=session;return session;
+}
 async function pollLiveCapture() {
   if(!liveCaptureMode||liveCapturePolling)return;
   liveCapturePolling=true;
   const revision=liveCaptureRevision,mode=liveCaptureMode;
   try{
-    const session=await api('/api/live-session');
-    if(revision!==liveCaptureRevision)return;
-    state.liveSession=session;
-    if(session.connected&&session.captured_at&&session.captured_at!==liveCaptureBaseline){await finishLiveCapture(mode);return;}
+    let session=await readCaptureSession(revision);if(!session)return;
+    if(isNewLiveConnection(session)){await finishLiveCapture(mode);return;}
+    let ended='';
     if(mode==='mobile'){
       const mobile=await api('/api/mobile-auth');
       if(revision!==liveCaptureRevision)return;
-      if(!mobile.active){endLiveCapture('手机连接已结束，还没收到实时数据。可以再试一次，或粘贴抓包。');return;}
-      if(el('live-guide').hidden)renderMobileGuide(mobile,'live');
-      liveCaptureNote(liveCaptureHint('mobile'));
+      if(!mobile.active)ended='手机连接已结束，还没收到实时数据。可以再试一次，或粘贴抓包。';
+      else{if(el('live-guide').hidden)renderMobileGuide(mobile,'live');liveCaptureNote(liveCaptureHint('mobile'));}
     }else{
       const engine=(await loadStatus()).engine||{};
       if(revision!==liveCaptureRevision)return;
-      if(engine.status==='error'){endLiveCapture(engine.message||'连接没有完成，请重试或粘贴抓包。');return;}
-      if(engine.status==='idle'){endLiveCapture('电脑微信连接已结束，还没收到实时数据。可以再试一次，或粘贴抓包。');return;}
-      liveCaptureNote(engine.stage==='waiting_capture'?liveCaptureHint('desktop'):captureStages[engine.stage]||engine.message||'连接中…');
+      if(engine.status==='error')ended=engine.message||'连接没有完成，请重试或粘贴抓包。';
+      else if(engine.status==='idle')ended='电脑微信连接已结束，还没收到实时数据。可以再试一次，或粘贴抓包。';
+      else liveCaptureNote(engine.stage==='waiting_capture'?liveCaptureHint('desktop'):captureStages[engine.stage]||engine.message||'连接中…');
     }
+    if(!ended)return;
+    // A capture can save the connection and stop between the two reads above: look once more
+    // before saying nothing arrived.
+    session=await readCaptureSession(revision);if(!session)return;
+    if(isNewLiveConnection(session)){await finishLiveCapture(mode);return;}
+    endLiveCapture(ended);
   }catch(e){if(revision===liveCaptureRevision)showError('live-error',e);}
   finally{liveCapturePolling=false;if(revision===liveCaptureRevision)scheduleLivePoll();renderLiveSession();}
 }
@@ -328,9 +353,17 @@ function endLiveCapture(text) {
   liveCaptureRevision++;clearTimeout(liveCaptureTimer);liveCaptureMode='';el('live-guide').hidden=true;liveCaptureNote(text);
 }
 async function finishLiveCapture(mode) {
-  endLiveCapture(mode==='mobile'?'实时数据已连接。记得关闭手机 Wi-Fi 代理。':'实时数据已连接，已恢复本应用修改的代理。');
-  try{await api(mode==='mobile'?'/api/mobile-auth/stop':'/api/engine/stop',{});}
-  catch(e){showError('live-error',new Error('已连接，但停止抓包没有完成：'+e.message+(mode==='mobile'?'':' 可以在“遇到问题”里恢复系统代理。')));}
+  endLiveCapture('实时数据已连接，正在停止抓包…');
+  // Say the proxy is restored only once the stop has answered that it is.
+  let note=mode==='mobile'?'实时数据已连接。记得关闭手机 Wi-Fi 代理。':'实时数据已连接，已恢复本应用修改的代理。';
+  try{
+    const result=await api(mode==='mobile'?'/api/mobile-auth/stop':'/api/engine/stop',{});
+    if(result.engine?.status==='stopping')note='实时数据已连接，代理正在恢复。';
+  }catch(e){
+    note=mode==='mobile'?'实时数据已连接。记得关闭手机 Wi-Fi 代理。':'实时数据已连接。';
+    showError('live-error',new Error('已连接，但停止抓包没有完成：'+e.message+(mode==='mobile'?'':' 可以在“遇到问题”里恢复系统代理。')));
+  }
+  if(!liveCaptureMode)liveCaptureNote(note);
   liveConnected('实时数据已连接');
 }
 async function stopLiveCapture() {

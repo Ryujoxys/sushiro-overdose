@@ -413,7 +413,7 @@ async function loadLive() {
     if(revision!==state.liveRevision)return;
     state.liveStore=id;
     if(e.code==='live_auth_required'){state.live=null;state.liveStale=false;state.liveAuthRequired=true;renderLiveConnect();}
-    else{state.liveStale=true;if(keep)renderLive(e.message);else el('live-store').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="refresh-live">重试</button>';}
+    else{state.liveStale=true;state.liveAuthRequired=false;if(keep)renderLive(e.message);else el('live-store').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="refresh-live">重试</button>';}
   }
   finally{if(revision===state.liveRevision){state.livePending='';el('live-store').removeAttribute('aria-busy');renderTakeTicket();renderOfflineEta();}}
   if(revision===state.liveRevision)await loadMealPlan();
@@ -499,7 +499,7 @@ function etaClock(eta) {
 function sourceNote(basis,history) { basis=String(basis||'');return [basis,history&&!basis.includes(history)?history:''].filter(Boolean).join(' · '); }
 function etaHTML(data) {
   const eta=data?.eta||{},time=etaClock(eta),wait=eta.wait_minutes_range,parts=[];
-  if(time)parts.push('预计叫到<strong>'+escapeHTML(time)+'</strong>'+(wait&&wait.high>0?escapeHTML('还要等 '+wait.low+'–'+wait.high+' 分钟。'):''));
+  if(time)parts.push('预计叫到<strong>'+escapeHTML(time)+'</strong>'+(wait&&wait.high>0?escapeHTML('还要等 '+(wait.low===wait.high?wait.high:wait.low+'–'+wait.high)+' 分钟。'):''));
   if(eta.arrival_suggestion)parts.push('<p>'+escapeHTML(eta.arrival_suggestion)+'</p>');
   if(!parts.length)return '';
   const note=sourceNote(eta.basis,data.offline?data.history:'');

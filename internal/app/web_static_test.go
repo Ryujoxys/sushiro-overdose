@@ -177,6 +177,7 @@ func TestEmbeddedLiveDataSurface(t *testing.T) {
 		"先连接实时数据，或在小程序里取号后在这里填号码看叫到时间。",
 		"实时门店列表暂时取不到，这里是已知门店。",
 		"记录需要连接实时数据（应用开着时记录）",
+		"后台不使用实时数据连接，关窗后不会记录",
 	} {
 		if !strings.Contains(indexHTML, required) {
 			t.Errorf("missing %s", required)

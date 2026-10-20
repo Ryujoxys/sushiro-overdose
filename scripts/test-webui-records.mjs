@@ -777,4 +777,92 @@ function fixture() {
  assert.equal(f.run('liveCaptureMode'),'');
  assert.equal(f.node('auth-dialog').open,true);
 }
-console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge, live code branching, offline estimate and reading, HH:MM times, offline store note, recording status copy, live-data card and capture).');
+{
+ // A store first waiting for a connection, then failing for another reason, stops asking to connect.
+ const f=fixture();
+ f.setRespond(async path=>path.startsWith('/api/queue/live')?httpError(502,{error:'实时叫号需要连接',code:'live_auth_required'}):{});
+ await f.run('loadLive()');
+ assert.equal(f.run('state.liveAuthRequired'),true);
+ f.setRespond(async path=>path.startsWith('/api/queue/live')?httpError(502,{error:'寿司郎服务暂时不可用',code:'live_unavailable'}):{});
+ await f.run('loadLive()');
+ assert.equal(f.run('state.liveAuthRequired'),false,'a network failure still asked to connect');
+ assert.equal(f.node('take-ticket-reason').textContent,'排队信息还没更新，刷新后再取号。');
+ assert.match(f.node('live-store').innerHTML,/寿司郎服务暂时不可用/);
+ assert.equal(f.node('offline-eta').hidden,false,'estimate inputs hidden while live data is missing');
+}
+{
+ // Ticket card: a typed called number keeps the moment it was typed, so the 30-second refresh does not slide the estimate later.
+ const f=fixture();
+ f.run("showTicket({ticket:{number:'A128',store_id:'1012'},cancel_token:'t'})");
+ for(let i=0;i<5;i++)await tick();
+ f.run("state.live=null;state.liveAuthRequired=true;");
+ f.node('ticket-called-field').hidden=false;f.node('ticket-called').value='100';
+ f.setRespond(async path=>{
+   if(!path.startsWith('/api/queue/advisor'))return {};
+   const q=new URL(path,'http://local').searchParams;
+   return {store_id:'1012',offline:true,source:'input',history:'历史截至 2026-09-06',called_at:q.get('called_at'),called_at_hhmm:'17:55',current:{called_no:100},eta:{...liveEta,basis:'按这家店以往的叫号速度推算（历史截至 2026-09-06）'}};
+ });
+ await f.run("loadTicketForecast('1012','A128')");
+ const first=new URL(f.calls.at(-1).path,'http://local').searchParams.get('called_at');
+ assert.match(first,/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,'called_at is not RFC3339 the server accepts');
+ assert.match(f.node('ticket-forecast').innerHTML,/按 17:55 填的叫到 100 号推算/);
+ await new Promise(resolve=>setTimeout(resolve,1100));
+ f.run('refreshTicketForecast()');for(let i=0;i<5;i++)await tick();
+ const refreshed=f.calls.filter(c=>c.path.startsWith('/api/queue/advisor')).at(-1);
+ assert.equal(new URL(refreshed.path,'http://local').searchParams.get('called_at'),first,'refresh re-stamped an old reading as now');
+ f.node('ticket-called').value='104';
+ await f.run("loadTicketForecast('1012','A128')");
+ assert.notEqual(new URL(f.calls.at(-1).path,'http://local').searchParams.get('called_at'),first,'a new number kept the old time');
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'estimating wrote something');
+ assert.match(f.run("etaHTML({eta:{range_hhmm:{early:'18:20',late:'18:40'},wait_minutes_range:{low:30,high:30}}})"),/还要等 30 分钟。/);
+}
+{
+ // Capture: a connection saved between the two reads still counts; one saved before the capture started does not.
+ const f=fixture();let saved=false;
+ f.setRespond(async path=>{
+   if(path==='/api/live-session')return saved?{state:'active',connected:true,remaining_seconds:3500,captured_at:'B'}:{state:'none',connected:false,remaining_seconds:0};
+   if(path==='/api/mobile-auth/start')return {active:true,addresses:[{url:'http://192.168.1.5:50000/mobile-auth/x',qr_svg:'<svg/>'}]};
+   // The capture saves the connection and stops itself right as its status is read.
+   if(path==='/api/mobile-auth'){saved=true;return {active:false,saved:true};}
+   return {};
+ });
+ await f.run("startLiveCapture('mobile')");
+ await f.run('pollLiveCapture()');
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.match(f.node('live-capture-progress').textContent,/实时数据已连接/,'saved connection reported as missing');
+ const g=fixture();
+ g.run("state.liveSession={state:'active',connected:true,remaining_seconds:3000,captured_at:'A'}");
+ g.setRespond(async path=>path==='/api/live-session'?{state:'active',connected:true,remaining_seconds:3400,captured_at:'B'}:path==='/api/mobile-auth/start'||path==='/api/mobile-auth'?{active:true,addresses:[{url:'http://192.168.1.5:50000/mobile-auth/x',qr_svg:'<svg/>'}]}:{});
+ await g.run("startLiveCapture('mobile')");
+ await g.run('pollLiveCapture()');
+ assert.equal(g.run('liveCaptureMode'),'mobile','an older connection ended the new capture');
+ assert.equal(g.calls.filter(c=>c.path==='/api/mobile-auth/stop').length,0);
+}
+{
+ // Computer capture: the card says the proxy is restored only after the stop answered so.
+ const f=fixture();let stop=httpError(500,{error:'停止失败'}),captures=0;
+ f.setRespond(async path=>{
+   // Each capture saves a newer connection as soon as it starts.
+   if(path==='/api/live-session')return captures?{state:'active',connected:true,remaining_seconds:3500,captured_at:'C'+captures}:{state:'none',connected:false,remaining_seconds:0};
+   if(path==='/api/status')return {platform:'darwin',version:'t',engine:{status:'capturing',stage:'waiting_capture'}};
+   if(path==='/api/engine/capture'){captures++;return {ok:true};}
+   if(path==='/api/engine/stop')return stop;
+   return {};
+ });
+ await f.run("startLiveCapture('desktop')");await f.run('pollLiveCapture()');
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.doesNotMatch(f.node('live-capture-progress').textContent,/已恢复/,'claimed the proxy was restored after a failed stop');
+ assert.match(f.node('live-error').textContent,/恢复系统代理/);
+ stop={ok:true,engine:{status:'stopping'}};
+ await f.run("startLiveCapture('desktop')");await f.run('pollLiveCapture()');
+ assert.match(f.node('live-capture-progress').textContent,/代理正在恢复/);
+}
+{
+ // A first status read that fails does not keep saying "读取中".
+ const f=fixture();
+ f.setRespond(async path=>path==='/api/live-session'?httpError(500,{error:'x'}):{});
+ await f.run('refreshLiveSession()');
+ assert.equal(f.node('live-session-state').textContent,'暂时读不到');
+ assert.match(f.node('live-session-detail').textContent,/读取失败/);
+}
+console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge, live code branching, offline estimate and reading, HH:MM times, offline store note, recording status copy, live-data card and capture, typed-number time, capture race).');
