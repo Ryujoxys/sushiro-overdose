@@ -13,6 +13,8 @@ v4.0 的版本名称为「lite正式版」，在应用设置、CLI 和发布标�
 
 默认主流程：选门店 → 开始记录 → 查看自己的排队规律。手动取号独立保留：选店、必要时认证、显式确认、提交一次。所有狙击、定时取号、循环预约与每日自动计划均已移除；旧接口返回 410，旧计划不执行，历史数据保留。“想几点吃”仅提供只读建议。
 
+**实时数据（spec 018）**：2026-10 起寿司郎小程序改用新网关 `sapi.sushiro.com.cn/gateway/wechat/api/2.0`，要求用户自己的会员 token（约 1 小时）。应用分两种状态：不连接时，门店目录、“想几点吃”、“填当前叫号算几点叫到”、手动记一笔都走本机记录和内置历史（标明截止日期）；用户把自己的小程序请求连接进来（手机 / 电脑抓包，或粘贴一条请求）后，界面进程在 token 有效期内恢复实时叫号、记录和提醒。不做无人值守续期：不生成 `js_code`、不模拟微信、不使用小程序包里的签名密钥；会员 token 不交给独立后台进程。
+
 明确选择的记录门店（`use_preference_stores=false`）只使用所选列表，不追加旧偏好或提醒门店。空列表表示暂停记录，不删除历史、不修改系统自启动。图表选店同时检索 `city` 和 `area`；历史开关仅控制样本，不能清掉个人门店的地区检索信息。
 
 **技术栈**：Go 1.25，业务核心使用标准库，原生桌面适配层使用固定版本 Wails v2；页面仍为内嵌 HTML/CSS/JS。代码按职责拆到 `internal/`，可选 MCP 为独立 Python 模块。架构例外见 `specs/014-local-desktop/plan.md`。
@@ -83,7 +85,9 @@ main.go (桌面版默认启动原生窗口)
 | `web_queue_live.go` | 实时排队 API（公开门店等位/区域/单店详情） |
 | `local_records.go` | 本机公开快照查询、等待分布、样本覆盖与 JSONL 导出 |
 | `local_records_import.go` | 个人备份恢复：校验、去重、只追加，不改写或删除已有记录 |
-| `history_bundle.go`、`record_view.go` | 固定历史包嵌入和校验、图表半小时代表值合并、历史开关持久化；不参与取号预测或个人模型 |
+| `history_bundle.go`、`record_view.go` | 固定历史包嵌入和校验、图表半小时代表值合并、历史开关持久化；可为“想几点吃”和叫到时间提供历史参考（结果标明截止日期），不写入个人模型 |
+| `queue_offline.go` | 离线建议：内置历史 + 本机观测的叫号速度、按当前叫号推算叫到时间、历史等待兜底、离线门店目录、实时失败记忆 |
+| `live_session.go`、`web_live_session.go` | 用户自己的网关会员连接：解析 curl / 请求头 / HAR、只保存更新的连接（0600）、JWT 到期判断；`/api/live-session*` 只返回状态，从不返回头部的值 |
 | `webui/record_chart.js`、`webui/store_select.js` | 叫号与等待曲线、时段数值及样本解释、可搜索图表门店；鼠标、键盘、触屏均可查看 |
 | `automation_retired.go` | 旧自动抢号 API 返回 410，不执行或写计划 |
 | `netticket.go` | 手动取号结果与旧文件兼容，强制禁用旧计划 |
@@ -96,7 +100,7 @@ main.go (桌面版默认启动原生窗口)
 | 文件 | 职责 |
 |------|------|
 | `api.go` | `Client` — 寿司郎官方 API 封装（门店/时段/创建预约/取消预约） |
-| `queue_live.go` | 公开排队接口客户端：门店列表、单店排队、区域列表（标准库实现，支持 `SUSHIRO_TOKEN` 覆盖）；解析 `getStoreById` 的 `groupQueues` 得到当前叫号 |
+| `queue_live.go` | 实时排队客户端：有可用会员连接时走新网关；仅设 `SUSHIRO_TOKEN` 时走旧地址（调试）；否则所有方法本地返回 `ErrLiveAuthRequired`、零请求。解码加固（id 字符串/数字、id 必须对上、信封与空对象报错），30 秒单店缓存 |
 | `queue_live_panel.go` | 单店实时面板聚合：实时叫号/在等桌数/预估等待 + 由本机采样历史算近15分钟叫号与历史均速 |
 | `queue_alerts.go` | 叫号提醒规则与去重状态：`wait_below`（预估等待降到阈值）/`called_reach`（叫号接近手中号），采样循环命中即经通知渠道推送 |
 | `queue_baseline_local.go` | 本机公开快照聚合为统一版本化数据协议，无远程数据库请求 |
@@ -202,6 +206,7 @@ main.go (桌面版默认启动原生窗口)
 ├── queue_stats.json     本地聚合排队统计缓存
 ├── queue_baseline.json  公开采集配置
 ├── queue_baseline.jsonl 公开门店快照，统一协议字段
+├── live_session.json    用户自己的网关会员连接（0600，约 1 小时有效；只给界面进程读）
 ├── queue_model.json     本机分位数模型与源文件指纹
 ├── record_view.json     是否将内置历史计入图表，默认开启
 ├── queue_collection_state.json 共享采集进度、心跳与错误
@@ -245,7 +250,13 @@ main.go (桌面版默认启动原生窗口)
 | GET/POST | `/api/queue/service` | 公开采集服务与本机模型状态；显式启用后台、自启动、暂停和关闭自启动 |
 | GET | `/api/queue/stores?city=深圳&waiting=1&limit=10` | 实时排队门店列表，支持 city/area/q/store/stores/open/waiting/near/limit |
 | GET | `/api/queue/store?id=1012` | 实时单店排队详情 |
-| GET | `/api/queue/live?store=1012` | 单店实时面板：当前叫号/在等桌数/预估等待/近15分钟叫号/历史均速 |
+| GET | `/api/queue/live?store=1012` | 单店实时面板：当前叫号/在等桌数/预估等待/近15分钟叫号/历史均速；没有连接时 502 + `code: live_auth_required` |
+| GET | `/api/queue/advisor?store=&target_no=&called_no=&called_at=` | 叫到时间：有连接用实时；给了 `called_no` 或实时不可用时按叫号速度离线推算（附 HH:MM 与来源说明）；都没有时 200 + `needs_called_no` |
+| GET | `/api/queue/plan?store=&target_meal=&travel_minutes=` | 想几点吃：本机等待记录不足时用内置历史等待规律 |
+| POST | `/api/queue/reading` | 手动记一笔小程序里看到的叫号（只写本机观测，等待记为未知），并评估叫号提醒 |
+| GET | `/api/live-session` | 实时数据连接状态：none / active / expiring / expired、剩余秒数；不含任何头部值 |
+| POST | `/api/live-session/import` | 粘贴一条新网关请求（curl / 请求头 / HAR）建立连接 |
+| POST | `/api/live-session/clear` | 断开实时数据连接 |
 | GET/POST | `/api/queue/alerts` | 读取/保存叫号提醒规则 |
 | GET | `/api/queue/areas` | 官方区域列表 |
 | 任意 | `/api/cloud`、`/api/cloud/*` | 已下线，统一返回 410；不再接受配置、登录或回调 |

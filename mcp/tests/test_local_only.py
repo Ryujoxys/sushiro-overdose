@@ -65,6 +65,8 @@ class LocalOnlyTests(unittest.TestCase):
         self.assertEqual(desktop.calls[-1], ("/api/queue/advisor", {"store": "1012", "target_no": "123", "travel_minutes": "15"}))
         tools_advice.arrival_advice(desktop, 1012, want_meal_time="18:30")
         self.assertEqual(desktop.calls[-1], ("/api/queue/plan", {"store": "1012", "target_meal": "1830"}))
+        tools_advice.arrival_advice(desktop, 1012, target_no=1350, called_no=1180, called_at="18:20")
+        self.assertEqual(desktop.calls[-1], ("/api/queue/advisor", {"store": "1012", "called_no": "1180", "called_at": "1820", "target_no": "1350"}))
 
 
 if __name__ == "__main__":

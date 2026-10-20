@@ -37,7 +37,12 @@
    - 官方临时错误或结果不明：先查询已有号码，不自动重试写请求。
    - 认证过期：停止并要求重新捕获。
 
-7. 任何跨模块新增能力必须有测试。
+7. 实时数据只用用户自己的连接（spec 018）。
+   - 会员 token 只由界面进程通过注入的 provider 读取；独立后台进程从不读取，没有连接时零请求。
+   - 不做无人值守续期，不模拟微信，不使用小程序包里的签名密钥；到期即停，提示用户重新连接。
+   - 内置历史可为建议提供历史参考，结果必须标明来源与截止日期，不写入个人模型。
+
+8. 任何跨模块新增能力必须有测试。
    - API payload/response 解析要有单元测试。
    - 状态机分支要有状态测试。
    - 取消/取号/预约边界要有安全测试。
@@ -52,6 +57,7 @@
 | Public queue live data | `internal/app/queue_live*.go` | observations/baseline | call auth mutation API |
 | Sampling | `internal/app/sampling.go`, `internal/app/history.go` | history/baseline/observations | modify reservation or net ticket state |
 | Public local service | `internal/app/queue_service.go`, `queue_collection_state.go`, `queue_model.go` | public history/model/heartbeat, explicit autostart | import credentials, start account schedulers, submit tickets |
+| Live session (spec 018) | `internal/app/live_session.go`, `web_live_session.go` | `~/.sushiro/live_session.json` (user's own gateway member token, 0600) | be read by the standalone daemon, be sent to any host but `sapi.sushiro.com.cn` read endpoints, appear in logs or HTTP responses, mint `js_code` or sign init requests |
 | Dashboard/trends | `internal/app/queue_dashboard.go`, `internal/app/queue_trends.go` | computed responses/cache | mutate official or local booking state |
 | Web UI | `internal/app/web_static.go`, `internal/app/web_*.go` | display and explicit user actions | hidden destructive actions |
 

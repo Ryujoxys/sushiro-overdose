@@ -108,14 +108,16 @@ def available_slots(store: Optional[str] = None, period: Optional[str] = None) -
 
 # ===== C. 智能到店建议（综合实时+历史）=====
 
-@mcp.tool(annotations=_READONLY, description="综合到店建议：实时 ETA + 历史规律。给 target_no 算'这个号几点叫到/几点出发'；给 want_meal_time(如'18:30')算'想这个点吃几点取号'。travel_minutes 是路程分钟。")
+@mcp.tool(annotations=_READONLY, description="综合到店建议：实时 ETA + 历史规律。给 target_no 算'这个号几点叫到/几点出发'；给 want_meal_time(如'18:30')算'想这个点吃几点取号'。travel_minutes 是路程分钟。没有实时连接时，问用户小程序里现在叫到几号，填 called_no（可选 called_at 如'18:20'），按这家店以往叫号速度推算；返回 needs_called_no 时就是在要这个数。")
 def arrival_advice(
     store_id: int,
     target_no: Optional[int] = None,
     want_meal_time: Optional[str] = None,
     travel_minutes: Optional[int] = None,
+    called_no: Optional[int] = None,
+    called_at: Optional[str] = None,
 ) -> dict:
-    return tools_advice.arrival_advice(_require_desktop(), store_id, target_no, want_meal_time, travel_minutes)
+    return tools_advice.arrival_advice(_require_desktop(), store_id, target_no, want_meal_time, travel_minutes, called_no, called_at)
 
 
 # ===== D. 教学资源 =====
