@@ -116,9 +116,17 @@ func TestPublicCollectorYieldsResumesAndRespectsCrossProcessLock(t *testing.T) {
 	if calls != 1 || c.status().LastError == "" {
 		t.Fatal("collector did not resume or hid a failed request")
 	}
+	// A wholly failed round backs off instead of retrying on the very next tick.
 	c.tick(context.Background())
-	if calls != 2 {
-		t.Fatal("a wholly failed first round should retry next tick")
+	if status := c.status(); calls != 1 || status.NextAttemptAt == "" || status.LastErrorCode != liveErrUnavailable || status.WaitingForConnection {
+		t.Fatalf("failed round retried without backing off: calls=%d %+v", calls, status)
+	}
+	state := loadQueueCollectionState()
+	state.NextAttemptAt = time.Now().Add(-time.Second).Format(time.RFC3339)
+	persistCollectorState(t, state)
+	c.tick(context.Background())
+	if calls != 2 || loadQueueCollectionState().ConsecutiveFailures != 2 {
+		t.Fatalf("backoff did not end: calls=%d %+v", calls, loadQueueCollectionState())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -225,7 +233,7 @@ func TestPublicServiceEntryCannotStartAuthenticatedWork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"netTicketSched.Start(", "netTicketTick(", "sampler.Start(", "CreateNetTicket(", "LoadLocalConfig(", "mobileAuthCapture.status("} {
+		for _, forbidden := range []string{"netTicketSched.Start(", "netTicketTick(", "sampler.Start(", "CreateNetTicket(", "LoadLocalConfig(", "mobileAuthCapture.status(", "LoadLiveSession"} {
 			if strings.Contains(string(data), forbidden) {
 				t.Fatalf("public service reaches private work: %s in %s", forbidden, path)
 			}

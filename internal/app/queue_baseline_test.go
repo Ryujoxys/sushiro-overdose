@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -324,5 +325,76 @@ func TestQueueBaselineRecordFromStoreWritesDetailShape(t *testing.T) {
 	}
 	if !strings.Contains(record.GroupQueuesJSON, "540") {
 		t.Fatalf("group queues json = %q", record.GroupQueuesJSON)
+	}
+}
+
+func TestRecordQueueLiveSnapshotsUsesObservedAtAndKeepsManualOutOfRecords(t *testing.T) {
+	reliabilityHome(t)
+	seen := mustParseLocalTime(t, "2026-10-18T18:30:00+08:00")
+	typed := mustParseLocalTime(t, "2026-10-18T18:42:00+08:00")
+	n, err := recordQueueLiveSnapshots(context.Background(), []QueueLiveStore{
+		{ID: 1012, Name: "南山店", StoreStatus: "OPEN", Wait: 40, GroupQueuesCount: 9, Source: queueLiveSourcePassive, ObservedAt: seen,
+			GroupQueues: QueueLiveGroupQueues{BoothQueue: []string{"820"}}},
+		{ID: 1012, Name: "南山店", StoreStatus: "OPEN", Source: queueLiveSourceManual, ObservedAt: typed,
+			GroupQueues: QueueLiveGroupQueues{BoothQueue: []string{"831"}}},
+		{Name: "没有编号", StoreStatus: "OPEN", Wait: 10},
+	})
+	if n != 2 || !errors.Is(err, errLiveStoreFormat) {
+		t.Fatalf("written=%d err=%v", n, err)
+	}
+	records, err := parseJSONLFile[QueueBaselineRecord](queueBaselineRecordsPath(), normalizeQueueBaselineRecordForRead)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %+v %v", records, err)
+	}
+	if at, ok := parseRFC3339Local(records[0].CollectedAt); !ok || !at.Equal(seen) || records[0].DisplayCalledNo != 820 {
+		t.Fatalf("record not stamped with ObservedAt: %+v", records[0])
+	}
+	observations := loadQueueObservations()
+	if len(observations) != 2 {
+		t.Fatalf("observations = %+v", observations)
+	}
+	byCalled := map[int]QueueObservation{}
+	for _, o := range observations {
+		byCalled[o.DisplayCalledNo] = o
+	}
+	if at, ok := parseRFC3339Local(byCalled[820].CollectedAt); !ok || !at.Equal(seen) || byCalled[820].SourceEndpoint == queueLiveSourceManual {
+		t.Fatalf("passive observation: %+v", byCalled[820])
+	}
+	if at, ok := parseRFC3339Local(byCalled[831].CollectedAt); !ok || !at.Equal(typed) || byCalled[831].SourceEndpoint != queueLiveSourceManual {
+		t.Fatalf("manual observation: %+v", byCalled[831])
+	}
+	if model, err := loadLocalQueueModel(); err != nil || model.SampleCount != 1 {
+		t.Fatalf("model not rebuilt once from records: %+v %v", model, err)
+	}
+
+	// Manual readings alone never touch the records file or its model.
+	before, _ := os.ReadFile(queueBaselineRecordsPath())
+	if n, err := recordQueueLiveSnapshots(context.Background(), []QueueLiveStore{{ID: 3006, StoreStatus: "OPEN", Source: queueLiveSourceManual, GroupQueues: QueueLiveGroupQueues{BoothQueue: []string{"100"}}}}); n != 1 || err != nil {
+		t.Fatalf("manual only: %d %v", n, err)
+	}
+	if after, _ := os.ReadFile(queueBaselineRecordsPath()); string(after) != string(before) {
+		t.Fatal("a manual reading was written into my records")
+	}
+}
+
+func TestCollectorRecordsGatewaySnapshotsWithTheirReadTime(t *testing.T) {
+	cfg := publicCollectorFixture(t)
+	now := time.Now()
+	session := testLiveSession(now, time.Hour)
+	useLiveSession(t, &session)
+	gatewayTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"1012","name":"南山店","storeStatus":"OPEN","wait":30,"groupQueues":{"boothQueue":["900"]}}`))
+	})
+	before := time.Now().Add(-time.Second)
+	n, err := collectQueueBaselineWithConfig(context.Background(), cfg)
+	if n != 1 || err != nil {
+		t.Fatalf("gateway round: %d %v", n, err)
+	}
+	records, err := parseJSONLFile[QueueBaselineRecord](queueBaselineRecordsPath(), normalizeQueueBaselineRecordForRead)
+	if err != nil || len(records) != 1 || records[0].StoreID != 1012 || records[0].DisplayCalledNo != 900 {
+		t.Fatalf("records = %+v %v", records, err)
+	}
+	if at, ok := parseRFC3339Local(records[0].CollectedAt); !ok || at.Before(before) || at.After(time.Now().Add(time.Second)) {
+		t.Fatalf("record time = %s", records[0].CollectedAt)
 	}
 }

@@ -246,3 +246,34 @@ func TestDesktopBridgeImportUsesNativeDialogOnly(t *testing.T) {
 		t.Fatalf("import: %+v %v %q", response, err, received)
 	}
 }
+
+func TestDesktopBridgeAllowsLiveSessionRoutes(t *testing.T) {
+	var seen []string
+	b := testDesktopBridge(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		writeJSON(w, map[string]string{"state": "none"})
+	})
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", "/api/live-session", ""},
+		{"POST", "/api/live-session/import", `{"text":"curl"}`},
+		{"POST", "/api/live-session/clear", "{}"},
+	} {
+		if response, err := b.Request(tc.method, tc.path, tc.body, 1000); err != nil || response.Status != 200 {
+			t.Fatalf("%s %s: %+v %v", tc.method, tc.path, response, err)
+		}
+	}
+	for _, tc := range []struct{ method, path string }{
+		{"POST", "/api/live-session"}, {"GET", "/api/live-session/import"}, {"GET", "/api/live-session/clear"},
+	} {
+		body := ""
+		if tc.method == "POST" {
+			body = "{}"
+		}
+		if _, err := b.Request(tc.method, tc.path, body, 1000); err == nil {
+			t.Fatalf("bridge accepted %s %s", tc.method, tc.path)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("requests reaching the backend: %v", seen)
+	}
+}

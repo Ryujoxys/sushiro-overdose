@@ -5,6 +5,7 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,8 @@ const (
 	queueBaselineRecordsFile    = "queue_baseline.jsonl"
 	queueBaselineDefaultMinutes = 5
 	queueBaselineTickSeconds    = 30
+	// 网关按用户自己的连接计次，采集间隔不低于 60 秒。
+	queueBaselineMinIntervalSeconds = 60
 )
 
 // QueueBaselineRecord 是单家门店在某时刻的基准快照（全量记录，不做活跃过滤，
@@ -258,8 +261,8 @@ func (c *QueueBaselineCollector) wait() {
 }
 
 // tick 以固定 base cadence(30s) 轮询，但只在达到配置间隔时才真正采集，支持运行时热改开关/间隔。
-// A wholly failed round is retried on the next tick; partial success waits for the
-// configured interval to avoid repeatedly requesting already collected stores.
+// A wholly failed round backs off (30s doubling to 15m); a missing or rejected connection
+// stops collection until the user connects again (see queue_collection_state.go).
 func (c *QueueBaselineCollector) tick(ctx context.Context) {
 	c.collectTick(ctx)
 }
@@ -272,6 +275,12 @@ type PublicQueueCollectionStatus struct {
 	PausedReason    string   `json:"paused_reason,omitempty"`
 	StoreIDs        []string `json:"store_ids"`
 	IntervalSeconds int      `json:"interval_seconds"`
+	// LastErrorCode 是上次失败的机器可读分类（live_auth_required / live_rate_limited / live_unavailable）。
+	LastErrorCode string `json:"last_error_code,omitempty"`
+	// NextAttemptAt 是失败后最早的下一次尝试；等待连接时是不换连接也会再试一次的时间。
+	NextAttemptAt string `json:"next_attempt_at,omitempty"`
+	// WaitingForConnection：没有可用的实时数据连接，记录已停下，等用户打开应用并连接。
+	WaitingForConnection bool `json:"waiting_for_connection"`
 }
 
 func (c *QueueBaselineCollector) status() PublicQueueCollectionStatus {
@@ -314,10 +323,9 @@ func queueAlertStoreIDs() []string {
 	return UniqueNonEmptyStrings(ids)
 }
 
-// collectQueueBaselineWithConfig 拉取本地选定门店的公开快照并落盘，返回写入条数。
-// 单店失败不中断整体，保留已采集数据并返回错误，状态页不隐藏部分失败。
-// 注意双重写入：每店快照既写基准记录(queue_baseline.jsonl)，又顺手写一份排队观测
-// (queue_observations.jsonl)——因为公开快照含当前叫号，能让叫号/到店预测在无通行证时也积累曲线。
+// collectQueueBaselineWithConfig 拉取本地选定门店的实时快照并落盘，返回写入条数。
+// 单店失败不中断整体，保留已采集数据并返回错误，状态页不隐藏部分失败；连接失效或
+// 请求太频繁时整轮停下，不再逐店撞接口。没有连接的进程拿到的客户端不发任何请求。
 func collectQueueBaselineWithConfig(ctx context.Context, cfg QueueBaselineConfig) (int, error) {
 	return collectQueueBaselineWithClient(ctx, cfg, NewQueueLiveClient())
 }
@@ -327,8 +335,7 @@ func collectQueueBaselineWithClient(ctx context.Context, cfg QueueBaselineConfig
 	if len(storeIDs) == 0 {
 		return 0, fmt.Errorf("暂无本地基准门店")
 	}
-	now := time.Now().Format(time.RFC3339)
-	records := make([]QueueBaselineRecord, 0, len(storeIDs))
+	stores := make([]QueueLiveStore, 0, len(storeIDs))
 	var lastErr error
 	for _, storeID := range storeIDs {
 		if reason := publicQueueCollectionBlockedReason(); reason != "" {
@@ -339,28 +346,75 @@ func collectQueueBaselineWithClient(ctx context.Context, cfg QueueBaselineConfig
 			lastErr = ctx.Err()
 			break
 		}
-		s, err := client.GetStore(ctx, storeID)
+		// 每条记录都是新读到的数据，不用页面的短缓存。
+		s, err := client.fetchStore(ctx, storeID)
 		if err != nil {
 			lastErr = err
+			if code := liveErrorCode(err); code == liveErrAuthRequired || code == liveErrRateLimited {
+				break
+			}
 			continue
 		}
-		records = append(records, queueBaselineRecordFromStore(s, now))
-		// 公开快照同样包含当前叫号：顺手写入排队观测，让叫号预测和到店预测
-		// 无需通行证也能积累本机曲线（与凭证态采样写入同一份观测文件）。
-		observation := queueObservationFromLiveStore(s, time.Now())
-		if err := appendQueueObservation(observation); err != nil {
-			lastErr = err
+		stores = append(stores, s)
+	}
+	if len(stores) == 0 {
+		return 0, lastErr
+	}
+	// 已拿到的快照照常写入：本轮超时或应用退出时也不丢，提醒最多再等 10 秒。
+	writeCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+	}
+	n, err := recordQueueLiveSnapshots(writeCtx, stores)
+	return n, errors.Join(lastErr, err)
+}
+
+// recordQueueLiveSnapshots 是实时快照的共享写入器（后台记录、经本机代理看到的小程序响应、
+// 手动记一笔共用）：逐条写观测（时间用 ObservedAt，零值为现在）、评估叫号提醒；
+// 除 Source == "manual" 外再写基准记录，最后重建一次本机模型。返回写入的门店数。
+// 没有门店编号的快照不写，避免零值记录。
+func recordQueueLiveSnapshots(ctx context.Context, stores []QueueLiveStore) (int, error) {
+	records := make([]QueueBaselineRecord, 0, len(stores))
+	written := 0
+	var errs error
+	for _, s := range stores {
+		if s.ID <= 0 {
+			errs = errors.Join(errs, errLiveStoreFormat)
 			continue
+		}
+		at := s.ObservedAt
+		if at.IsZero() {
+			at = time.Now()
+		}
+		manual := s.Source == queueLiveSourceManual
+		if !manual {
+			records = append(records, queueBaselineRecordFromStore(s, at.Format(time.RFC3339)))
+		}
+		// 实时快照同样包含当前叫号：顺手写入排队观测，让叫号预测和到店预测
+		// 无需通行证也能积累本机曲线（与凭证态采样写入同一份观测文件）。
+		observation := queueObservationFromLiveStore(s, at)
+		if manual {
+			observation.SourceEndpoint = queueLiveSourceManual
+		}
+		if err := appendQueueObservation(observation); err != nil {
+			errs = errors.Join(errs, err)
+			continue
+		}
+		if manual {
+			written++
 		}
 		evaluateQueueAlerts(ctx, observation, s.Name)
 	}
-	if len(records) == 0 && lastErr != nil {
-		return 0, lastErr
+	if len(records) == 0 {
+		return written, errs
 	}
 	if err := appendQueueBaselineRecords(records); err != nil {
-		return 0, err
+		return written, errors.Join(errs, err)
 	}
-	return len(records), lastErr
+	written += len(records)
+	return written, errors.Join(errs, rebuildLocalQueueModel(time.Now()))
 }
 
 func queueBaselineStoreIDs(cfg QueueBaselineConfig) []string {
@@ -381,13 +435,13 @@ func queueBaselineStoreIDs(cfg QueueBaselineConfig) []string {
 
 func queueBaselineIntervalSeconds(cfg QueueBaselineConfig, storeIDs []string) int {
 	interval := cfg.IntervalMinutes * 60
-	if interval <= 60 {
-		return interval
+	if interval <= queueBaselineMinIntervalSeconds {
+		return queueBaselineMinIntervalSeconds
 	}
 	for _, alertID := range queueAlertStoreIDs() {
 		for _, storeID := range storeIDs {
 			if alertID == storeID {
-				return 60
+				return queueBaselineMinIntervalSeconds
 			}
 		}
 	}

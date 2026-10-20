@@ -17,6 +17,7 @@ func TestUninstallLocalDataAllRemovesSensitiveFiles(t *testing.T) {
 
 	removed := []string{
 		LocalConfigPath(),
+		liveSessionPath(),
 		NotifyConfigPath(),
 		FeishuConfigPath(),
 		PreferencesPath(),
@@ -56,7 +57,7 @@ func TestUninstallLocalDataAllRemovesSensitiveFiles(t *testing.T) {
 	}
 
 	statusByName := maintenanceStatusesByName(report)
-	for _, name := range []string{"config", "notify", "feishu", "preferences", "stores", "state", "history", "pid", "proxy_marker", "ca_cert", "ca_key"} {
+	for _, name := range []string{"config", "live_session", "notify", "feishu", "preferences", "stores", "state", "history", "pid", "proxy_marker", "ca_cert", "ca_key"} {
 		if statusByName[name] != MaintenanceStatusOK {
 			t.Fatalf("expected %s status %q, got %q", name, MaintenanceStatusOK, statusByName[name])
 		}

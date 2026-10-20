@@ -80,6 +80,9 @@ func newWebMux() *http.ServeMux {
 	mux.HandleFunc("/api/queue/alerts/status", handleQueueAlertStatus)
 	mux.HandleFunc("/api/queue/areas", handleQueueLiveAreas)
 	mux.HandleFunc("/api/queue/baseline", handleQueueBaseline)
+	mux.HandleFunc("/api/live-session", handleLiveSession)
+	mux.HandleFunc("/api/live-session/import", handleLiveSessionImport)
+	mux.HandleFunc("/api/live-session/clear", handleLiveSessionClear)
 	registerRetiredCloudRoutes(mux)
 	mux.HandleFunc("/api/update", handleUpdateCheck)
 	mux.HandleFunc("/api/stores", handleStores)
@@ -184,6 +187,8 @@ func startWebBackend(parent context.Context, activation http.HandlerFunc) (*webB
 	backend.exit = &appExitState{stop: stopPublicQueueService, quit: backend.Close}
 	mux.HandleFunc("/api/app/quit", backend.exit.handleQuit)
 	server.Handler = webSecurityMiddleware(backend.exit.middleware(mux))
+	// 只有界面进程读取会员连接；独立后台记录进程不走这里，从不设置它。
+	queueLiveSessionProvider = LoadLiveSession
 	tokens, ok := tryLoadConfig()
 	if ok {
 		setWebSettings(tokens.ToSettingsWithPrefs(LoadPreferences()))

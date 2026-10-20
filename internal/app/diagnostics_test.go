@@ -1,6 +1,32 @@
 package app
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestNetworkDiagnosticsListBothHostsWithoutOverclaiming(t *testing.T) {
+	hosts := diagnosticNetworkHosts()
+	if len(hosts) != 2 || hosts[0].Host != liveGatewayHost || hosts[1].Host != "crm-cn-prd.sushiro.com.cn" {
+		t.Fatalf("hosts = %+v", hosts)
+	}
+	hosts[0].Reachable, hosts[0].LatencyMS = true, 12
+	hosts[1].Reachable, hosts[1].LatencyMS = true, 15
+	var out strings.Builder
+	printNetworkDiagnostics(&out, hosts)
+	text := out.String()
+	for _, want := range []string{"sapi.sushiro.com.cn:443 可达", "crm-cn-prd.sushiro.com.cn:443 可达", "能连上不代表实时数据能用", "需要在应用里连接"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("diagnostics text missing %q:\n%s", want, text)
+		}
+	}
+	hosts[0].Reachable, hosts[0].Error = false, "DNS: no such host"
+	out.Reset()
+	printNetworkDiagnostics(&out, hosts)
+	if !strings.Contains(out.String(), "sapi.sushiro.com.cn:443 不可达 (DNS: no such host)") {
+		t.Fatalf("unreachable host: %s", out.String())
+	}
+}
 
 func TestSystemProxyMentionsPort(t *testing.T) {
 	cases := []struct {

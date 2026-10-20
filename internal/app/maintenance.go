@@ -279,6 +279,7 @@ func uninstallTargets(options UninstallOptions) []maintenanceTarget {
 	certDir := CertDirPath()
 	return []maintenanceTarget{
 		{name: "config", path: LocalConfigPath(), selected: options.All || options.Config},
+		{name: "live_session", path: liveSessionPath(), selected: options.All || options.Config},
 		{name: "notify", path: NotifyConfigPath(), selected: options.All || options.Notify},
 		{name: "feishu", path: FeishuConfigPath(), selected: options.All || options.Feishu},
 		{name: "preferences", path: PreferencesPath(), selected: options.All || options.Preferences},

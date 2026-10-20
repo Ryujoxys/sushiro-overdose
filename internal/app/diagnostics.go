@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,7 +47,8 @@ type Diagnostics struct {
 	ProxyMarker   DiagnosticProxyMarker `json:"proxy_marker"`
 	SystemProxy   DiagnosticSystemProxy `json:"system_proxy"`
 	ProxyChain    DiagnosticProxyChain  `json:"proxy_chain"`
-	Network       DiagnosticNetwork     `json:"network"`
+	Network       DiagnosticNetwork     `json:"network"` // 新接口主机，与 network_hosts[0] 相同
+	NetworkHosts  []DiagnosticNetwork   `json:"network_hosts"`
 	Engine        EngineState           `json:"engine"`
 	LogTail       []string              `json:"log_tail"`
 	LogError      string                `json:"log_error,omitempty"`
@@ -131,6 +133,8 @@ type DiagnosticProxyMarker struct {
 }
 
 type DiagnosticNetwork struct {
+	Name      string   `json:"name,omitempty"`
+	Note      string   `json:"note,omitempty"`
 	Host      string   `json:"host"`
 	Port      int      `json:"port"`
 	Addresses []string `json:"addresses,omitempty"`
@@ -217,10 +221,13 @@ func CollectDiagnostics() Diagnostics {
 		ProxyMarker:   proxyMarker,
 		SystemProxy:   systemProxy,
 		ProxyChain:    collectProxyChainDiagnostics(proxyMarker, systemProxy, certificate),
-		Network:       collectNetworkDiagnostics(),
+		NetworkHosts:  collectNetworkDiagnostics(),
 		Engine:        engine.GetState(),
 		LogTail:       logTail,
 		EngineLogTail: engineLogs,
+	}
+	if len(d.NetworkHosts) > 0 {
+		d.Network = d.NetworkHosts[0]
 	}
 	if logErr != nil {
 		d.LogError = logErr.Error()
@@ -383,25 +390,46 @@ func collectProxyMarkerDiagnostics() DiagnosticProxyMarker {
 	return out
 }
 
-func collectNetworkDiagnostics() DiagnosticNetwork {
-	out := DiagnosticNetwork{Host: SushiroHost, Port: 443}
-	addrs, err := net.LookupHost(SushiroHost)
+// diagnosticNetworkHosts 同时检查新旧两个主机。只做 DNS 和 TCP 连通，不发任何请求；
+// 旧主机能连上不代表数据能用，新主机还需要用户在应用里连接。
+func diagnosticNetworkHosts() []DiagnosticNetwork {
+	return []DiagnosticNetwork{
+		{Name: "实时数据（新接口）", Host: liveGatewayHost, Port: 443, Note: "能连上只说明网络通；实时数据还需要在应用里连接（约 1 小时有效）"},
+		{Name: "旧接口", Host: SushiroHost, Port: 443, Note: "旧接口已不再提供匿名数据：能连上不代表实时数据能用"},
+	}
+}
+
+func collectNetworkDiagnostics() []DiagnosticNetwork {
+	hosts := diagnosticNetworkHosts()
+	var wg sync.WaitGroup
+	for i := range hosts {
+		wg.Add(1)
+		go func(out *DiagnosticNetwork) {
+			defer wg.Done()
+			probeDiagnosticHost(out)
+		}(&hosts[i])
+	}
+	wg.Wait()
+	return hosts
+}
+
+func probeDiagnosticHost(out *DiagnosticNetwork) {
+	addrs, err := net.LookupHost(out.Host)
 	if err != nil {
 		out.Error = "DNS: " + err.Error()
-		return out
+		return
 	}
 	out.Addresses = addrs
 
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(SushiroHost, "443"), 3*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(out.Host, strconv.Itoa(out.Port)), 3*time.Second)
 	if err != nil {
 		out.Error = "TCP: " + err.Error()
-		return out
+		return
 	}
 	_ = conn.Close()
 	out.Reachable = true
 	out.LatencyMS = time.Since(start).Milliseconds()
-	return out
 }
 
 func collectSystemProxyDiagnostics() DiagnosticSystemProxy {
@@ -1064,15 +1092,7 @@ func printDiagnostics(w io.Writer, d Diagnostics) {
 		}
 		fmt.Fprintln(w)
 	}
-	if d.Network.Reachable {
-		fmt.Fprintf(w, "网络连通性: %s:%d 可达 (%dms)\n", d.Network.Host, d.Network.Port, d.Network.LatencyMS)
-	} else {
-		fmt.Fprintf(w, "网络连通性: %s:%d 不可达", d.Network.Host, d.Network.Port)
-		if d.Network.Error != "" {
-			fmt.Fprintf(w, " (%s)", d.Network.Error)
-		}
-		fmt.Fprintln(w)
-	}
+	printNetworkDiagnostics(w, d.NetworkHosts)
 	fmt.Fprintf(w, "引擎: %s %s\n", d.Engine.Status, d.Engine.Message)
 	if d.LogError != "" {
 		fmt.Fprintf(w, "日志读取错误: %s\n", d.LogError)
@@ -1092,6 +1112,25 @@ func printDiagnostics(w io.Writer, d Diagnostics) {
 				fmt.Fprintf(w, "  [%s] %s\n", entry.Time, entry.Message)
 			}
 		}
+	}
+}
+
+func printNetworkDiagnostics(w io.Writer, hosts []DiagnosticNetwork) {
+	fmt.Fprintln(w, "网络连通性:")
+	for _, host := range hosts {
+		fmt.Fprintf(w, "  %s %s:%d ", host.Name, host.Host, host.Port)
+		if host.Reachable {
+			fmt.Fprintf(w, "可达 (%dms)", host.LatencyMS)
+		} else {
+			fmt.Fprint(w, "不可达")
+			if host.Error != "" {
+				fmt.Fprintf(w, " (%s)", host.Error)
+			}
+		}
+		if host.Note != "" {
+			fmt.Fprintf(w, " - %s", host.Note)
+		}
+		fmt.Fprintln(w)
 	}
 }
 

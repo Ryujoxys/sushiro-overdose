@@ -46,6 +46,7 @@ var desktopMethods = map[string]string{
 	"/api/engine/capture": "POST", "/api/engine/stop": "POST",
 	"/api/auth/import": "POST", "/api/auth/reset": "POST", "/api/repair-proxy": "POST",
 	"/api/auth/verify": "POST", "/api/update": "GET",
+	"/api/live-session": "GET", "/api/live-session/import": "POST", "/api/live-session/clear": "POST",
 }
 
 // releasePageURL is the only external page the native window may open.
