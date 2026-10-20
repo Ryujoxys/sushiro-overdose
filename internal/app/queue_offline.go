@@ -870,23 +870,35 @@ func (s *queuePlanWaitSource) at(t time.Time) (queuePlanWait, bool) {
 		s.local[dt] = historicalWaitByDateType(s.storeID, dt, s.now)
 		s.localDays[dt] = localObservationWaitDays(s.storeID, dt, s.now, s.holidays, s.workdays)
 	}
-	if _, ok := s.history[dt]; !ok {
-		s.history[dt] = queueHistoryWaitProfile(s.storeID, dt, s.now)
-	}
 	local, hasLocal := s.local[dt][bucket]
-	hist, hasHist := s.history[dt][bucket]
+	histType := dt
+	hist, hasHist := s.historyAt(dt, bucket)
+	if !hasHist && dt == "workday" {
+		// 内置历史没有“调休工作日”这一类；holidays.json 标了调休上班的日子按工作日的规律找。
+		histType = "weekday"
+		hist, hasHist = s.historyAt(histType, bucket)
+	}
 	days := s.localDays[dt][bucket]
 	switch {
 	case hasLocal && days >= queueSpeedMinDays:
 		return queuePlanWait{rng: local, source: "local", dateType: dt, days: days}, true
 	case hasHist && hist.days >= queueSpeedMinDays:
-		return queuePlanWait{rng: hist.rng, source: hist.source(), dateType: dt, days: hist.days}, true
+		return queuePlanWait{rng: hist.rng, source: hist.source(), dateType: histType, days: hist.days}, true
 	case hasLocal:
 		return queuePlanWait{rng: local, source: "local", dateType: dt, days: days}, true
 	case hasHist:
-		return queuePlanWait{rng: hist.rng, source: hist.source(), dateType: dt, days: hist.days}, true
+		return queuePlanWait{rng: hist.rng, source: hist.source(), dateType: histType, days: hist.days}, true
 	}
 	return queuePlanWait{}, false
+}
+
+// historyAt 取某日期类型某半小时的历史等待规律，按日期类型缓存。
+func (s *queuePlanWaitSource) historyAt(dateType, bucket string) (queueHistoryWait, bool) {
+	if _, ok := s.history[dateType]; !ok {
+		s.history[dateType] = queueHistoryWaitProfile(s.storeID, dateType, s.now)
+	}
+	hist, ok := s.history[dateType][bucket]
+	return hist, ok
 }
 
 func (h queueHistoryWait) source() string {

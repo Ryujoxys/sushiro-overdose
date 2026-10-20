@@ -376,7 +376,7 @@ func buildQueueAdvisorWithReading(ctx context.Context, storeID string, targetNo,
 			StoreID:       storeID,
 			StoreName:     offlineStoreName(storeID),
 			GeneratedAt:   now.Format(time.RFC3339),
-			Pressure:      queueOfflinePressure(0),
+			Pressure:      queueOfflinePressure(0, ""),
 			Offline:       true,
 			History:       queueHistoryLabel(),
 			NeedsCalledNo: true,
@@ -493,12 +493,17 @@ func buildQueueAdvisorWithReading(ctx context.Context, storeID string, targetNo,
 	return advisor, nil
 }
 
-// queueOfflinePressure 是离线时的排队压力：只有用户填了在等桌数才判档。
-func queueOfflinePressure(waitGroups int) QueueAdvisorPressure {
+// queueOfflinePressure 是离线时的排队压力：只有读数里带了在等桌数才判档。
+// 桌数可能是用户手动记下的，也可能来自最近一次自动记录，说明里分开讲清楚。
+func queueOfflinePressure(waitGroups int, source string) QueueAdvisorPressure {
 	level := queuePressureLevel(waitGroups, 0)
 	reason := "没有实时数据，排队压力未知；叫到时间按以往叫号速度推算。"
 	if waitGroups > 0 {
-		reason = fmt.Sprintf("你记下在等约 %d 桌；叫到时间按以往叫号速度推算。", waitGroups)
+		who := "你记下"
+		if source == "recent" {
+			who = "最近一次记录显示"
+		}
+		reason = fmt.Sprintf("%s在等约 %d 桌；叫到时间按以往叫号速度推算。", who, waitGroups)
 	}
 	return QueueAdvisorPressure{
 		Level:      level,
@@ -512,10 +517,13 @@ func queueOfflinePressure(waitGroups int) QueueAdvisorPressure {
 
 // buildOfflineQueueAdvisor 用一次叫号读数和以往叫号速度给出叫到时间，不请求实时。
 func buildOfflineQueueAdvisor(storeID string, targetNo, travelMinutes int, reading queueCalledReading, now time.Time) QueueAdvisor {
+	now = now.In(SushiroTimezone)
 	at := reading.at
 	if at.IsZero() || at.After(now) {
 		at = now
 	}
+	// 观测文件里的时间可能带机器时区（例如 Z），与其他字段一样统一成门店时间输出。
+	at = at.In(SushiroTimezone)
 	advisor := QueueAdvisor{
 		StoreID:     storeID,
 		StoreName:   offlineStoreName(storeID),
@@ -524,7 +532,7 @@ func buildOfflineQueueAdvisor(storeID string, targetNo, travelMinutes int, readi
 			CalledNo:      reading.calledNo,
 			WaitingGroups: reading.groupQueues,
 		},
-		Pressure:     queueOfflinePressure(reading.groupQueues),
+		Pressure:     queueOfflinePressure(reading.groupQueues, reading.source),
 		Offline:      true,
 		Source:       reading.source,
 		History:      queueHistoryLabel(),
@@ -1284,6 +1292,11 @@ func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinu
 	}
 	if first.After(start) {
 		start = first.Add(time.Duration((10-first.Minute()%10)%10) * time.Minute)
+		// 离想吃的时间不到一个整 10 分钟时，至少按“现在取号”算一次，
+		// 否则没有候选会被误报成“等待规律还不够”。
+		if start.After(meal) {
+			start = first
+		}
 	}
 	waits := newQueuePlanWaitSource(storeID, now)
 	var best, latest time.Time

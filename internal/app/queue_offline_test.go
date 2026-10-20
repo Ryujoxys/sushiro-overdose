@@ -662,3 +662,158 @@ func TestHandleStoresFallsBackToOfflineName(t *testing.T) {
 		t.Fatalf("store = %v header=%q", list[0], rec.Header().Get("X-Sushiro-Offline"))
 	}
 }
+
+func TestDashboardTreatsManualReadingWaitAsUnknown(t *testing.T) {
+	useTempHome(t)
+	now := cst(2026, 10, 20, 18, 0)
+	observations := []QueueObservation{
+		{CollectedAt: cst(2026, 10, 20, 17, 40).Format(time.RFC3339), StoreID: "1", WaitMinutes: 30, GroupQueuesCount: 20, StoreStatus: "OPEN", DisplayCalledNo: 450},
+		{CollectedAt: cst(2026, 10, 20, 17, 50).Format(time.RFC3339), StoreID: "1", WaitMinutes: -1, DisplayCalledNo: 480, SourceEndpoint: queueSourceEndpointManual},
+	}
+	query := normalizeQueueDashboardQuery(QueueDashboardQuery{StoreIDs: []string{"1"}})
+	filter := stringSet(query.StoreIDs)
+	names := map[string]string{"1": "测试店"}
+	rows := buildQueueDashboardLatestRows(query, QueueBaselineExport{}, nil, observations, names, filter)
+	if len(rows) != 1 || rows[0].WaitMinutes != 30 || rows[0].QueueGroups != 20 {
+		t.Fatalf("latest rows = %+v, a manual reading must not replace the store's queue state", rows)
+	}
+	for _, p := range buildQueueDashboardLocalTrend(query, nil, observations, names, filter, now) {
+		if p.TotalWaitMinutes < 0 {
+			t.Fatalf("trend point %+v carries an unknown wait", p)
+		}
+	}
+	summary, curve := buildQueueDashboardCalledCurve(query, nil, observations, names, filter, now)
+	if summary.LatestCalledNo != 480 || summary.LatestWaitMinutes != 0 {
+		t.Fatalf("called summary = %+v, want the manual called number with no negative wait", summary)
+	}
+	for _, p := range curve {
+		if p.LatestWaitMinutes < 0 || p.WaitMinutes < 0 {
+			t.Fatalf("called point %+v shows a negative wait", p)
+		}
+	}
+}
+
+func TestOfflineAdvisorRecentReadingIsLabelledAndInStoreTime(t *testing.T) {
+	useTempHome(t)
+	stubQueueLive(t, liveAuthRequired)
+	now := cst(2026, 10, 20, 18, 0)
+	// 自动记录的观测时间带 Z（机器在 UTC），在等桌数不是用户记下的。
+	writeQueueObservationLines(t,
+		`{"collected_at":"2026-10-20T09:50:00Z","store_id":"1","wait_minutes":35,"group_queues_count":25,"store_status":"OPEN","display_called_no":500}`,
+	)
+	advisor, err := buildQueueAdvisorWithReading(context.Background(), "1", 560, 0, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advisor.Source != "recent" || advisor.Current.CalledNo != 500 || advisor.Eta == nil {
+		t.Fatalf("advisor = %+v", advisor)
+	}
+	if strings.Contains(advisor.Pressure.Reason, "你记下") || !strings.Contains(advisor.Pressure.Reason, "最近一次记录") {
+		t.Fatalf("pressure reason = %q, an automatic record must not be described as the user's note", advisor.Pressure.Reason)
+	}
+	if advisor.CalledAtHHMM != "17:50" || !strings.HasSuffix(advisor.CalledAt, "+08:00") {
+		t.Fatalf("called_at = %q / %q, want store time", advisor.CalledAt, advisor.CalledAtHHMM)
+	}
+	if len(advisor.Warnings) == 0 || !strings.Contains(advisor.Warnings[0], "最近一次记录") {
+		t.Fatalf("warnings = %v", advisor.Warnings)
+	}
+}
+
+func TestOfflineAdvisorWithoutTargetOrWithPassedNumber(t *testing.T) {
+	useTempHome(t)
+	stubQueueLive(t, liveMustNotBeCalled(t))
+	now := cst(2026, 10, 20, 18, 0)
+	reading := &queueCalledReading{calledNo: 500, at: now, source: "input"}
+	noTarget, err := buildQueueAdvisorWithReading(context.Background(), "1", 0, 0, reading, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noTarget.Eta != nil || !strings.Contains(noTarget.Message, "号码") || noTarget.Current.CalledNo != 500 {
+		t.Fatalf("without a ticket number = %+v", noTarget)
+	}
+	passed, err := buildQueueAdvisorWithReading(context.Background(), "1", 480, 0, reading, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if passed.Eta == nil || passed.Eta.Risk != "high" || len(passed.Warnings) == 0 || !strings.Contains(passed.Warnings[len(passed.Warnings)-1], "过号") {
+		t.Fatalf("passed number = %+v", passed)
+	}
+}
+
+func TestQueueReadingFromQueryAcceptsRFC3339AndRejectsOldTimes(t *testing.T) {
+	now := cst(2026, 10, 20, 18, 0)
+	r, err := queueReadingFromQuery("500", "2026-10-20T09:40:00Z", now)
+	if err != nil || queueClockHHMM(r.at) != "17:40" || r.at.Location() != SushiroTimezone {
+		t.Fatalf("reading = %+v err = %v, want 17:40 store time", r, err)
+	}
+	if _, err := queueReadingFromQuery("500", "05:30", now); err == nil {
+		t.Fatal("a reading more than 12 hours old must be rejected")
+	}
+	if _, err := queueReadingFromQuery("500", "18:30:99", now); err == nil {
+		t.Fatal("a malformed time must be rejected")
+	}
+}
+
+func TestQueueMealPlanCloseToMealStillConsidersPickingUpNow(t *testing.T) {
+	useTempHome(t)
+	now := cst(2026, 10, 20, 12, 51)
+	got := buildQueueMealPlan(context.Background(), "1", "12:58", 0, now, false)
+	if got.StablePickup != "12:51" || got.WaitMinutesRange == nil {
+		t.Fatalf("plan = %+v, want picking up now as the only candidate", got)
+	}
+	if strings.Contains(got.Message, "规律还不够") {
+		t.Fatalf("message = %q must not blame missing history", got.Message)
+	}
+}
+
+func TestQueueMealPlanOnAdjustedWorkdayUsesWeekdayHistory(t *testing.T) {
+	useTempHome(t)
+	if err := os.MkdirAll(AppDirPath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 2026-10-10 是周六，但在 holidays.json 里标为调休上班。
+	if err := os.WriteFile(queueHolidayPath(), []byte(`{"workdays":["2026-10-10"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := cst(2026, 10, 10, 10, 5)
+	got := buildQueueMealPlan(context.Background(), "1", "13:00", 0, now, false)
+	if got.RecommendPickupRange == nil || got.Source != "history" {
+		t.Fatalf("plan = %+v, want weekday history on an adjusted workday", got)
+	}
+	if !strings.Contains(got.Basis, "工作日") || strings.Contains(got.Basis, "调休") {
+		t.Fatalf("basis = %q, want the weekday pattern named plainly", got.Basis)
+	}
+}
+
+func TestQueueMealPlanWarnsWhenTargetIsOutOfReach(t *testing.T) {
+	useTempHome(t)
+	var rows []QueueBaselineRecord
+	for _, day := range []int{0, 7, 14, 21} {
+		for _, minute := range []int{15, 45} {
+			at := cst(2026, 9, 22, 12, minute).AddDate(0, 0, day)
+			rows = append(rows, QueueBaselineRecord{StoreID: 990004, Name: "排长队的店", CollectedAt: at.Format(time.RFC3339), StoreStatus: "OPEN", WaitMinutes: 90})
+		}
+	}
+	if err := appendQueueBaselineRecords(rows); err != nil {
+		t.Fatal(err)
+	}
+	now := cst(2026, 10, 20, 12, 0)
+	got := buildQueueMealPlan(context.Background(), "990004", "12:40", 0, now, false)
+	if got.StablePickup != "12:00" || got.Risk != "high" || !strings.Contains(got.Message, "可能赶不上 12:40") {
+		t.Fatalf("plan = %+v, want a plain out-of-reach warning", got)
+	}
+}
+
+func TestQueuePlansSayWhenNothingIsKnown(t *testing.T) {
+	useTempHome(t)
+	stubQueueLiveWaitEstimate(t, func(context.Context, string, time.Time) (QueueWaitRange, bool) { return QueueWaitRange{}, false })
+	now := cst(2026, 10, 20, 12, 0)
+	pickup := buildQueuePickupPlan(context.Background(), "990009", "12:00", now)
+	if pickup.WaitMinutesRange != nil || !strings.Contains(pickup.Message, "估不出来") || strings.Contains(pickup.Message, "未开放线上取号") {
+		t.Fatalf("pickup = %+v", pickup)
+	}
+	meal := buildQueueMealPlan(context.Background(), "990009", "13:00", 0, now, false)
+	if meal.RecommendPickupRange != nil || !strings.Contains(meal.Message, "估不出来") {
+		t.Fatalf("meal = %+v", meal)
+	}
+}
