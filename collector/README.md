@@ -2,6 +2,8 @@
 
 从寿司郎公开接口采集**排队压力 + 叫号**，写入 Turso 数据库。独立 Python 包（纯标准库），可单独部署，不由桌面端启动。
 
+> **当前状态（2026-10-20）：** 寿司郎换了接口地址和认证方式，固定公共 token 已失效，采集器每轮 403，数据停在 2026-09-06。需要改用新接口和会员授权 token 后才能恢复，见 [线上现状](../docs/cloudflare-github-turso.md#数据库与采集2026-10-20)。
+
 每轮既调 `stores?`（全国门店压力，无叫号）又对每店调 `getStoreById?`（`groupQueues` 里的当前叫号）。数据库每 24 小时由 `.github/workflows/public-data.yml` 只读导出到 `data` 分支，见 [公开数据](../docs/public-data.md)。
 
 ## 数据流

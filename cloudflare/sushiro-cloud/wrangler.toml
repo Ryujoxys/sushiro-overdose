@@ -1,7 +1,0 @@
-name = "sushiro-cloud"
-main = "src/index.js"
-compatibility_date = "2026-06-08"
-workers_dev = true
-
-# Keep the existing hostname serving 410 to old clients. No secrets are required.
-# Updating this file does not retire an already deployed Worker: deploy explicitly.

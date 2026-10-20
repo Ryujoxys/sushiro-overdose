@@ -75,8 +75,8 @@ jobs:
         run: node --check internal/app/webui/record_chart.js
       - name: Check store picker syntax
         run: node --check internal/app/webui/store_select.js
-      - name: Test local UI and retired Worker
-        run: node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs scripts/test-public-data.mjs scripts/test-store-select-area.mjs cloudflare/sushiro-cloud/test/retired.test.mjs
+      - name: Test local UI and data exports
+        run: node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs scripts/test-public-data.mjs scripts/test-store-select-area.mjs
       - name: Test local MCP adapters
         working-directory: mcp
         run: python -m unittest discover -s tests -v

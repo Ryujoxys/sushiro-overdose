@@ -27,12 +27,12 @@ gofmt -l .
 go vet ./...
 go test -race ./...
 go build ./...
-node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs scripts/test-store-select-area.mjs cloudflare/sushiro-cloud/test/retired.test.mjs
+node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs scripts/test-public-data.mjs scripts/test-store-select-area.mjs
 # macOS / Windows：不打开窗口的原生适配检查
 go test -tags desktop,production ./internal/app -run 'TestDesktop|TestLocalWeb|TestWindowsResource'
 ```
 
-MCP 适配测试可在 `mcp/` 中运行 `python3 -m unittest discover -s tests -v`。
+MCP 适配测试可在 `mcp/` 中运行 `python3 -m unittest discover -s tests -v`；采集器在 `collector/` 中运行同一命令；技能测试为 `python3 -m unittest discover -s .claude/skills/sushiro-queue/tests`。
 
 检查工作流仅手动触发；push、PR 和发布不运行全量测试。自动测试必须隔离用户目录，通过内存通知器替换真实通知，不得弹系统消息、发送外部推送或提交真实订单。
 

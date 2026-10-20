@@ -1,43 +1,35 @@
-# 云端数据入口下线
+# 云端入口下线与线上现状
 
-GitHub 登录和共享数据库访问已从桌面端与 MCP 源码移除。当前历史数据只在本机积累；实时排队仍请求寿司郎官方公开接口。这不是离线运行模式。
+## 旧公开数据网站：已放弃
 
-## 当前行为
+旧网站是 Cloudflare Worker `sushiro-cloud`（`sushiro-cloud.sushiro-ryujoxys.workers.dev`，自定义域名 `sushiro-cloud.ryujo.online` 已过期），数据导出需要 GitHub 登录。维护者 2026-10-20 决定不再保留，Worker 源码已从仓库删除。它读取的 v1 数据表也已删除，线上那份旧部署已无数据可返回。
 
-- 桌面端不再读取 `cloud_auth.json`、`queue_baseline_remote.json` 或数据库环境变量，也不会上传历史。
-- `/api/cloud` 及其子路径统一返回 HTTP 410，不跳转 GitHub、不接受 OAuth 回调、不保存 session。
-- MCP 只连接本机桌面端，不再依赖 `libsql-client` 或数据库 token。
-- 旧本地配置文件不自动删除；其中旧凭证不再使用。`mcp_config.json` 下次保存时会丢弃旧数据库字段。
-- GitHub Release 更新检查保留，它与 GitHub 登录无关。
+仓库删除源码不会停掉线上部署。彻底清理需要维护者在自己的 Cloudflare / GitHub 账号里操作：
 
-## 线上现状（2026-10-20 核实）
+1. Cloudflare 控制台 → Workers → `sushiro-cloud` → 删除（或 `wrangler delete sushiro-cloud`），连同路由和自定义域名。
+2. GitHub → Settings → Developer settings → OAuth Apps：删除旧网站用的 OAuth 应用。
+3. Turso：撤销当年下发给 Worker 的数据库 token（只保留采集器的读写 token 和导出工作流的只读 token）。
 
-- 旧网站是 Cloudflare Worker `sushiro-cloud`：自定义域名 `sushiro-cloud.ryujo.online` 已过期不解析；`https://sushiro-cloud.sushiro-ryujoxys.workers.dev` 仍是旧版本（`/health` 正常），数据导出要 GitHub 登录。它读的 v1 表已在数据库精简时删除，这些接口已无数据可返回。
-- 替代入口：仓库 `data` 分支每天发布公开数据，无需登录，见 [public-data.md](public-data.md)。
-- 数据库已精简为 v2（只剩 `queue_records` 等 5 张表，数据 16MB），见 [查询指南](turso-readonly-query-guide.md)。
-- 采集器 2026-09-06 21:30 后停跑，10-18 恢复后每轮都被寿司郎接口返回 nginx 403，数据仍停在 09-06。
+替代入口是仓库 `data` 分支，无需登录，见 [public-data.md](public-data.md)。
 
-## 当前处理范围
+## 桌面端
 
-维护者已说明网站自定义域名过期。本轮按要求只下线客户端云入口，线上只读 key 暂不处理，不执行 Worker 部署、凭证撤销或数据库删除，也不将这些操作作为本次改动的发布前置条件。
+GitHub 登录和共享数据库访问已从桌面端与 MCP 移除：
 
-**域名过期不等于已确认 Worker 停服。** 仓库的 `wrangler.toml` 仍配置 `workers_dev = true`，不能只凭自定义域名失效判断所有入口的实际可达性。本轮不做线上探测，实际部署状态保持未核实；桌面端和 MCP 无论线上是否可达，都不再请求旧数据入口。
+- 不读取 `cloud_auth.json`、`queue_baseline_remote.json` 或数据库环境变量，不上传历史；旧本地配置文件不自动删除，其中凭证不再使用。
+- `/api/cloud` 及其子路径统一返回 HTTP 410。
+- MCP 只连接本机桌面端；`mcp_config.json` 下次保存时丢弃旧数据库字段。
+- 桌面端不读 `data` 分支；历史曲线只用本机记录和内置历史包。GitHub Release 更新检查保留。
 
-## 后续可选清理
+## 数据库与采集（2026-10-20）
 
-以下清单仅在维护者后续决定彻底清理线上服务时执行，本轮暂缓：
+- 数据库已精简为 v2：`queue_records` 等 5 张表，数据约 16MB，见 [查询指南](turso-readonly-query-guide.md)。
+- 公开数据从 2026-09-06 21:30 起没有更新。采集器在那之后停了六周，10-18 恢复后每轮都返回 HTTP 403。
+- 403 的原因：寿司郎实时叫号服务没有下线，但换了接口地址和认证方式，采集器用的固定公共 token 不再被新接口接受。用有效 token 仍能拿到叫号、在等桌数和门店数据，只是新 token 绑定会员账号、一小时过期；微信小程序续期要用 `js_code`、设备信息和签名，独立采集器能否脱离微信续期尚未验证。
+- 结论：不是不能采集，而是旧的无登录采集方案要改。可行方向是本机授权采集；长期无人值守的服务器采集暂时不能保证。桌面端的公开记录与实时面板用的是同一套旧接口和固定 token，在适配前同样会受影响。
 
-1. 将 `cloudflare/sushiro-cloud/src/index.js` 中的停用版本发布到所有实际入口，或禁用对应 Worker、路由和自定义域名。
-2. 确认旧登录路径、回调、`/api/me`、基准查询路径均不再返回数据；停用版本统一返回 410 且不访问上游。
-3. 撤销旧数据库只读 token，停用 GitHub OAuth 应用或撤销其 client secret，移除 Worker 上遗留的数据库、OAuth、会话签名 secrets。
-4. 检查是否存在其他历史部署、代理或直连 token。仅下掉页面不能撤回已发给客户端的凭证或已经复制的数据。
-5. 如不再采集线上数据，单独停掉服务器上的 `collector.service` 及相应定时任务。仓库中的采集器是独立运维工具，不会由桌面端启动。
-
-不删除原数据库，避免丢失历史；是否保留备份和继续服务端采集由维护者决定。未来重新开放前按 [数据协议](local-data-contract.md) 做适配、隐私审查、限流和授权设计，不恢复共享直连 token。
-
-## 无部署回归测试
+## 回归测试
 
 ```bash
 go test ./internal/app -run 'TestRetiredCloud|TestLocalHistory|TestMCPDrops|TestWebUIDoesNot'
-node --test cloudflare/sushiro-cloud/test/retired.test.mjs
 ```

@@ -103,7 +103,7 @@ Go 分包方向保持 `app/api/core/proxy/platform/notify`。新增认证提交�
 - 桌面端旧 OAuth 路径统一 410；GitHub 登录、云会话和 Turso 客户端已移除。
 - MCP 仅通过 localhost 读取桌面端，不使用旧数据库地址或密钥。
 - 本机观测、快照、私人 session 分开；未来公开数据使用 `QueueBaselineExport` 版本 1，规则见 [本机数据协议](local-data-contract.md)。
-- 旧配置文件未擅自删除，但不能重新启用云读取。Worker 源码已停用，线上清理按维护者要求暂缓，见 [处理范围与可选清理](cloudflare-github-turso.md)。
+- 旧配置文件未擅自删除，但不能重新启用云读取。旧网站已于 2026-10-20 按维护者要求放弃，Worker 源码已从仓库删除，见 [云端入口下线](cloudflare-github-turso.md)。
 
 ## 验证记录
 

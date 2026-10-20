@@ -10,7 +10,9 @@
 
 1. `python3 --version` ≥ 3.9。
 2. Turso 库 `libsql://su-shiro-ryujoxys.aws-us-west-2.turso.io` 的**读写** token（只读 token 写入会失败）。
-3. 出站 HTTPS 能访问 Turso 和 `crm-cn-prd.sushiro.com.cn`。寿司郎接口对境外或机房 IP 可能直接返回 nginx 403，服务器优先放在中国大陆网络。
+3. 出站 HTTPS 能访问 Turso 和寿司郎接口。
+
+> **当前状态（2026-10-20）：采集方式待适配。** 寿司郎换了接口地址和认证方式，本采集器用的固定公共 token 已不被接受（每轮 HTTP 403）。新 token 绑定会员账号、一小时过期，脱离微信续期尚未验证。适配前部署也采不到数据，见 [线上现状](../docs/cloudflare-github-turso.md#数据库与采集2026-10-20)。
 
 ## 部署步骤
 
@@ -112,7 +114,7 @@ Turso HTTP 接口不允许 `VACUUM`。删表后空闲页会被之后的写入复
 | 现象 | 原因 / 处理 |
 |------|------|
 | 401 Unauthorized | Turso token 错或过期；控制台重生成**读写** token |
-| `HTTP 403 stores: <html>…403 Forbidden` | 寿司郎网关拒绝了服务器：换中国大陆网络 / 出口 IP，或检查 `sushiro.token`、`referer` 是否随小程序版本变化 |
+| `HTTP 403 stores: <html>…403 Forbidden` | 寿司郎已换接口地址和认证方式，固定公共 token 失效；要改成新接口 + 会员授权 token，见上方「当前状态」 |
 | `stores_seen: 0` / `detail_ok=0` | 接口不通，同上 |
 | 营业时段 `display_called_no` 全是 NULL | 门店都关了，或 `getStoreById` 结构变了，查日志 |
 | `数据库还是 v1 结构` | 库里还有旧表，先按 README「从 v1 升级」执行 `migrate-v2` |

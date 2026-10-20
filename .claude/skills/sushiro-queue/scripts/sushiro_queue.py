@@ -239,7 +239,7 @@ def freshness(src: "Source", now: datetime) -> List[str]:
         notes.append(f"历史数据截止 {meta['cutoff_at'][:16].replace('T', ' ')}，已有 {age} 天没有新数据；规律仍可参考，但不反映最近变化。")
     col = meta.get("collector") or {}
     if col.get("recent_runs") and not col.get("recent_ok"):
-        notes.append("线上采集最近全部失败（公开接口可能拒绝了采集服务器）。")
+        notes.append("线上采集最近全部失败（寿司郎换了接口认证方式，采集器待适配）。")
     if meta.get("quality_note"):
         notes.append(meta["quality_note"])
     return notes

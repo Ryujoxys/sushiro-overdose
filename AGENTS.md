@@ -160,7 +160,6 @@ main.go (桌面版默认启动原生窗口)
 |------|------|
 | `assets/sushiro.png` | 寿司郎官方 Logo PNG（base64 嵌入到 `web_static.go` 的 `logoBase64` 常量中） |
 | `scripts/bundle-macos.sh` | Mac .app + DMG 桌面应用打包脚本 |
-| `cloudflare/sushiro-cloud/` | Worker 停用版本：全部路径返回 410；需要另行发布才能关闭线上入口 |
 | `collector/` | 独立服务端采集器（Python）：写 Turso 的 `queue_records`（每店每半小时一条，v2），不由桌面端启动，见 `collector/AGENTS.md` |
 | `scripts/export-public-data.mjs` | 用只读 token 从 Turso 导出公开数据（stores / latest / patterns / daily / meta），格式见 `docs/public-data.md` |
 | `.claude/skills/sushiro-queue/` | 配套技能：读 `data` 分支，按应用口径算排队规律、取号时间和叫到时间；可读本机应用实时接口，只读、不取号 |
