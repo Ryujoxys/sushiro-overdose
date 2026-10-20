@@ -94,7 +94,7 @@ internal/
 
 前端已拆为 `internal/app/webui/index.html`、`app.css`、`auth_ticket.js`、`record_chart.js`、`store_select.js`、`app.js`，由 `web_static.go` 嵌入；不再修改 Go 字符串中的整页脚本。默认端口为 `39871`，以 `internal/core/ports.go` 为准。前端用 Node 行为测试和可选 Playwright 浏览器检查覆盖认证、确认、防连点、状态切换及响应式。
 
-个人模型的提供者只有本机 JSONL，`queue_baseline_local.go` 生成统一基准信封；历史曲线可选固定离线包，不影响实时/预测 API。`cloud_retired.go` 对旧云端路径返回 410。MCP 只调用本机接口。`collector/` 是独立的历史服务端采集工具，不由桌面端启动。`scripts/export-history-bundle.mjs` 是维护者显式执行的只读导出工具，不加入构建或发布。未来开放边界见 [数据协议](docs/local-data-contract.md)，包质量与更新方法见 [离线历史](docs/bundled-history.md)，线上停服步骤见 [停服清单](docs/cloudflare-github-turso.md)。
+个人模型的提供者只有本机 JSONL，`queue_baseline_local.go` 生成统一基准信封；历史曲线可选固定离线包，不影响实时/预测 API。`cloud_retired.go` 对旧云端路径返回 410。MCP 只调用本机接口。`collector/` 是独立的历史服务端采集工具，不由桌面端启动。`scripts/export-history-bundle.mjs` 是维护者显式执行的只读导出工具，不加入构建或发布。`scripts/export-public-data.mjs` 由 `public-data.yml` 每天运行，把同一份半小时数据发布到 `data` 分支，`.claude/skills/sushiro-queue/` 读取它；桌面端不依赖这条链路。未来开放边界见 [数据协议](docs/local-data-contract.md)，包质量与更新方法见 [离线历史](docs/bundled-history.md)，线上停服步骤见 [停服清单](docs/cloudflare-github-turso.md)。
 
 - 新 Web API 优先按职责放到 `internal/app/web_*.go`；`web_handlers.go` 只保留通用响应工具和首页。
 - 记录服务生命周期放在 `queue_service.go`；`engine.go` 仅负责认证，不得恢复自动预约或取号。

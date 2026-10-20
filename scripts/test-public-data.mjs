@@ -45,6 +45,14 @@ test('dataset lists every file with its hash and skips stores without records',(
   assert.deepEqual(JSON.parse(files.get('daily/1.json')).rows[0],['2026-09-04T18:05:00+08:00','weekday','OPEN',30,500,null,null]);
 });
 
+test('waits beyond the official cap are published as the cap, not dropped',()=>{
+  const files=buildDataset({source:'turso',stores:[{id:1,name:'A',city:'',area:''}],records:[row('18:05',{wait_minutes:null}),row('18:20',{collected_at:'2026-09-05T18:20:00+08:00',wait_minutes:40})],extras:[{wait_over_cap:true,group_queues_count:70,online_open:true},{wait_over_cap:false,group_queues_count:9,online_open:false}],cutoffAt:'2026-09-05T18:20:00+08:00',generatedAt:'x',windowDays:180});
+  assert.deepEqual(JSON.parse(files.get('daily/1.json')).rows.map(r=>r.slice(3)),[[180,500,70,true],[40,500,9,false]]);
+  const slot=JSON.parse(files.get('patterns/1.json')).date_types.all[0];
+  assert.deepEqual([slot.wait_days,slot.wait_p80],[2,152]);
+  assert.equal(JSON.parse(files.get('meta.json')).wait_cap_minutes,180);
+});
+
 test('patterns from the bundled history match the app chart readouts',()=>{
   const bundle=JSON.parse(gunzipSync(fs.readFileSync(new URL('../internal/app/data/queue-history-v1.json.gz',import.meta.url))).toString());
   const p=buildPatterns(bundle.records.filter(r=>r.store_id===1));

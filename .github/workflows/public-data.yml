@@ -1,0 +1,82 @@
+name: Public Data
+
+# Exports the public queue dataset to the `data` branch once a day with a read-only database token.
+# The branch is replaced by a single commit each run; it never carries personal data.
+
+on:
+  schedule:
+    - cron: '7 20 * * *' # 04:07 China time, after the collector's 03:00 maintenance
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'turso (read-only secrets required) or bundle (embedded history, no secrets)'
+        required: true
+        default: turso
+        type: choice
+        options: [turso, bundle]
+      days:
+        description: 'Days of history to publish (1..730)'
+        required: true
+        default: '180'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: public-data
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Choose source
+        id: source
+        env:
+          INPUT_SOURCE: ${{ github.event.inputs.source || 'turso' }}
+          HAS_URL: ${{ secrets.SUSHIRO_HISTORY_DATABASE_URL != '' }}
+          HAS_TOKEN: ${{ secrets.SUSHIRO_HISTORY_DATABASE_TOKEN != '' }}
+        run: |
+          if [ "$INPUT_SOURCE" = turso ] && { [ "$HAS_URL" != true ] || [ "$HAS_TOKEN" != true ]; }; then
+            echo "::notice::SUSHIRO_HISTORY_DATABASE_URL / SUSHIRO_HISTORY_DATABASE_TOKEN not set; skipping export."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test exporter
+        if: steps.source.outputs.skip != 'true'
+        run: node --test scripts/test-public-data.mjs scripts/test-history-export.mjs
+
+      - name: Export
+        if: steps.source.outputs.skip != 'true'
+        env:
+          SOURCE: ${{ github.event.inputs.source || 'turso' }}
+          DAYS: ${{ github.event.inputs.days || '180' }}
+          SUSHIRO_HISTORY_DATABASE_URL: ${{ secrets.SUSHIRO_HISTORY_DATABASE_URL }}
+          SUSHIRO_HISTORY_DATABASE_TOKEN: ${{ secrets.SUSHIRO_HISTORY_DATABASE_TOKEN }}
+        run: |
+          case "$DAYS" in ''|*[!0-9]*) echo "::error::days must be a number"; exit 1;; esac
+          if [ "$SOURCE" = bundle ]; then unset SUSHIRO_HISTORY_DATABASE_URL SUSHIRO_HISTORY_DATABASE_TOKEN; fi
+          node scripts/export-public-data.mjs --out "$RUNNER_TEMP/public-data" --source "$SOURCE" --days "$DAYS" | grep -v '^Records '
+          test -s "$RUNNER_TEMP/public-data/meta.json"
+
+      - name: Publish to data branch
+        if: steps.source.outputs.skip != 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --orphan publish-data
+          git rm -rfq --cached . >/dev/null 2>&1 || true
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R "$RUNNER_TEMP/public-data/." .
+          git add -A
+          cutoff=$(node -e "console.log(JSON.parse(require('fs').readFileSync('meta.json','utf8')).cutoff_at)")
+          git commit -qm "data: 公开排队数据（截止 $cutoff）"
+          git push -f origin HEAD:data

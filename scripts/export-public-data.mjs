@@ -65,9 +65,14 @@ const sha256=text=>createHash('sha256').update(text).digest('hex');
 
 // Returns every published file as {relative path: text}; meta.json lists the others with hashes.
 export function buildDataset({source,stores,records,extras=[],latest=[],calendar={},collector=null,quality={},qualityNote='',cutoffAt,generatedAt,windowDays}) {
-  // extras[i] (online_open, group_queues_count) belongs to records[i]; the bundle has none.
+  // extras[i] (online_open, group_queues_count, wait_over_cap) belongs to records[i]; the bundle has none.
+  // Waits above the official display cap are published as the cap ("180 = 180 minutes or more"),
+  // not dropped: dropping them would hide exactly the busiest slots and bias plans toward short waits.
   const byStore=new Map(stores.map(s=>[s.id,[]]));
-  records.forEach((row,i)=>byStore.get(row.store_id)?.push({...row,...(extras[i]||{})}));
+  records.forEach((row,i)=>{
+    const {wait_over_cap,...extra}=extras[i]||{};
+    byStore.get(row.store_id)?.push({...row,...extra,wait_minutes:wait_over_cap?WAIT_CAP_MINUTES:row.wait_minutes});
+  });
   const files=new Map(),summaries=[];
   for(const store of stores){
     const rows=byStore.get(store.id).sort((a,b)=>a.collected_at.localeCompare(b.collected_at));
@@ -98,7 +103,8 @@ export function buildDataset({source,stores,records,extras=[],latest=[],calendar
     window_days:windowDays,first_at:records[0]?.collected_at||null,cutoff_at:cutoffAt,
     store_count:summaries.length,record_count:records.length,day_count:dates.size,
     quality,quality_note:qualityNote,collector,calendar,
-    method:'Latest representative per store / CST date / half-hour. Patterns use open-store values only: wait P50/P80 and called-number P20/P50/P80 across days, linear interpolation. Unknown values stay null and are never filled.',
+    wait_cap_minutes:WAIT_CAP_MINUTES,
+    method:'One representative per store / CST half-hour (the last frame in the slot). Patterns use open-store values only: wait P50/P80 and called-number P20/P50/P80 across days, linear interpolation. Waits at or above wait_cap_minutes mean "that long or longer". Unknown values stay null and are never filled.',
     files:Object.fromEntries([...files].sort(([a],[b])=>a.localeCompare(b)).map(([name,text])=>[name,{bytes:Buffer.byteLength(text),sha256:sha256(text)}])),
   };
   files.set('meta.json',JSON.stringify(meta,null,1)+'\n');
@@ -129,7 +135,7 @@ async function fromDatabase(query,windowDays) {
   const latest=(await query('SELECT store_id,collected_at,store_status,net_ticket_status,online_open,wait_minutes,group_queues_count,display_called_no FROM store_latest ORDER BY store_id')).map(r=>({
     store_id:Number(r.store_id),collected_at:dateParts(r.collected_at).stamp,store_status:String(r.store_status||'UNKNOWN').toUpperCase(),
     online_open:Number(r.online_open)===1,net_ticket_status:r.net_ticket_status||'',
-    wait_minutes:r.wait_minutes===null||Number(r.wait_minutes)>WAIT_CAP_MINUTES?null:Number(r.wait_minutes),group_queues_count:r.group_queues_count===null?null:Number(r.group_queues_count),
+    wait_minutes:r.wait_minutes===null?null:Math.min(Number(r.wait_minutes),WAIT_CAP_MINUTES),group_queues_count:r.group_queues_count===null?null:Number(r.group_queues_count),
     display_called_no:Number(r.display_called_no)>0?Number(r.display_called_no):null,
   }));
   // Collector health tells readers whether the public interface was still being read; errors are not published.

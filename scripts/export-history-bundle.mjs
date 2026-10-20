@@ -76,7 +76,7 @@ export async function readPublicRecords(query,{since='',withExtras=false}={}) {
       if(!byID.has(row.store_id)){quality.orphans++;continue;}
       if(Number(raw.wait_minutes)>WAIT_CAP_MINUTES)quality.over_cap_waits++;
       records.push(row);
-      if(withExtras)extras.push({online_open:raw.online_open===null?null:Number(raw.online_open)===1,group_queues_count:raw.group_queues_count===null?null:Number(raw.group_queues_count)});
+      if(withExtras)extras.push({online_open:raw.online_open===null?null:Number(raw.online_open)===1,group_queues_count:raw.group_queues_count===null?null:Number(raw.group_queues_count),wait_over_cap:Number(raw.wait_minutes)>WAIT_CAP_MINUTES});
     }
     console.log('Records '+start+'..'+plusDays(start,7)+': '+batch.length);
   }

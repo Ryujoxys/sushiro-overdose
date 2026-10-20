@@ -76,10 +76,15 @@ jobs:
       - name: Check store picker syntax
         run: node --check internal/app/webui/store_select.js
       - name: Test local UI and retired Worker
-        run: node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs scripts/test-store-select-area.mjs cloudflare/sushiro-cloud/test/retired.test.mjs
+        run: node --test scripts/test-webui-records.mjs scripts/test-history-export.mjs scripts/test-public-data.mjs scripts/test-store-select-area.mjs cloudflare/sushiro-cloud/test/retired.test.mjs
       - name: Test local MCP adapters
         working-directory: mcp
         run: python -m unittest discover -s tests -v
+      - name: Test collector
+        working-directory: collector
+        run: python -m unittest discover -s tests -v
+      - name: Test queue skill
+        run: python -m unittest discover -s .claude/skills/sushiro-queue/tests -v
 
   cross-build:
     runs-on: ubuntu-latest

@@ -55,7 +55,7 @@ main.go (桌面版默认启动原生窗口)
 
 ## 文件清单与职责
 
-下表为职责索引，未带目录的文件名不代表根目录文件。当前包位置以 `ARCHITECTURE.md` 和 `internal/` 实际文件为准。历史图表使用本机记录和可关闭的固定内置历史包，标注截止时间，包不注入个人模型。GitHub 登录和运行时数据库客户端已移除，旧云端路径统一返回 410。不要根据旧发布文档重新接入共享数据库，协议见 `docs/local-data-contract.md`，离线包见 `docs/bundled-history.md`。
+下表为职责索引，未带目录的文件名不代表根目录文件。当前包位置以 `ARCHITECTURE.md` 和 `internal/` 实际文件为准。历史图表使用本机记录和可关闭的固定内置历史包，标注截止时间，包不注入个人模型。GitHub 登录和运行时数据库客户端已移除，旧云端路径统一返回 410。不要根据旧发布文档重新接入共享数据库，协议见 `docs/local-data-contract.md`，离线包见 `docs/bundled-history.md`。桌面端也不读 `data` 分支；那份公开数据只给技能和外部读者。
 
 ### 核心入口
 
@@ -161,6 +161,9 @@ main.go (桌面版默认启动原生窗口)
 | `assets/sushiro.png` | 寿司郎官方 Logo PNG（base64 嵌入到 `web_static.go` 的 `logoBase64` 常量中） |
 | `scripts/bundle-macos.sh` | Mac .app + DMG 桌面应用打包脚本 |
 | `cloudflare/sushiro-cloud/` | Worker 停用版本：全部路径返回 410；需要另行发布才能关闭线上入口 |
+| `collector/` | 独立服务端采集器（Python）：写 Turso 的 `queue_records`（每店每半小时一条，v2），不由桌面端启动，见 `collector/AGENTS.md` |
+| `scripts/export-public-data.mjs` | 用只读 token 从 Turso 导出公开数据（stores / latest / patterns / daily / meta），格式见 `docs/public-data.md` |
+| `.claude/skills/sushiro-queue/` | 配套技能：读 `data` 分支，按应用口径算排队规律、取号时间和叫到时间；可读本机应用实时接口，只读、不取号 |
 | `install/install.sh` | macOS/Linux 一键安装脚本 |
 | `install/install.ps1` | Windows PowerShell 一键安装脚本 |
 
@@ -169,6 +172,7 @@ main.go (桌面版默认启动原生窗口)
 | 文件 | 职责 |
 |------|------|
 | `.github/workflows/ci.yml` | 手动检查：仅 workflow_dispatch，运行隔离测试、静态检查及跨平台编译，不由 push/PR 自动触发 |
+| `.github/workflows/public-data.yml` | 每天 04:07（北京时间）用只读 secrets `SUSHIRO_HISTORY_DATABASE_URL` / `SUSHIRO_HISTORY_DATABASE_TOKEN` 导出公开数据，单个提交强制覆盖 `data` 分支；缺 secrets 时跳过 |
 | `.goreleaser.yml` | GoReleaser v2 配置：多平台编译 + Mac Universal Binary |
 | `.github/workflows/release.yml` | GitHub Actions：tag 触发 → GoReleaser → Mac .app 打包 → 上传 Release |
 | `resource_windows_{amd64,arm64}.syso` | Windows PE 资源（图标 + 干净 application manifest）；`go build` 按 GOARCH 自动链接 |

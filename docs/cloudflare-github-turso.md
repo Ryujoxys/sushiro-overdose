@@ -10,6 +10,13 @@ GitHub 登录和共享数据库访问已从桌面端与 MCP 源码移除。当�
 - 旧本地配置文件不自动删除；其中旧凭证不再使用。`mcp_config.json` 下次保存时会丢弃旧数据库字段。
 - GitHub Release 更新检查保留，它与 GitHub 登录无关。
 
+## 线上现状（2026-10-20 核实）
+
+- 旧网站是 Cloudflare Worker `sushiro-cloud`：自定义域名 `sushiro-cloud.ryujo.online` 已过期不解析；`https://sushiro-cloud.sushiro-ryujoxys.workers.dev` 仍是旧版本（`/health` 正常），数据导出要 GitHub 登录。它读的 v1 表已在数据库精简时删除，这些接口已无数据可返回。
+- 替代入口：仓库 `data` 分支每天发布公开数据，无需登录，见 [public-data.md](public-data.md)。
+- 数据库已精简为 v2（只剩 `queue_records` 等 5 张表，数据 16MB），见 [查询指南](turso-readonly-query-guide.md)。
+- 采集器 2026-09-06 21:30 后停跑，10-18 恢复后每轮都被寿司郎接口返回 nginx 403，数据仍停在 09-06。
+
 ## 当前处理范围
 
 维护者已说明网站自定义域名过期。本轮按要求只下线客户端云入口，线上只读 key 暂不处理，不执行 Worker 部署、凭证撤销或数据库删除，也不将这些操作作为本次改动的发布前置条件。

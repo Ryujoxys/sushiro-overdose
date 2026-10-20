@@ -1,6 +1,9 @@
 # 旧命令名产物（重命名为 sushiro 前遗留）
 .DS_Store
-.claude/
+# 本机 Claude 设置不进仓库；配套技能 .claude/skills/ 需要提交
+.claude/*
+!.claude/skills/
+.claude/skills/**/__pycache__/
 .sushiro_local.json
 .sushiro_sniper.json
 .sushiro_state.json

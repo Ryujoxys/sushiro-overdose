@@ -79,6 +79,15 @@ Linux、命令行版和文件校验值见[完整下载列表](https://github.com
 
 </details>
 
+<details>
+<summary><strong>公开数据与 AI 助手技能</strong></summary>
+
+全国门店的历史排队数据（每店每半小时：营业状态、预估等待、在等桌数、当前叫号）每天同步到本仓库的 [`data` 分支](https://github.com/Ryujoxys/sushiro-overdose/tree/data)，不需要账号或 key，只含门店公开状态。[格式说明](docs/public-data.md)
+
+仓库自带 Claude Code 技能 [`sushiro-queue`](.claude/skills/sushiro-queue/SKILL.md)：在仓库里问“东方宝泰周六想 7 点吃，几点取号”“我拿了 1350 号大概几点叫到”，它读这份数据算区间，本机应用开着时再看实时叫号。只读，不会替你取号。
+
+</details>
+
 ## Star 趋势
 
 <a href="https://www.star-history.com/?repos=Ryujoxys%2Fsushiro-overdose&amp;type=date">
