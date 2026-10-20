@@ -159,7 +159,8 @@ type ProxyServer struct {
 
 // GatewayExchangeFunc 接收一次经代理转发的新网关请求：req 是转发出去的请求（含头部），status 是上游状态码，
 // body 只在 getStoreById / stores 两个只读接口时给出（已解压的响应体），其余为 nil。
-// 实现方不得把 body 或请求头的值写进磁盘或日志。
+// 实现方不得把 body 或请求头的值写进磁盘或日志。它在这条连接的转发循环里同步调用，
+// 返回前代理不会读小程序在同一连接上的下一条请求，所以耗时的工作要交给别的 goroutine。
 type GatewayExchangeFunc func(req *http.Request, status int, body []byte)
 
 type ProxyOptions struct {
@@ -432,7 +433,8 @@ func (ps *ProxyServer) handleConn(clientConn net.Conn) {
 		requestBodyFields := APIDiscoveryPayloadFieldKinds(bodyBytes)
 		// patchRequests 仅桌面代理启用：把 PC 微信发的请求体改造成手机端兼容形态再转发，
 		// 移动抓包代理（PatchRequests=false）不改请求，保持手机原始流量。
-		if ps.patchRequests {
+		// 新网关只旁观、不改写：小程序发什么就转发什么，连接里存下的也是它自己的请求头。
+		if ps.patchRequests && !gateway {
 			var patches []string
 			bodyBytes, patches = patchSushiroRequestForForward(req, bodyBytes)
 			if len(patches) > 0 {
@@ -704,7 +706,9 @@ func (ps *ProxyServer) relayResponse(w io.Writer, resp *http.Response, method st
 	resp.ProtoMajor = 1
 	resp.ProtoMinor = 1
 	bodySample := ""
-	if resp.StatusCode >= 400 && resp.ContentLength >= 0 && resp.ContentLength <= proxyErrorBodyLogLimit {
+	// 新网关的错误响应体不进日志：它可能原样带回请求里的会员 token，脱敏规则认不出来。
+	gatewayResponse := target != nil && isSushiroGatewayHost(target.Host)
+	if resp.StatusCode >= 400 && !gatewayResponse && resp.ContentLength >= 0 && resp.ContentLength <= proxyErrorBodyLogLimit {
 		bodyBytes := bufferedBody
 		var err error
 		if bodyBytes == nil {

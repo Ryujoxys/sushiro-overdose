@@ -42,11 +42,30 @@ type captureGatewayOutcome struct {
 	RecordErr    error
 }
 
+// recordPassiveSnapshots is the shared writer used for passive records; tests replace it.
+var recordPassiveSnapshots = recordQueueLiveSnapshots
+
 // newCaptureGatewayHandler returns the proxy.ProxyOptions.OnGatewayExchange handler for a capture run.
 // onConnected (optional) runs after a newer member connection was saved, for a user-facing capture log line.
+//
+// The proxy calls the hook on the connection's relay loop and reads the mini program's next request only
+// after it returns, while a passive record rebuilds the local model and may send queue alerts over the
+// network. So the work runs on its own goroutine, on a copy of the request.
 func newCaptureGatewayHandler(onConnected func(LiveSession)) proxy.GatewayExchangeFunc {
 	return func(req *http.Request, status int, body []byte) {
-		handleCapturedGatewayExchange(req, status, body, time.Now(), onConnected)
+		if req == nil || req.URL == nil {
+			return
+		}
+		req = req.Clone(context.Background())
+		now := time.Now()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					LogMessage(time.Now(), "Gateway capture handler failed; the exchange was skipped")
+				}
+			}()
+			handleCapturedGatewayExchange(req, status, body, now, onConnected)
+		}()
 	}
 }
 
@@ -129,7 +148,7 @@ func recordPassiveGatewayStore(rawStoreID string, body []byte, now time.Time) (i
 	store.ObservedAt, store.Source = now, queueLiveSourcePassive
 	ctx, cancel := context.WithTimeout(context.Background(), passiveStoreRecordTimeout)
 	defer cancel()
-	return recordQueueLiveSnapshots(ctx, []QueueLiveStore{store})
+	return recordPassiveSnapshots(ctx, []QueueLiveStore{store})
 }
 
 // passiveStoreRecordDue claims the store's slot when its last passive record is a minute old or more.

@@ -452,3 +452,90 @@ func newTestCA(t *testing.T) (tls.Certificate, *rsa.PrivateKey, *x509.CertPool) 
 	pool.AddCert(cert)
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, key, pool
 }
+
+func TestDesktopProxyForwardsGatewayRequestsUnchanged(t *testing.T) {
+	const pcUA = "Mozilla/5.0 (Windows NT 10.0) MicroMessenger/8.0 MiniProgramEnv/Windows"
+	const pcBody = `{"platform":"windows","storeId":"1012"}`
+	type seen struct {
+		host, ua, body string
+	}
+	var (
+		mu       sync.Mutex
+		received []seen
+	)
+	h := newGatewayHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		received = append(received, seen{host: r.Host, ua: r.Header.Get("User-Agent"), body: string(body)})
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	h.ps.patchRequests = true // the desktop capture proxy rewrites PC WeChat requests for the legacy host
+
+	pcRequest := func(host, path string) *http.Request {
+		req := gatewayRequest(t, host, path)
+		req.Method = http.MethodPost
+		req.Header.Set("User-Agent", pcUA)
+		req.Header.Set("Content-Type", "application/json")
+		req.Body = io.NopCloser(strings.NewReader(pcBody))
+		req.ContentLength = int64(len(pcBody))
+		return req
+	}
+	h.roundTrip(SushiroGatewayHost, pcRequest(SushiroGatewayHost, "/gateway/wechat/api/2.0/queue/info"))
+	h.nextCall()
+	h.roundTrip(SushiroHost, pcRequest(SushiroHost, "/wechat/api/2.0/queue/info"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 2 {
+		t.Fatalf("upstream requests = %+v", received)
+	}
+	// The gateway gets exactly what the mini program sent: same User-Agent, same body.
+	if gateway := received[0]; gateway.ua != pcUA || gateway.body != pcBody {
+		t.Fatalf("gateway request was rewritten: ua=%q body=%q", gateway.ua, gateway.body)
+	}
+	// The legacy host keeps its mobile-compatibility rewrite.
+	if legacy := received[1]; legacy.ua == pcUA || strings.Contains(legacy.body, "windows") {
+		t.Fatalf("legacy request was not patched: ua=%q body=%q", legacy.ua, legacy.body)
+	}
+}
+
+func TestGatewayErrorBodiesStayOutOfLogs(t *testing.T) {
+	const echoed = `{"message":"invalid token eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.ZWNob2VkLXNpZ25hdHVyZQ"}`
+	h := newGatewayHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(echoed)))
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(echoed))
+	})
+	bodies := h.roundTrip(SushiroGatewayHost,
+		gatewayRequest(t, SushiroGatewayHost, SushiroGatewayStorePath+"?storeId=1012"),
+		gatewayRequest(t, SushiroGatewayHost, "/gateway/wechat/api/2.0/member/info"),
+	)
+	if bodies[0] != echoed || bodies[1] != echoed {
+		t.Fatalf("the mini program must still see the error body: %q", bodies)
+	}
+	h.nextCall()
+	h.nextCall()
+	h.logsMu.Lock()
+	logs := strings.Join(h.logs, "\n")
+	h.logsMu.Unlock()
+	if strings.Contains(logs, "ZWNob2VkLXNpZ25hdHVyZQ") || strings.Contains(logs, "invalid token") {
+		t.Fatalf("gateway error body reached the log:\n%s", logs)
+	}
+	if !strings.Contains(logs, "HTTP 401") {
+		t.Fatalf("gateway error status was not logged:\n%s", logs)
+	}
+
+	// The legacy host keeps its short, sanitized error sample for troubleshooting.
+	legacy := newGatewayHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"legacy busy"}`))
+	})
+	legacy.roundTrip(SushiroHost, gatewayRequest(t, SushiroHost, "/wechat/api/2.0/getStoreById?storeId=1012"))
+	legacy.logsMu.Lock()
+	legacyLogs := strings.Join(legacy.logs, "\n")
+	legacy.logsMu.Unlock()
+	if !strings.Contains(legacyLogs, "legacy busy") {
+		t.Fatalf("legacy error sample missing:\n%s", legacyLogs)
+	}
+}

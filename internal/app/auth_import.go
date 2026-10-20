@@ -4,6 +4,7 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -32,11 +33,15 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 	}
 	// 粘贴里有发往新网关的请求时，顺手连接实时数据（会员连接只存本机，新的才写入）；
 	// 它不会成为取号凭证，见 authContextFromText。
-	liveConnected := connectLiveSessionFromImport(req.Text, time.Now())
+	liveConnected, liveProblem := connectLiveSessionFromImport(req.Text, time.Now())
 	tokens, sources, err := parseAuthImportText(req.Text)
 	if err != nil {
 		if liveConnected {
 			writeJSON(w, map[string]any{"saved": false, "live_connected": true, "message": "实时数据已连接；这段内容里没有取号凭证。"})
+			return
+		}
+		if liveProblem != "" {
+			writeError(w, http.StatusBadRequest, liveProblem)
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -52,9 +57,16 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 		"sources":        sources,
 		"live_connected": liveConnected,
 	}
+	if liveProblem != "" {
+		resp["live_error"] = liveProblem
+	}
 	if len(missing) > 0 {
-		if liveConnected {
+		switch {
+		case liveConnected:
 			resp["message"] = "实时数据已连接；取号凭证还不完整"
+		case liveProblem != "":
+			// 粘的是新网关的请求却没连上：说清楚为什么，别只说“字段尚未完整”。
+			resp["message"] = liveProblem
 		}
 		writeJSON(w, resp)
 		return
@@ -107,18 +119,31 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// connectLiveSessionFromImport 用粘贴里发往新网关的请求建立实时数据连接；返回现在是否已连接。
-// 粘贴里没有可用的网关请求时什么都不写。
-func connectLiveSessionFromImport(text string, now time.Time) bool {
+// connectLiveSessionFromImport 用粘贴里发往新网关的请求建立实时数据连接。返回：这段粘贴之后实时数据是否已连接
+// （粘贴里没有可用的网关请求时为 false，什么都不写）；粘贴里有发往新网关的请求却用不了时，给用户看的原因。
+// 原因只取 ParseLiveSessionText 的固定中文提示，不含粘贴内容。
+func connectLiveSessionFromImport(text string, now time.Time) (bool, string) {
+	const prefix = "实时数据没有连上："
 	session, err := ParseLiveSessionText(text, now)
 	if err != nil {
-		return false
+		// 没找到网关请求（含只有旧接口请求的粘贴）不是“没连上”，只是这段内容与实时数据无关。
+		unrelated := errors.Is(err, errLiveImportEmpty) || errors.Is(err, errLiveImportNotGateway) || errors.Is(err, errLiveImportLegacy)
+		if !unrelated && strings.Contains(strings.ToLower(text), liveGatewayHost) {
+			return false, prefix + err.Error()
+		}
+		return false, ""
 	}
 	if _, err := SaveLiveSession(session); err != nil {
 		LogMessage(now, "Saving the live session from a credential import failed: "+err.Error())
-		return false
+		return false, prefix + "连接没有保存成功，请重试"
 	}
-	return liveSessionConnectedNow()
+	if queueLiveSessionProvider == nil {
+		return false, "" // 这个进程不读连接，说不出连没连上
+	}
+	if !liveSessionConnectedNow() { // 刚好到期，或这条连接已被寿司郎拒绝过
+		return false, prefix + errLiveImportExpired.Error()
+	}
+	return true, ""
 }
 
 // parseAuthImportText 对同一段文本依次跑 JSON、curl、原始头三种解析器，每种命中就往 tokens 里补字段。

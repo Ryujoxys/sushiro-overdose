@@ -243,9 +243,15 @@ func authProbeAccountPath(path string) bool {
 	return strings.Contains(path, "/api_auth/")
 }
 
-// normalizePublicProbeResult 把公开门店接口的 401/403 记为“跳过”：不算失败，也不把账号凭证标成失效。
+// normalizePublicProbeResult 把公开门店接口的 401/403/451（旧接口不再开放的几种回法，同 friendlyPublicQueueError）
+// 记为“跳过”：不算失败，也不把账号凭证标成失效。
 func normalizePublicProbeResult(result AuthProbeResult) AuthProbeResult {
-	if authProbePublicPath(result.Path) && (result.Status == http.StatusUnauthorized || result.Status == http.StatusForbidden) {
+	switch result.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnavailableForLegalReasons:
+	default:
+		return result
+	}
+	if authProbePublicPath(result.Path) {
 		result.Skipped = true
 		result.OK = false
 		result.Detail = "寿司郎旧的门店接口已不再开放，这一项不用来判断账号是否可用。"

@@ -128,3 +128,59 @@ func TestCredentialImportConnectsLiveDataFromAGatewayPaste(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(LocalConfigPath()) })
 }
+
+func TestCredentialImportExplainsAnUnusableGatewayPaste(t *testing.T) {
+	reliabilityHome(t)
+	useInterfaceLiveSessionProvider(t)
+	now := time.Now()
+	expired := testLiveJWT(now.Add(-2*time.Hour), now.Add(-time.Hour))
+	importText := func(text string) (int, map[string]any, string) {
+		body, _ := json.Marshal(map[string]string{"text": text})
+		rr := httptest.NewRecorder()
+		handleAuthImport(rr, httptest.NewRequest(http.MethodPost, "/api/auth/import", strings.NewReader(string(body))))
+		var resp map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+		return rr.Code, resp, rr.Body.String()
+	}
+
+	code, resp, raw := importText(gatewayCurl(expired))
+	if code != http.StatusOK || resp["saved"] != false || resp["live_connected"] != false {
+		t.Fatalf("expired gateway paste: %d %s", code, raw)
+	}
+	message, _ := resp["message"].(string)
+	liveError, _ := resp["live_error"].(string)
+	if !strings.HasPrefix(message, "实时数据没有连上") || !strings.Contains(message, "过期") || liveError != message {
+		t.Fatalf("message = %q live_error = %q", message, liveError)
+	}
+	assertNoLiveSecrets(t, "import response", raw, expired)
+	if s, _ := LoadLiveSession(); s != nil {
+		t.Fatal("an expired paste was saved as the live connection")
+	}
+	if _, err := os.Stat(LocalConfigPath()); !os.IsNotExist(err) {
+		t.Fatal("a gateway paste wrote ticket credentials")
+	}
+
+	// A paste without any gateway request says nothing about live data.
+	code, resp, raw = importText(legacyTicketCurl)
+	if code != http.StatusOK || resp["live_error"] != nil || strings.Contains(raw, "实时数据") {
+		t.Fatalf("legacy paste mentions live data: %d %s", code, raw)
+	}
+	t.Cleanup(func() { _ = os.Remove(LocalConfigPath()) })
+}
+
+func TestCredentialImportIgnoresIncidentalGatewayMentions(t *testing.T) {
+	reliabilityHome(t)
+	useInterfaceLiveSessionProvider(t)
+	// A legacy request whose Referer happens to name the gateway host is not a failed live connection.
+	text := strings.Replace(legacyTicketCurl, "https://servicewechat.com/wx123/1/page-frame.html", "https://sapi.sushiro.com.cn/page", 1)
+	connected, problem := connectLiveSessionFromImport(text, time.Now())
+	if connected || problem != "" {
+		t.Fatalf("connected=%v problem=%q", connected, problem)
+	}
+	// A gateway request that lacks its app context does explain itself.
+	now := time.Now()
+	broken := strings.Replace(gatewayCurl(testLiveJWT(now, now.Add(time.Hour))), "-H 'x-app-code: "+testLiveAppCode+"'", "", 1)
+	if connected, problem = connectLiveSessionFromImport(broken, now); connected || !strings.HasPrefix(problem, "实时数据没有连上：") {
+		t.Fatalf("broken gateway paste: connected=%v problem=%q", connected, problem)
+	}
+}

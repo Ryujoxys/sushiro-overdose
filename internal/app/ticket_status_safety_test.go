@@ -107,6 +107,16 @@ func TestTakeTicketRefusesWhenCurrentTicketIsUnknown(t *testing.T) {
 			if outcome.errMsg != "查不到你现在有没有号，为避免重复取号，请在小程序里取号" || outcome.status < 400 || outcome.body != nil {
 				t.Fatalf("outcome = %+v", outcome)
 			}
+			// The page learns that nothing was sent, so it need not treat the take as "result unknown".
+			rr := httptest.NewRecorder()
+			outcome.write(rr)
+			var reply struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &reply); err != nil || rr.Code != http.StatusBadGateway || reply.Code != "ticket_not_submitted" || reply.Error != outcome.errMsg {
+				t.Fatalf("reply = %d %s", rr.Code, rr.Body.String())
+			}
 			if after := LoadNetTicketPlan(); after.Status != before.Status || after.Number != "" {
 				t.Fatalf("plan changed: %+v", after)
 			}

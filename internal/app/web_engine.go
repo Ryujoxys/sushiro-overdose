@@ -433,6 +433,10 @@ func netTicketStatusFailureMessage(err error) string {
 // netTicketStatusUnknownBeforeTake 是取号前查不清有没有号时的拒绝说明：不提交，避免重复取号。
 const netTicketStatusUnknownBeforeTake = "查不到你现在有没有号，为避免重复取号，请在小程序里取号"
 
+// netTicketNotSubmittedCode 标出“取号请求根本没有发出”的拒绝：页面据此说明没有提交，
+// 不必当成“结果未确认”去锁住取号按钮。
+const netTicketNotSubmittedCode = "ticket_not_submitted"
+
 // localRecordIsStale 判断本地保存的记录（排队号或预约）是否已过期、该刷掉：
 //   - 排队号：沿用跨天失效（localNetTicketIsStale）；
 //   - 预约：预约日期（QueueDate / Start / SlotLabel 里的 YYYYMMDD）早于今天即为过期遗留。
@@ -705,10 +709,15 @@ type netTicketTakeOutcome struct {
 	status int
 	body   map[string]any
 	errMsg string
+	code   string // 机器可读的错误类别（可空），见 netTicketNotSubmittedCode
 }
 
 func (o netTicketTakeOutcome) write(w http.ResponseWriter) {
 	if o.errMsg != "" {
+		if o.code != "" {
+			writeErrorCode(w, o.status, o.code, o.errMsg)
+			return
+		}
 		writeError(w, o.status, o.errMsg)
 		return
 	}
@@ -727,7 +736,7 @@ func takeNetTicketLocked(ctx context.Context, client *Client, storeID string) ne
 	if probeErr != nil && !isDefiniteNoCurrentNetTicket(probeErr) {
 		noteAuthResult(probeErr) // 认证失败照常标记，其它失败不改变凭证状态
 		LogMessage(time.Now(), "Ticket not submitted: the current ticket status could not be confirmed")
-		return netTicketTakeOutcome{status: http.StatusBadGateway, errMsg: netTicketStatusUnknownBeforeTake}
+		return netTicketTakeOutcome{status: http.StatusBadGateway, errMsg: netTicketStatusUnknownBeforeTake, code: netTicketNotSubmittedCode}
 	}
 	if probeErr == nil && netTicketLooksSuccessful(existing) {
 		ticket := normalizeNetTicketRecord(existing)

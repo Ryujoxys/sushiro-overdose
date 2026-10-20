@@ -33,7 +33,7 @@ func probeClientFor(t *testing.T, publicStatus, reservationsStatus int, reservat
 }
 
 func TestPublicStoreRejectionDoesNotMarkCredentialsStale(t *testing.T) {
-	for _, publicStatus := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+	for _, publicStatus := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusUnavailableForLegalReasons} {
 		reliabilityHome(t)
 		resetAuthHealth()
 

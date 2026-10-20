@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -276,4 +277,91 @@ func TestBothCaptureProxiesInjectTheGatewayHandler(t *testing.T) {
 			t.Fatalf("capture_gateway.go reaches %s", forbidden)
 		}
 	}
+}
+
+func TestCaptureGatewayHandlerDoesNotHoldTheProxyLoop(t *testing.T) {
+	reliabilityHome(t)
+	resetPassiveStoreRecords(t)
+	now := time.Now()
+	token := testLiveJWT(now.Add(-time.Minute), now.Add(time.Hour))
+	good := []byte(`{"id":1012,"name":"南山店","storeStatus":"OPEN","wait":30,"groupQueues":{"boothQueue":["820"]}}`)
+
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan int, 1)
+	previous := recordPassiveSnapshots
+	recordPassiveSnapshots = func(ctx context.Context, stores []QueueLiveStore) (int, error) {
+		close(entered)
+		<-release // a slow model rebuild or alert delivery
+		finished <- len(stores)
+		return len(stores), nil
+	}
+	t.Cleanup(func() { recordPassiveSnapshots = previous })
+
+	connected := make(chan LiveSession, 1)
+	handler := newCaptureGatewayHandler(func(s LiveSession) { connected <- s })
+	req := capturedGatewayRequest(t, http.MethodGet, capturedStorePath+"?storeId=1012", token)
+
+	returned := make(chan struct{})
+	go func() {
+		handler(req, http.StatusOK, good)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the gateway hook blocked the proxy while the passive record was being written")
+	}
+	// The proxy may reuse or change its request afterwards; the handler works on its own copy.
+	req.Header.Set("Authorization", "Bearer changed-after-return")
+	req.URL.RawQuery = "storeId=9999"
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("passive record never started")
+	}
+	select {
+	case s := <-connected:
+		if s.Authorization != "Bearer "+token {
+			t.Fatal("handler did not use the request it was given")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("session was not saved")
+	}
+	close(release)
+	select {
+	case n := <-finished:
+		if n != 1 {
+			t.Fatalf("recorded %d stores", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("passive record did not finish")
+	}
+	if saved, err := LoadLiveSession(); err != nil || saved == nil || saved.Authorization != "Bearer "+token {
+		t.Fatalf("saved session = %v %v", saved != nil, err)
+	}
+}
+
+func TestCaptureGatewayHandlerSurvivesAPanickingWriter(t *testing.T) {
+	reliabilityHome(t)
+	resetPassiveStoreRecords(t)
+	now := time.Now()
+	token := testLiveJWT(now.Add(-time.Minute), now.Add(time.Hour))
+	entered := make(chan struct{})
+	previous := recordPassiveSnapshots
+	recordPassiveSnapshots = func(context.Context, []QueueLiveStore) (int, error) {
+		close(entered)
+		panic("writer bug")
+	}
+	t.Cleanup(func() { recordPassiveSnapshots = previous })
+	handler := newCaptureGatewayHandler(nil)
+	handler(nil, http.StatusOK, nil) // nothing to do, no goroutine
+	handler(capturedGatewayRequest(t, http.MethodGet, capturedStorePath+"?storeId=1012", token), http.StatusOK,
+		[]byte(`{"id":1012,"name":"南山店","storeStatus":"OPEN","wait":30}`))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("passive record never started")
+	}
+	// A panic in the background writer must not crash the interface process; give the recover a moment.
+	time.Sleep(50 * time.Millisecond)
 }
