@@ -162,12 +162,16 @@ func (c *QueueBaselineCollector) collectTick(ctx context.Context) {
 	state.HeartbeatAt = time.Now().Format(time.RFC3339)
 	state.Running = state.Running && ctx.Err() == nil
 	data, _ := json.Marshal(state)
+	// The round's own error lives in the shared file; keep locally only what could not be
+	// written there, so status() never re-adds an error the shared state has since cleared.
+	localError := ""
 	if err := AtomicWriteFile(queueCollectionStatePath(), data, 0o600); err != nil {
 		state.LastError = err.Error()
+		localError = state.LastError
 	}
 	c.mu.Lock()
 	c.lastAt, _ = time.Parse(time.RFC3339, state.LastAt)
-	c.lastError, c.pausedReason = state.LastError, state.PausedReason
+	c.lastError, c.pausedReason = localError, state.PausedReason
 	c.mu.Unlock()
 }
 

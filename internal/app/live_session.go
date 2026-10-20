@@ -108,7 +108,8 @@ func LoadLiveSession() (*LiveSession, error) {
 }
 
 // SaveLiveSession 只在新连接比已保存的更新时写入（原子写入，0600），返回是否写入。
-// 有 exp 时按 exp 比较，否则按抓到的时间；同一个 token 不重复写，已失效的连接不写。
+// 有 exp 时按 exp 比较，否则按抓到的时间；同一个 token 不重复写，已失效的连接不写；
+// 已保存的连接过期或被寿司郎拒绝时，任何一条别的可用连接都会替换它。
 func SaveLiveSession(s LiveSession) (bool, error) {
 	if err := s.validate(); err != nil {
 		return false, err
@@ -151,6 +152,10 @@ func (s LiveSession) newerThan(old LiveSession, now time.Time) bool {
 	}
 	if s.Authorization == old.Authorization {
 		return false
+	}
+	// 寿司郎已经拒绝了存着的那条连接：换成任何一条别的可用连接，不论两者谁的 exp 更晚。
+	if liveSessionRejected(old.mark()) {
+		return true
 	}
 	if !s.ExpiresAt.IsZero() && !old.ExpiresAt.IsZero() && !s.ExpiresAt.Equal(old.ExpiresAt) {
 		return s.ExpiresAt.After(old.ExpiresAt)
@@ -378,7 +383,10 @@ func ParseLiveSessionText(text string, now time.Time) (LiveSession, error) {
 			return LiveSession{}, err
 		}
 	case len(text) >= 4 && strings.EqualFold(text[:4], "curl"):
-		requests = []liveImportRequest{liveRequestFromCurl(text)}
+		// “复制全部为 cURL”会一次给出多条命令：逐条解析，免得把别的请求的头混进网关连接。
+		for _, command := range liveSplitCurlCommands(text) {
+			requests = append(requests, liveRequestFromCurl(command))
+		}
 	default:
 		requests = []liveImportRequest{liveRequestFromRaw(text)}
 	}
@@ -511,6 +519,25 @@ func liveRequestFromCurl(text string) liveImportRequest {
 		}
 	}
 	return request
+}
+
+var liveCurlCommandPattern = regexp.MustCompile(`(?im)^[ \t]*curl[ \t]`)
+
+// liveSplitCurlCommands splits pasted text at every line that starts a new curl command.
+func liveSplitCurlCommands(text string) []string {
+	starts := liveCurlCommandPattern.FindAllStringIndex(text, -1)
+	if len(starts) <= 1 {
+		return []string{text}
+	}
+	commands := make([]string, 0, len(starts))
+	for i, start := range starts {
+		end := len(text)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		commands = append(commands, text[start[0]:end])
+	}
+	return commands
 }
 
 func liveParseURL(raw string, current *url.URL) *url.URL {

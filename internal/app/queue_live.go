@@ -497,12 +497,21 @@ func (c *QueueLiveClient) cachedStore(ctx context.Context, storeID string) (Queu
 	queueLiveStoreCalls[key] = call
 	queueLiveStoreCacheMu.Unlock()
 
-	call.store, call.err = c.fetchStore(ctx, storeID)
-	queueLiveStoreCacheMu.Lock()
-	delete(queueLiveStoreCalls, key)
-	queueLiveStoreCacheMu.Unlock()
-	close(call.done)
-	return call.store, call.err
+	// 共享的请求不随第一个调用方取消：切换门店或关掉页面时，其他等着同一家店的调用方
+	// 仍拿到结果。请求本身受 15 秒超时约束。
+	go func() {
+		call.store, call.err = c.fetchStore(context.WithoutCancel(ctx), storeID)
+		queueLiveStoreCacheMu.Lock()
+		delete(queueLiveStoreCalls, key)
+		queueLiveStoreCacheMu.Unlock()
+		close(call.done)
+	}()
+	select {
+	case <-call.done:
+		return call.store, call.err
+	case <-ctx.Done():
+		return QueueLiveStore{}, ctx.Err()
+	}
 }
 
 func (c *QueueLiveClient) ListAreas(ctx context.Context) ([]string, error) {

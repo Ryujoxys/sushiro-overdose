@@ -434,3 +434,61 @@ func TestOnlyTheInterfaceProcessInjectsTheLiveSession(t *testing.T) {
 		t.Fatal("the background service set a live session provider")
 	}
 }
+
+func TestImportReplacesAConnectionTheGatewayRejected(t *testing.T) {
+	reliabilityHome(t)
+	useLiveSession(t, nil)
+	now := time.Now()
+	// The stored connection was issued later (longer exp) but the gateway has since rejected it.
+	stored := testLiveSession(now.Add(-time.Minute), 2*time.Hour)
+	if saved, err := SaveLiveSession(stored); !saved || err != nil {
+		t.Fatalf("seed: %v %v", saved, err)
+	}
+	noteLiveSessionRejected(stored.mark())
+
+	again := stored
+	again.CapturedAt = now
+	if saved, _ := SaveLiveSession(again); saved {
+		t.Fatal("rewrote the rejected token itself")
+	}
+	token := testLiveJWT(now.Add(-time.Minute), now.Add(time.Hour))
+	body, _ := json.Marshal(map[string]string{"text": gatewayCurl(token)})
+	rr := httptest.NewRecorder()
+	newWebMux().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/live-session/import", strings.NewReader(string(body))))
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil || rr.Code != http.StatusOK || got["saved"] != true || got["connected"] != true {
+		t.Fatalf("fresh connection refused after a rejection: %d %s", rr.Code, rr.Body.String())
+	}
+	assertNoLiveSecrets(t, "import response", rr.Body.String(), token)
+	if loaded, err := LoadLiveSession(); err != nil || loaded == nil || loaded.Authorization != "Bearer "+token {
+		t.Fatalf("stored connection after import: %v", err)
+	}
+}
+
+func TestParseLiveSessionTextKeepsSeveralCurlCommandsApart(t *testing.T) {
+	now := time.Now()
+	token := testLiveJWT(now.Add(-time.Minute), now.Add(time.Hour))
+	other := `curl 'https://crm-cn-prd.sushiro.com.cn/wechat/api/2.0/stores?latitude=1' \
+  -H 'authorization: Bearer legacy-anonymous-token' \
+  -H 'x-app-client: other-client' \
+  -H 'x-app-code: other-code'`
+	cmdOther := `curl ^"https://example.com/api^" ^
+  -H ^"authorization: Bearer other.service.token^"`
+	for name, text := range map[string]string{
+		"gateway first":    gatewayCurl(token) + " ;\n" + other,
+		"gateway last":     other + " ;\n" + gatewayCurl(token),
+		"windows cmd list": cmdOther + " &\r\n" + strings.ReplaceAll(gatewayCurl(token), "'", `^"`),
+	} {
+		s, err := ParseLiveSessionText(text, now)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if s.Authorization != "Bearer "+token || s.AppClient != testLiveAppClient || s.AppCode != testLiveAppCode {
+			t.Errorf("%s mixed headers from another request: client=%q", name, s.AppClient)
+		}
+	}
+	if _, err := ParseLiveSessionText(other+" ;\n"+other, now); !errors.Is(err, errLiveImportLegacy) {
+		t.Fatalf("only old-host commands: %v", err)
+	}
+}

@@ -77,7 +77,11 @@ func (b *DesktopBridge) Request(method, resource, body string, timeoutMS int) (D
 	if (method != "GET" && method != "POST") || !strings.Contains(" "+desktopMethods[u.Path]+" ", " "+method+" ") {
 		return DesktopResponse{}, errors.New("不支持的本地操作")
 	}
-	if len(body) > 1<<20 || (method == "GET" && body != "") {
+	limit := 1 << 20
+	if u.Path == "/api/live-session/import" {
+		limit = liveSessionImportMaxBytes // 粘贴的 HAR 带着门店列表响应，常常超过 1MB
+	}
+	if len(body) > limit || (method == "GET" && body != "") {
 		return DesktopResponse{}, errors.New("请求内容过大或格式不正确")
 	}
 	if method == http.MethodPost {

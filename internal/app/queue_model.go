@@ -108,7 +108,7 @@ func rebuildLocalQueueModel(now time.Time) error {
 }
 
 func localQueueModelStatus(now time.Time) LocalQueueModelStatus {
-	status := LocalQueueModelStatus{Status: "empty", Message: "尚未生成本机模型；选店后开启公开采集即可，不需要认证。已有历史也会参与下一轮统计。"}
+	status := LocalQueueModelStatus{Status: "empty", Message: "尚未生成本机模型；选店并在应用里连接实时数据后，应用开着时会开始记录。已有历史也会参与下一轮统计。"}
 	model, err := loadLocalQueueModel()
 	if err != nil {
 		if !os.IsNotExist(err) {

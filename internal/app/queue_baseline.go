@@ -393,7 +393,7 @@ func recordQueueLiveSnapshots(ctx context.Context, stores []QueueLiveStore) (int
 			records = append(records, queueBaselineRecordFromStore(s, at.Format(time.RFC3339)))
 		}
 		// 实时快照同样包含当前叫号：顺手写入排队观测，让叫号预测和到店预测
-		// 无需通行证也能积累本机曲线（与凭证态采样写入同一份观测文件）。
+		// 不用取号凭证也能积累本机曲线（与凭证态采样写入同一份观测文件）。
 		observation := queueObservationFromLiveStore(s, at)
 		if manual {
 			observation.SourceEndpoint = queueLiveSourceManual

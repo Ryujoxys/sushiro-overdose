@@ -309,3 +309,53 @@ func TestGatewayClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal("connection headers followed a redirect to another host")
 	}
 }
+
+func TestGatewaySharedReadSurvivesTheFirstCallerLeaving(t *testing.T) {
+	now := time.Now()
+	session := testLiveSession(now, time.Hour)
+	useLiveSession(t, &session)
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	gatewayTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		w.Write([]byte(`{"id":1012,"name":"南山店","storeStatus":"OPEN","wait":10}`))
+	})
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := NewQueueLiveClient().GetStore(firstCtx, "1012")
+		firstDone <- err
+	}()
+	<-started
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := NewQueueLiveClient().GetStore(context.Background(), "1012")
+		secondDone <- err
+	}()
+	// The second caller joins the shared request, then the first one goes away.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		queueLiveStoreCacheMu.Lock()
+		joined := len(queueLiveStoreCalls) == 1
+		queueLiveStoreCacheMu.Unlock()
+		if joined || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller: %v", err)
+	}
+	close(release)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("the other caller lost the shared read: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("shared read sent %d requests", calls.Load())
+	}
+}

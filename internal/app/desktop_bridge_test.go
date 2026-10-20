@@ -277,3 +277,26 @@ func TestDesktopBridgeAllowsLiveSessionRoutes(t *testing.T) {
 		t.Fatalf("requests reaching the backend: %v", seen)
 	}
 }
+
+func TestDesktopBridgeAcceptsLargeLiveSessionImportOnly(t *testing.T) {
+	var sizes []int
+	b := testDesktopBridge(t, func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		sizes = append(sizes, len(data))
+		writeJSON(w, map[string]string{"state": "active"})
+	})
+	// A HAR carrying the store list reply is usually several megabytes.
+	har := `{"text":"` + strings.Repeat("x", 3<<20) + `"}`
+	if response, err := b.Request("POST", "/api/live-session/import", har, 5000); err != nil || response.Status != 200 {
+		t.Fatalf("large import refused: %+v %v", response, err)
+	}
+	if _, err := b.Request("POST", "/api/live-session/import", `{"text":"`+strings.Repeat("x", liveSessionImportMaxBytes)+`"}`, 5000); err == nil {
+		t.Fatal("bridge accepted an import above the server limit")
+	}
+	if _, err := b.Request("POST", "/api/records/settings", har, 5000); err == nil {
+		t.Fatal("bridge accepted a large body for another route")
+	}
+	if len(sizes) != 1 || sizes[0] != len(har) {
+		t.Fatalf("bodies reaching the backend: %v", sizes)
+	}
+}

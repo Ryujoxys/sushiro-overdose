@@ -283,3 +283,32 @@ func TestCollectionIntervalNeverBelowOneMinute(t *testing.T) {
 		}
 	}
 }
+
+func TestCollectorStatusDropsConnectionErrorOnceReconnected(t *testing.T) {
+	publicCollectorFixture(t)
+	useLiveSession(t, nil)
+	c := &QueueBaselineCollector{collect: func(context.Context, QueueBaselineConfig) (int, error) { return 0, ErrLiveAuthRequired }}
+	c.tick(context.Background())
+	if status := c.status(); !status.WaitingForConnection || status.LastError == "" {
+		t.Fatalf("missing connection not reported: %+v", status)
+	}
+	session := testLiveSession(time.Now(), time.Hour)
+	useLiveSession(t, &session)
+	if status := c.status(); status.WaitingForConnection || status.LastError != "" || status.LastErrorCode != "" {
+		t.Fatalf("status still asks for a connection right after connecting: %+v", status)
+	}
+}
+
+func TestBackgroundCopyNoLongerPromisesCredentialFreeRecording(t *testing.T) {
+	for _, file := range []string{"queue_service.go", "queue_model.go", "queue_baseline.go", "queue_collection_state.go"} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, claim := range []string{"不需要通行证", "无需通行证", "不需要认证"} {
+			if strings.Contains(string(data), claim) {
+				t.Fatalf("%s still says %q although live data now needs a connection", file, claim)
+			}
+		}
+	}
+}

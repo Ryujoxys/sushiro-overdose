@@ -246,7 +246,7 @@ func cmdCollect(args []string) {
 		if err := startPublicQueueDaemon(); err != nil {
 			fmt.Println(err)
 		} else {
-			fmt.Println("公开排队采集已在后台运行，不需要通行证")
+			fmt.Println("后台记录已开启。寿司郎实时数据现在需要在应用里连接，后台进程不使用这份连接：应用开着并已连接时才会记录")
 		}
 	case "stop":
 		cfg := LoadQueueBaselineConfig()
