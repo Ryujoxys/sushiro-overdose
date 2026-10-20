@@ -15,7 +15,7 @@ func handleQueueLiveStores(w http.ResponseWriter, r *http.Request) {
 	query := queueLiveStoreQueryFromRequest(r)
 	stores, err := NewQueueLiveClient().ListStores(r.Context(), query)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, friendlyPublicQueueError(err))
+		writeLiveError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{
@@ -39,7 +39,7 @@ func handleQueueLiveStore(w http.ResponseWriter, r *http.Request) {
 	}
 	store, err := NewQueueLiveClient().GetStore(r.Context(), storeID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, friendlyPublicQueueError(err))
+		writeLiveError(w, err)
 		return
 	}
 	writeJSON(w, store)
@@ -60,7 +60,7 @@ func handleQueueLivePanel(w http.ResponseWriter, r *http.Request) {
 	}
 	panel, err := buildQueueLivePanel(r.Context(), storeID, time.Now())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, friendlyPublicQueueError(err))
+		writeLiveError(w, err)
 		return
 	}
 	writeJSON(w, panel)
@@ -82,7 +82,7 @@ func handleQueueAdvisor(w http.ResponseWriter, r *http.Request) {
 	}
 	advisor, err := buildQueueAdvisor(r.Context(), storeID, atoiDefault(q.Get("target_no"), 0), atoiDefault(q.Get("travel_minutes"), 0), time.Now())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, friendlyPublicQueueError(err))
+		writeLiveError(w, err)
 		return
 	}
 	writeJSON(w, advisor)
@@ -177,7 +177,7 @@ func handleQueueLiveAreas(w http.ResponseWriter, r *http.Request) {
 	}
 	areas, err := NewQueueLiveClient().ListAreas(r.Context())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, friendlyPublicQueueError(err))
+		writeLiveError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{

@@ -36,6 +36,13 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// writeErrorCode 在中文错误之外附带机器可读的 code，页面据此分支，不去匹配中文文案。
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
+}
+
 func mustJSON(v any) string {
 	data, _ := json.Marshal(v)
 	return string(data)

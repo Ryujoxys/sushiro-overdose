@@ -7,6 +7,7 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,10 @@ const (
 	queueLiveReferer      = "https://servicewechat.com/wx7ac31ef6c073a7ed/159/page-frame.html"
 	queueLiveUserAgent    = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 )
+
+// ErrLiveAuthRequired 表示没有可用的实时数据连接：新网关要求用户自己的会员 token，
+// 本地直接返回这个错误，不向任何寿司郎主机发请求。
+var ErrLiveAuthRequired = errors.New("live_auth_required")
 
 type QueueLiveClient struct {
 	baseURL    string
@@ -55,6 +60,11 @@ type QueueLiveStore struct {
 	OpenDate          string  `json:"openDate,omitempty"`
 	// GroupQueues 仅 getStoreById 返回，列表接口没有。各队列里是当前正在叫的号。
 	GroupQueues QueueLiveGroupQueues `json:"groupQueues,omitempty"`
+
+	// ObservedAt 是这帧数据的观测时间；零值表示刚请求到，写入方使用当前时间。
+	ObservedAt time.Time `json:"-"`
+	// Source 标记来源：gateway（新网关）、legacy（旧地址）、passive（经本机代理看到的小程序响应）、manual（用户填写）。
+	Source string `json:"-"`
 }
 
 // QueueLiveGroupQueues 是 getStoreById 返回的当前叫号队列。booth/mixed/counter

@@ -102,18 +102,52 @@ func friendlyNetworkError(err error) string {
 	return err.Error()
 }
 
-// friendlyPublicQueueError explains failures of the credential-free public queue
-// API. An HTML block page (often shown to overseas VPN exits) must never reach
-// the page verbatim.
+// Machine-readable live-data error codes returned next to the Chinese message.
+const (
+	liveErrAuthRequired = "live_auth_required" // 没有连接，或网关拒绝了连接（401/403/451）
+	liveErrRateLimited  = "live_rate_limited"
+	liveErrUnavailable  = "live_unavailable"
+)
+
+const liveAuthRequiredText = "实时叫号需要连接：打开寿司郎小程序刷新一下，再在应用里连接（约 1 小时有效）；已有记录和历史规律照常可看"
+
+// liveErrorCode classifies a live-data failure for the page and the collector.
+func liveErrorCode(err error) string {
+	if errors.Is(err, ErrLiveAuthRequired) {
+		return liveErrAuthRequired
+	}
+	var apiErr *api.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnavailableForLegalReasons:
+			return liveErrAuthRequired
+		case http.StatusTooManyRequests:
+			return liveErrRateLimited
+		}
+	}
+	return liveErrUnavailable
+}
+
+// writeLiveError writes a live-data failure with its code; the status stays 502 so
+// existing callers keep treating it as an upstream failure.
+func writeLiveError(w http.ResponseWriter, err error) {
+	writeErrorCode(w, http.StatusBadGateway, liveErrorCode(err), friendlyPublicQueueError(err))
+}
+
+// friendlyPublicQueueError explains failures of live queue reads. Since 2026-10 the
+// mini program uses a gateway that needs the user's own member token; an old-host
+// rejection or an expired connection both mean "connect again", never a VPN hint.
 func friendlyPublicQueueError(err error) string {
+	if errors.Is(err, ErrLiveAuthRequired) {
+		return liveAuthRequiredText
+	}
 	var apiErr *api.APIError
 	if errors.As(err, &apiErr) {
 		code := strconv.Itoa(apiErr.StatusCode)
 		html := strings.Contains(strings.ToLower(apiErr.Body), "<html")
 		switch {
-		case (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusUnavailableForLegalReasons) && html:
-			// 2026-10 起小程序改用新网关和会员 token，本应用的旧地址加固定 token 会被拒绝。
-			return "寿司郎拒绝了这次请求（HTTP " + code + "）：寿司郎已更换实时接口的认证方式，当前版本暂时取不到实时叫号，已有记录仍可查看；开着海外 VPN 时也请关闭"
+		case apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusUnavailableForLegalReasons:
+			return "实时数据连接未建立或已失效：打开寿司郎小程序刷新一下，再在应用里连接一次；已有记录和历史规律照常可看"
 		case apiErr.StatusCode == http.StatusTooManyRequests:
 			return "请求太频繁（HTTP 429）：请稍后再试"
 		case apiErr.StatusCode >= 500:

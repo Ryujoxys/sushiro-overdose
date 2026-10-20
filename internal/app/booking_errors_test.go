@@ -73,9 +73,12 @@ func TestTicketAlreadyIssuedError(t *testing.T) {
 func TestFriendlyPublicQueueErrorHidesBlockPages(t *testing.T) {
 	block := &api.APIError{StatusCode: 403, Body: "<html>\r\n<head><title>403 Forbidden</title></head></html>"}
 	for err, want := range map[error]string{
-		block:                                                     "更换实时接口",
-		fmt.Errorf("store 1012: %w", block):                       "更换实时接口",
-		errors.Join(block, errors.New("model")):                   "已有记录仍可查看",
+		block:                                   "再在应用里连接",
+		fmt.Errorf("store 1012: %w", block):     "再在应用里连接",
+		errors.Join(block, errors.New("model")): "已有记录和历史规律照常可看",
+		&api.APIError{StatusCode: 401, Body: `{"code":"E012"}`}: "连接未建立或已失效",
+		ErrLiveAuthRequired:                                       "实时叫号需要连接",
+		fmt.Errorf("round: %w", ErrLiveAuthRequired):              "约 1 小时有效",
 		&api.APIError{StatusCode: 429}:                            "太频繁",
 		&api.APIError{StatusCode: 502, Body: "x"}:                 "暂时不可用",
 		&api.APIError{StatusCode: 404, Body: "<HTML>gone</HTML>"}: "异常页面",
@@ -89,8 +92,19 @@ func TestFriendlyPublicQueueErrorHidesBlockPages(t *testing.T) {
 			t.Errorf("%v => %q, want %q", err, got, want)
 		}
 	}
-	// A JSON 403 is not a block page and keeps its original detail.
-	if got := friendlyPublicQueueError(&api.APIError{StatusCode: 403, Body: `{"error":"denied"}`}); !strings.Contains(got, "denied") {
-		t.Errorf("JSON 403 lost detail: %q", got)
+	// Any 401/403 now means the live connection is missing or expired; the VPN hint is gone.
+	for _, err := range []error{block, &api.APIError{StatusCode: 403, Body: `{"error":"denied"}`}, ErrLiveAuthRequired} {
+		if got := friendlyPublicQueueError(err); strings.Contains(got, "VPN") || strings.Contains(got, "HTTP 403") {
+			t.Errorf("%v => %q still blames VPN or shows a status code", err, got)
+		}
+		if liveErrorCode(err) != liveErrAuthRequired {
+			t.Errorf("%v => code %q", err, liveErrorCode(err))
+		}
+	}
+	if got := liveErrorCode(&api.APIError{StatusCode: 429}); got != liveErrRateLimited {
+		t.Errorf("429 code = %q", got)
+	}
+	if got := liveErrorCode(context.DeadlineExceeded); got != liveErrUnavailable {
+		t.Errorf("timeout code = %q", got)
 	}
 }
