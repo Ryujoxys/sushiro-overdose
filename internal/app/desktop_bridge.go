@@ -40,7 +40,7 @@ var desktopMethods = map[string]string{
 	"/api/status": "GET", "/api/records": "GET", "/api/records/settings": "GET POST",
 	"/api/queue/service": "GET POST", "/api/queue/baseline": "GET POST",
 	"/api/queue/stores": "GET", "/api/queue/live": "GET", "/api/queue/plan": "GET",
-	"/api/queue/advisor": "GET", "/api/queue/ticket": "POST",
+	"/api/queue/advisor": "GET", "/api/queue/reading": "POST", "/api/queue/ticket": "POST",
 	"/api/queue/ticket/status": "GET", "/api/queue/ticket/cancel": "POST",
 	"/api/mobile-auth": "GET", "/api/mobile-auth/start": "POST", "/api/mobile-auth/stop": "POST",
 	"/api/engine/capture": "POST", "/api/engine/stop": "POST",

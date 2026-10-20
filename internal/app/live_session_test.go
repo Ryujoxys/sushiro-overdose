@@ -492,3 +492,16 @@ func TestParseLiveSessionTextKeepsSeveralCurlCommandsApart(t *testing.T) {
 		t.Fatalf("only old-host commands: %v", err)
 	}
 }
+
+func TestSavingANewConnectionForgetsTheLastLiveFailure(t *testing.T) {
+	noteQueueLiveResult(ErrLiveAuthRequired)
+	if !queueLiveRecentlyFailed() {
+		t.Fatal("failure was not remembered")
+	}
+	if saved, err := SaveLiveSession(testLiveSession(time.Now(), time.Hour)); !saved || err != nil {
+		t.Fatalf("save = %v, %v", saved, err)
+	}
+	if queueLiveRecentlyFailed() {
+		t.Fatal("a fresh connection must let the next plan use live data right away")
+	}
+}

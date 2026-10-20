@@ -133,6 +133,8 @@ func SaveLiveSession(s LiveSession) (bool, error) {
 	if err := AtomicWriteFile(liveSessionPath(), data, 0o600); err != nil {
 		return false, err
 	}
+	// 新连接到手，忘掉之前“实时取不到”的记忆，下一次规划立刻用实时数据。
+	noteQueueLiveResult(nil)
 	return true, nil
 }
 
