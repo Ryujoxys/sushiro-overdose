@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -30,6 +31,10 @@ BUNDLE = Path(__file__).resolve().parents[4] / "internal/app/data/queue-history-
 
 class DataError(Exception):
     pass
+
+
+class UseBundle(Exception):
+    """meta 已回退到内置历史包，其余文件也从包里取，不和 data 分支混用。"""
 
 
 # ---------- 数据源 ----------
@@ -67,19 +72,29 @@ class Source:
     def json(self, name: str) -> Any:
         meta = self.meta()
         if meta["source"] == "repo-bundle":
-            raise DataError("bundle")
+            raise UseBundle()
         info = meta["files"].get(name)
         if not info:
             raise DataError(f"没有 {name}")
         cached = self.cache / (info["sha256"] + ".json")
-        if cached.exists():
-            return json.loads(cached.read_bytes())
-        raw = self._fetch(name)
+        try:
+            raw = cached.read_bytes()
+            if hashlib.sha256(raw).hexdigest() == info["sha256"]:
+                return json.loads(raw)
+            cached.unlink()  # 半截或损坏的缓存，重新下载
+        except OSError:
+            pass
+        try:
+            raw = self._fetch(name)
+        except (OSError, urllib.error.URLError) as e:
+            raise DataError(f"读取 {name} 失败（{e}），稍后重试") from None
         if hashlib.sha256(raw).hexdigest() != info["sha256"]:
             raise DataError(f"{name} 校验失败，数据分支可能正在更新，稍后重试")
         try:
             self.cache.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(raw)
+            tmp = cached.with_name(f"{cached.name}.{os.getpid()}.tmp")
+            tmp.write_bytes(raw)
+            os.replace(tmp, cached)
         except OSError:
             pass
         return json.loads(raw)
@@ -102,22 +117,20 @@ class Source:
     def stores(self) -> List[Dict[str, Any]]:
         try:
             return self.json("stores.json")
-        except DataError:
+        except UseBundle:
             return self._load_bundle()["stores"]
 
     def daily(self, store_id: int) -> List[Dict[str, Any]]:
         try:
             data = self.json(f"daily/{store_id}.json")
             return [dict(zip(data["fields"], row)) for row in data["rows"]]
-        except DataError as e:
-            if str(e) != "bundle":
-                raise
+        except UseBundle:
             return [r for r in self._load_bundle()["records"] if r["store_id"] == store_id]
 
     def latest(self) -> Dict[int, Dict[str, Any]]:
         try:
             return {r["store_id"]: r for r in self.json("latest.json")["stores"]}
-        except DataError:
+        except (UseBundle, DataError):
             return {}
 
 
@@ -168,14 +181,32 @@ def patterns(rows: List[Dict[str, Any]], date_type: str = "all", since: str = ""
     return out
 
 
+DAY_KIND_LABEL = {"weekday": "周一到周四", "friday": "周五", "weekend": "周六日", "holiday": "节假日", "workday": "调休工作日"}
+CALLED_KEYS = ("called_days", "called_p20", "called_p50", "called_p80")
+
+
+def day_kind(day: str, calendar: Dict[str, str]) -> str:
+    """整天的类别。叫号从开门起累计，只能和同类整天比，不能在周五 16:30 处换一组日子。"""
+    if calendar.get(day) in ("holiday", "workday"):
+        return calendar[day]
+    return {4: "friday", 5: "weekend", 6: "weekend"}.get(datetime.fromisoformat(day).weekday(), "weekday")
+
+
 def day_patterns(rows, day: str, calendar: Dict[str, str], since: str = "") -> Dict[str, Dict[str, Any]]:
-    """目标日期每个半小时用它自己的日期类型（周五 16:30 前后不同）。"""
+    """等待按目标日每个半小时自己的日期类型取（周五 16:30 前后不同，与应用一致）；
+    叫号按同类整天取（周五只和周五比）。"""
     by_type = {t: patterns(rows, t, since) for t in DATE_TYPES}
+    overrides = {r["collected_at"][:10]: r["date_type"] for r in rows if r["date_type"] in ("holiday", "workday")}
+    kind = day_kind(day, calendar)
+    same_kind = [r for r in rows if day_kind(r["collected_at"][:10], {**overrides, **calendar}) == kind]
+    called = patterns(same_kind, "all", since)
     merged = {}
-    for t in sorted({k for p in by_type.values() for k in p}):
+    for t in sorted({k for p in by_type.values() for k in p} | set(called)):
         dt = date_type_at(day, t, calendar)
-        if t in by_type[dt]:
-            merged[t] = dict(by_type[dt][t], date_type=dt)
+        b = dict(by_type[dt].get(t) or {"time": t, "wait_days": 0, "wait_p50": None, "wait_p80": None})
+        c = called.get(t) or {"called_days": 0, "called_p20": None, "called_p50": None, "called_p80": None}
+        b.update({k: c[k] for k in CALLED_KEYS}, date_type=dt, called_basis=kind)
+        merged[t] = b
     return merged
 
 
@@ -199,8 +230,9 @@ def now_cst() -> datetime:
     return datetime.now(CST)
 
 
-def freshness(meta: Dict[str, Any], now: datetime) -> List[str]:
-    notes = []
+def freshness(src: "Source", now: datetime) -> List[str]:
+    meta = src.meta()
+    notes = [src.fallback_reason + "；内置包里超过 3 小时的等待记为未知，高峰等待会偏短。"] if src.fallback_reason else []
     cutoff = datetime.fromisoformat(meta["cutoff_at"])
     age = (now - cutoff).days
     if age >= 3:
@@ -305,16 +337,32 @@ def cmd_status(src: Source, args) -> None:
              f"导出时间：{meta.get('generated_at', '—')}"]
     if col:
         lines.append(f"线上采集：最近 {col.get('recent_runs')} 轮成功 {col.get('recent_ok')} 轮，上次成功 {col.get('last_ok_at') or '近期没有'}")
-    if src.fallback_reason:
-        lines.append(src.fallback_reason + "；内置包里超过 3 小时的等待记为未知，高峰等待会偏短。")
-    lines += freshness(meta, now)
-    emit(args, {"meta": {k: v for k, v in meta.items() if k != "files"}, "notes": freshness(meta, now), "fallback": src.fallback_reason}, lines)
+    lines += freshness(src, now)
+    emit(args, {"meta": {k: v for k, v in meta.items() if k != "files"}, "notes": freshness(src, now), "fallback": src.fallback_reason}, lines)
 
 
 def cmd_stores(src: Source, args) -> None:
     hits = search_stores(src.stores(), args.query or "")
     lines = [f"{s['id']:>5}  {s['name']}  {s.get('city') or ''}{s.get('area') or ''}  {s.get('days', '')}{'天' if s.get('days') else ''}" for s in hits[: args.limit]]
     emit(args, {"stores": hits[: args.limit], "total": len(hits)}, lines + ([f"共 {len(hits)} 家，只列前 {args.limit} 家"] if len(hits) > args.limit else []))
+
+
+def hhmm_arg(value: str) -> str:
+    m = re.fullmatch(r"(\d{1,2}):?(\d{2})", value.strip())
+    if not m or int(m[1]) > 23 or int(m[2]) > 59:
+        raise argparse.ArgumentTypeError(f"时间“{value}”看不懂，请写成 19:00 或 1900")
+    return f"{int(m[1]):02d}:{m[2]}"
+
+
+def date_arg(value: str) -> str:
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"日期“{value}”看不懂，请写成 2026-10-24") from None
+
+
+def wait_text(v) -> str:
+    return "—" if v is None else ("180+" if v >= WAIT_CAP else str(v))
 
 
 def resolve_day(meta: Dict[str, Any], day: Optional[str]) -> str:
@@ -327,7 +375,8 @@ def cmd_pattern(src: Source, args) -> None:
     since = (datetime.fromisoformat(meta["cutoff_at"][:10]) - timedelta(days=args.recent - 1)).strftime("%Y-%m-%d") if args.recent else ""
     if args.type == "auto":
         day = resolve_day(meta, args.date)
-        pat, title = day_patterns(rows, day, meta.get("calendar") or {}, since), f"{day}（按当天每个时段的日期类型）"
+        kind = DAY_KIND_LABEL[day_kind(day, meta.get("calendar") or {})]
+        pat, title = day_patterns(rows, day, meta.get("calendar") or {}, since), f"{day}（等待按当天各时段的日期类型，叫号只和{kind}比）"
     else:
         pat, title = patterns(rows, args.type, since), TYPE_LABEL[args.type]
     pat = {t: b for t, b in pat.items() if args.start <= t <= args.end}
@@ -338,7 +387,7 @@ def cmd_pattern(src: Source, args) -> None:
         few = " 少" if 0 < min(b["wait_days"] or 99, b["called_days"] or 99) < FEW_DAYS else ""
         lines.append(f"{t}  {fmt_wait(b['wait_p50']):>5} 分  {fmt_wait(b['wait_p80']):>8} 分   {fmt_num(b['called_p50']):>6}   {rng:<12}  {b['wait_days']}/{b['called_days']}{few}")
     blind = [t for t, b in pat.items() if b["called_days"] >= FEW_DAYS and b["wait_days"] < FEW_DAYS]
-    notes = freshness(meta, now_cst())
+    notes = freshness(src, now_cst())
     if blind:
         notes.append(f"{blind[0]}–{blind[-1]} 有叫号但多数日子没有等待记录，等待规律缺这段，实际可能更挤。")
     if any(b["wait_p80"] is not None and b["wait_p80"] >= WAIT_CAP for b in pat.values()):
@@ -368,7 +417,7 @@ def cmd_live(src: Source, args) -> None:
         emit(args, {"source": None}, ["拿不到实时数据：本机应用没在运行（默认端口 39871），公开数据里也没有这家店的最近状态。"])
         return
     lines = [f"本机应用没在运行，以下是线上最后一次采集（{last['collected_at'][:16].replace('T', ' ')}，不是实时）：",
-             f"{last['store_status']}，叫到 {last['display_called_no'] or '—'} 号，前面 {last['group_queues_count']} 桌，官方预估 {last['wait_minutes']} 分钟"]
+             f"{last['store_status']}，叫到 {last['display_called_no'] or '—'} 号，前面 {'—' if last['group_queues_count'] is None else last['group_queues_count']} 桌，官方预估 {wait_text(last['wait_minutes'])} 分钟"]
     emit(args, {"source": "latest", "latest": last}, lines)
 
 
@@ -377,7 +426,7 @@ def cmd_plan(src: Source, args) -> None:
     day = resolve_day(meta, args.date)
     pat = day_patterns(src.daily(store["id"]), day, meta.get("calendar") or {})
     plan = build_plan(pat, args.eat, args.travel)
-    notes = freshness(meta, now_cst())
+    notes = freshness(src, now_cst())
     if not plan["ok"]:
         emit(args, {"store": store, "plan": plan, "notes": notes}, [plan["message"]] + notes)
         return
@@ -387,8 +436,8 @@ def cmd_plan(src: Source, args) -> None:
     if plan["wait"][1] >= WAIT_CAP:
         lines.append("等待常到官方上限 3 小时，按上限倒推只是“最晚”参考，宁可更早取号。")
     if plan["latest_safe"] is None:
-        lines.append("八成日子都会晚于目标时间，想稳妥就再早一些或换个时段。")
-    elif plan["wait_days"] < FEW_DAYS:
+        lines.append("超过两成的日子会晚于目标时间，想稳妥就再早一些或换个时段。")
+    if plan["wait_days"] < FEW_DAYS:
         lines.append("这个时段记录很少，只能当参考。")
     live = live_from_app(store["id"], args.port) if not args.no_live else None
     if live and live.get("server_wait_minutes") is not None:
@@ -416,9 +465,10 @@ def cmd_eta(src: Source, args) -> None:
         if left > 0 and live.get("rate_per_min"):
             line += f"，按本机均速约 {round(left / live['rate_per_min'])} 分钟"
         lines.append(line + "。")
-    lines.append("叫号是号码不是人数，会因桌型、过号、批量叫号跳动；只能给区间。")
-    lines += freshness(meta, now_cst())
-    emit(args, {"store": store, "date": day, "eta": eta, "live": live}, lines)
+    lines.append(f"只和{DAY_KIND_LABEL[day_kind(day, meta.get('calendar') or {})]}比。叫号是号码不是人数，会因桌型、过号、批量叫号跳动；只能给区间。")
+    notes = freshness(src, now_cst())
+    lines += notes
+    emit(args, {"store": store, "date": day, "eta": eta, "live": live, "notes": notes}, lines)
 
 
 def main(argv=None) -> int:
@@ -429,19 +479,19 @@ def main(argv=None) -> int:
     sub.add_parser("status", help="数据范围、新鲜度、采集健康")
     s = sub.add_parser("stores", help="按名称/城市/区域/地址搜门店"); s.add_argument("query", nargs="?"); s.add_argument("--limit", type=int, default=20)
     s = sub.add_parser("pattern", help="半小时规律")
-    s.add_argument("store"); s.add_argument("--type", default="auto", choices=["auto", "all", *DATE_TYPES]); s.add_argument("--date")
-    s.add_argument("--recent", type=int, help="只用截止前最近 N 天"); s.add_argument("--from", dest="start", default="00:00"); s.add_argument("--to", dest="end", default="23:59")
-    s = sub.add_parser("day", help="某天的半小时记录"); s.add_argument("store"); s.add_argument("date")
+    s.add_argument("store"); s.add_argument("--type", default="auto", choices=["auto", "all", *DATE_TYPES]); s.add_argument("--date", type=date_arg)
+    s.add_argument("--recent", type=int, help="只用截止前最近 N 天"); s.add_argument("--from", dest="start", type=hhmm_arg, default="00:00"); s.add_argument("--to", dest="end", type=hhmm_arg, default="23:59")
+    s = sub.add_parser("day", help="某天的半小时记录"); s.add_argument("store"); s.add_argument("date", type=date_arg)
     s = sub.add_parser("live", help="实时状态（本机应用），否则最近一次采集"); s.add_argument("store")
-    s = sub.add_parser("plan", help="想几点吃 → 几点取号"); s.add_argument("store"); s.add_argument("--eat", required=True)
-    s.add_argument("--travel", type=int, default=0); s.add_argument("--date"); s.add_argument("--no-live", action="store_true")
+    s = sub.add_parser("plan", help="想几点吃 → 几点取号"); s.add_argument("store"); s.add_argument("--eat", type=hhmm_arg, required=True)
+    s.add_argument("--travel", type=int, default=0); s.add_argument("--date", type=date_arg); s.add_argument("--no-live", action="store_true")
     s = sub.add_parser("eta", help="手里的号大概几点叫到"); s.add_argument("store"); s.add_argument("--ticket", type=int, required=True)
-    s.add_argument("--date"); s.add_argument("--after", default="00:00", help="只看这个时间之后"); s.add_argument("--no-live", action="store_true")
+    s.add_argument("--date", type=date_arg); s.add_argument("--after", type=hhmm_arg, default="00:00", help="只看这个时间之后"); s.add_argument("--no-live", action="store_true")
     args = p.parse_args(argv)
     try:
         {"status": cmd_status, "stores": cmd_stores, "pattern": cmd_pattern, "day": cmd_day,
          "live": cmd_live, "plan": cmd_plan, "eta": cmd_eta}[args.cmd](Source(), args)
-    except DataError as e:
+    except (DataError, OSError, ValueError) as e:
         print(f"错误：{e}", file=sys.stderr)
         return 1
     return 0

@@ -6,7 +6,7 @@ import path from 'node:path';
 import {gunzipSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {WAIT_CAP_MINUTES,dateParts,openDatabase,readPublicRecords} from './export-history-bundle.mjs';
+import {WAIT_CAP_MINUTES,ZERO_WAIT_GAP_BEFORE,dateParts,openDatabase,readPublicRecords} from './export-history-bundle.mjs';
 
 export const SCHEMA='sushiro-public-data';
 export const DATE_TYPES=['all','weekday','weekend','holiday','workday'];
@@ -64,7 +64,7 @@ const json=value=>JSON.stringify(value)+'\n';
 const sha256=text=>createHash('sha256').update(text).digest('hex');
 
 // Returns every published file as {relative path: text}; meta.json lists the others with hashes.
-export function buildDataset({source,stores,records,extras=[],latest=[],calendar={},collector=null,quality={},qualityNote='',cutoffAt,generatedAt,windowDays}) {
+export function buildDataset({source,stores,records,extras=[],latest=[],calendar={},collector=null,quality={},qualityNote='',cutoffAt,generatedAt,windowDays,waitCap=WAIT_CAP_MINUTES}) {
   // extras[i] (online_open, group_queues_count, wait_over_cap) belongs to records[i]; the bundle has none.
   // Waits above the official display cap are published as the cap ("180 = 180 minutes or more"),
   // not dropped: dropping them would hide exactly the busiest slots and bias plans toward short waits.
@@ -103,8 +103,8 @@ export function buildDataset({source,stores,records,extras=[],latest=[],calendar
     window_days:windowDays,first_at:records[0]?.collected_at||null,cutoff_at:cutoffAt,
     store_count:summaries.length,record_count:records.length,day_count:dates.size,
     quality,quality_note:qualityNote,collector,calendar,
-    wait_cap_minutes:WAIT_CAP_MINUTES,
-    method:'One representative per store / CST half-hour (the last frame in the slot). Patterns use open-store values only: wait P50/P80 and called-number P20/P50/P80 across days, linear interpolation. Waits at or above wait_cap_minutes mean "that long or longer". Unknown values stay null and are never filled.',
+    wait_cap_minutes:waitCap,
+    method:'One representative per store / CST half-hour (the last frame in the slot). Patterns use open-store values only: wait P50/P80 and called-number P20/P50/P80 across days, linear interpolation. '+(waitCap?'Waits at or above wait_cap_minutes mean "that long or longer". ':'Waits above '+WAIT_CAP_MINUTES+' minutes are unknown (null) in this source, so peak waits read short. ')+'Unknown values stay null and are never filled.',
     files:Object.fromEntries([...files].sort(([a],[b])=>a.localeCompare(b)).map(([name,text])=>[name,{bytes:Buffer.byteLength(text),sha256:sha256(text)}])),
   };
   files.set('meta.json',JSON.stringify(meta,null,1)+'\n');
@@ -116,9 +116,11 @@ const minusDays=(day,n)=>new Date(Date.parse(day+'T00:00:00Z')-n*86400000).toISO
 async function fromBundle(windowDays) {
   const bundle=JSON.parse(gunzipSync(await fs.readFile(BUNDLE)).toString('utf8'));
   const since=minusDays(dateParts(bundle.cutoff_at).date,windowDays-1);
+  const records=bundle.records.filter(r=>r.collected_at.slice(0,10)>=since);
+  const notes=[records[0]?.collected_at.slice(0,10)<ZERO_WAIT_GAP_BEFORE?bundle.quality_note||'':'','超过 '+WAIT_CAP_MINUTES+' 分钟的等待在内置历史包里记为未知，高峰等待会偏短。'];
   return {
-    source:'bundle',stores:bundle.stores,records:bundle.records.filter(r=>r.collected_at.slice(0,10)>=since),
-    cutoffAt:bundle.cutoff_at,quality:{bundle_id:bundle.id},qualityNote:bundle.quality_note||'',
+    source:'bundle',stores:bundle.stores,records,waitCap:null,
+    cutoffAt:bundle.cutoff_at,quality:{bundle_id:bundle.id},qualityNote:notes.filter(Boolean).join(''),
     collector:null,latest:[],calendar:{},
   };
 }
@@ -130,6 +132,10 @@ async function fromDatabase(query,windowDays) {
   const data=await readPublicRecords(query,{since,withExtras:true});
   const keep=data.records.map(r=>r.collected_at.slice(0,10)>=since);
   const records=data.records.filter((_,i)=>keep[i]),extras=data.extras.filter((_,i)=>keep[i]);
+  // Published rows carry over-cap waits as the cap, so they count as usable here, not unknown.
+  const capped=records.filter((r,i)=>extras[i].wait_over_cap),cappedOpen=capped.filter(r=>r.store_status==='OPEN').length;
+  const quality={...data.quality,capped_waits:capped.length,unknown_waits:data.quality.unknown_waits-capped.length,usable_waits:data.quality.usable_waits+cappedOpen};
+  delete quality.over_cap_waits;
   const extra=new Map((await query('SELECT store_id,address,latitude,longitude,is_active FROM store_dimension')).map(r=>[Number(r.store_id),r]));
   const stores=data.stores.map(s=>{const e=extra.get(s.id)||{};return {...s,address:e.address||'',latitude:e.latitude===null||e.latitude===undefined?null:Number(e.latitude),longitude:e.longitude===null||e.longitude===undefined?null:Number(e.longitude),active:Number(e.is_active)!==0};});
   const latest=(await query('SELECT store_id,collected_at,store_status,net_ticket_status,online_open,wait_minutes,group_queues_count,display_called_no FROM store_latest ORDER BY store_id')).map(r=>({
@@ -143,14 +149,18 @@ async function fromDatabase(query,windowDays) {
   const stamp=v=>v?dateParts(v).stamp:null,lastOK=runs.find(r=>Number(r.ok)===1);
   const collector={last_run_at:stamp(runs[0]?.started_at),last_ok_at:stamp(lastOK?.finished_at||lastOK?.started_at),recent_runs:runs.length,recent_ok:runs.filter(r=>Number(r.ok)===1).length};
   const calendar=Object.fromEntries((await query('SELECT date_key,date_type FROM holiday_calendar WHERE date_key >= ? ORDER BY date_key',[since])).filter(r=>['workday','holiday'].includes(r.date_type)).map(r=>[r.date_key,r.date_type]));
-  return {source:'turso',stores,records,extras,cutoffAt:dateParts(data.bounds.cutoff_at).stamp,quality:data.quality,qualityNote:data.qualityNote,collector,latest,calendar};
+  return {source:'turso',stores,records,extras,cutoffAt:dateParts(data.bounds.cutoff_at).stamp,quality,qualityNote:data.qualityNote,collector,latest,calendar};
 }
 
-async function writeDataset(out,files) {
+// Only the dataset's own top-level entries are ever removed; anything else (a .git checkout,
+// unrelated files) makes the export refuse instead of deleting it.
+export const DATASET_ENTRIES=['README.md','daily','latest.json','meta.json','patterns','stores.json'];
+export async function writeDataset(out,files) {
   const existing=await fs.readdir(out).catch(()=>null);
   if(existing?.length){
     const meta=JSON.parse(await fs.readFile(path.join(out,'meta.json'),'utf8').catch(()=>'{}'));
-    if(meta.schema!==SCHEMA)throw new Error('Output directory is not empty and is not a previous public dataset: '+out);
+    const foreign=existing.filter(name=>!DATASET_ENTRIES.includes(name));
+    if(meta.schema!==SCHEMA||foreign.length)throw new Error('Output directory must be empty or hold only a previous public dataset: '+out+(foreign.length?' (found '+foreign.join(', ')+')':''));
     for(const name of existing)await fs.rm(path.join(out,name),{recursive:true,force:true});
   }
   for(const [name,text] of files){

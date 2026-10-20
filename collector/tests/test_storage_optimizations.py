@@ -205,6 +205,36 @@ class MigrateV2Tests(unittest.TestCase):
         self.assertIsNone(latest["display_called_no"])
         drop_legacy(self.db)  # second run is a no-op
 
+    def test_drop_refuses_when_frames_were_not_copied(self):
+        self.db.execute("CREATE TABLE IF NOT EXISTS x (y)")
+        copy_records(self.db)
+        # the old collector kept writing after the copy
+        self.db.execute("INSERT INTO queue_snapshots (collected_at, store_id, wait_minutes, store_status, dq_source) VALUES ('2026-07-10T19:25:00+08:00', 1, 5, 'OPEN', 'store_detail')")
+        with self.assertRaises(RuntimeError):
+            drop_legacy(self.db)
+        self.assertIn("queue_snapshots", {r["name"] for r in self.db.execute("SELECT name FROM sqlite_master")})
+        copy_records(self.db)
+        drop_legacy(self.db)
+
+    def test_copy_does_not_replace_a_newer_live_frame(self):
+        copy_records(self.db)
+        self.db.execute("UPDATE queue_records SET collected_at = '2026-07-10T19:29:00+08:00', wait_minutes = 1 WHERE slot = '2026-07-10T19:00'")
+        copy_records(self.db)
+        self.assertEqual(1, self.db.execute("SELECT wait_minutes FROM queue_records WHERE slot = '2026-07-10T19:00'")[0]["wait_minutes"])
+
+    def test_collector_refuses_v1_schema(self):
+        from collector import collector as coll
+
+        coll._schema_checked = False
+        with self.assertRaises(RuntimeError):
+            coll.ensure_v2_schema(self.db)
+        copy_records(self.db)
+        with self.assertRaises(RuntimeError):
+            coll.ensure_v2_schema(self.db)  # store_latest is still v1
+        drop_legacy(self.db)
+        coll.ensure_v2_schema(self.db)
+        coll._schema_checked = False
+
 
 class RetrySafetyTests(unittest.TestCase):
     def setUp(self):

@@ -57,6 +57,19 @@ ON CONFLICT(slot, store_id) DO UPDATE SET
   collected_at=excluded.collected_at, store_status=excluded.store_status,
   online_open=excluded.online_open, wait_minutes=excluded.wait_minutes,
   group_queues_count=excluded.group_queues_count, display_called_no=excluded.display_called_no
+WHERE excluded.collected_at >= queue_records.collected_at
+"""
+
+# 删表前的覆盖核对：每个旧半小时都要有对应记录，且旧表里没有比记录更新的帧（迁移后旧采集器仍在写）。
+MISSING_RAW = """
+SELECT COUNT(*) AS n FROM queue_snapshots s
+LEFT JOIN queue_records q ON q.store_id = s.store_id AND q.slot = """ + SLOT.format(c="s.collected_at") + """
+WHERE q.slot IS NULL OR q.collected_at < s.collected_at
+"""
+MISSING_DAILY = """
+SELECT COUNT(*) AS n FROM daily_store_bucket_rollups d
+LEFT JOIN queue_records q ON q.store_id = d.store_id AND q.slot = d.snapshot_date||'T'||d.time_bucket
+WHERE d.sample_count = 1 AND q.slot IS NULL
 """
 
 
@@ -114,6 +127,11 @@ def drop_legacy(turso: TursoClient) -> Dict[str, int]:
     tables = _tables(turso)
     if "queue_records" not in tables or not as_int(turso.execute("SELECT COUNT(*) AS n FROM queue_records")[0].get("n")):
         raise RuntimeError("queue_records 为空，先执行 copy")
+    for name, sql in (("queue_snapshots", MISSING_RAW), ("daily_store_bucket_rollups", MISSING_DAILY)):
+        if name in tables:
+            missing = as_int(turso.execute(sql)[0].get("n"))
+            if missing:
+                raise RuntimeError(f"{name} 有 {missing} 帧没有迁移到 queue_records（或迁移后又写入了新帧），先停旧采集器并重新执行 copy")
     cols = {r.get("name") for r in turso.execute("SELECT name FROM pragma_table_info('store_latest')")}
     if "group_queues_json" in cols:
         turso.execute_many([

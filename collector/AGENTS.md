@@ -115,7 +115,7 @@ Turso HTTP 接口不允许 `VACUUM`。删表后空闲页会被之后的写入复
 | `HTTP 403 stores: <html>…403 Forbidden` | 寿司郎网关拒绝了服务器：换中国大陆网络 / 出口 IP，或检查 `sushiro.token`、`referer` 是否随小程序版本变化 |
 | `stores_seen: 0` / `detail_ok=0` | 接口不通，同上 |
 | 营业时段 `display_called_no` 全是 NULL | 门店都关了，或 `getStoreById` 结构变了，查日志 |
-| `no such column` 写 `store_latest` | 库还是 v1，先 `migrate-v2` |
+| `数据库还是 v1 结构` | 库里还有旧表，先按 README「从 v1 升级」执行 `migrate-v2` |
 | systemd 秒退 | 路径错；`journalctl -u collector` |
 | `缺少配置` | config.json 仍是 `PUT_` 占位 |
 

@@ -13,7 +13,7 @@ https://raw.githubusercontent.com/Ryujoxys/sushiro-overdose/data/<文件>
 - 只有门店公开状态：营业状态、预估等待分钟、当前叫号、门店名称和地址。没有账号、手机号、票号、凭证或个人记录。
 - 数据库 `queue_records` 本身就是每店每半小时一条（该半小时内最后一帧），导出不再重采样。缺失和未知保持 `null`，不补值、不当 0。等待到达官方显示上限时记为 `180`，意思是“180 分钟及以上”（`meta.wait_cap_minutes`）；高峰常到上限，丢掉会让规律偏短。应用内置历史包仍把超过上限的值记为未知，两者在高峰时段会不同。
 - 默认只发布最近 180 天，分支每次整体替换为一个提交，不保留旧版本历史。
-- `latest.json` 是导出时刻的最近一次采集，最长约 24 小时前，**不是实时**。实时叫号用本机应用的 `/api/queue/live`。
+- `latest.json` 是采集器最后一次成功写入的状态，**不是实时**；采集停摆时它可以是很久以前的数据，读取方要拿 `collected_at` 和 `meta.cutoff_at` 跟当前时间比较。实时叫号用本机应用的 `/api/queue/live`。
 - 采集器错误详情不公开，`meta.json` 只给最近运行次数与成功时间。
 
 ## 文件
@@ -26,7 +26,7 @@ https://raw.githubusercontent.com/Ryujoxys/sushiro-overdose/data/<文件>
 | `patterns/<id>.json` | `{store, first_at, last_at, date_types:{all,weekday,weekend,holiday,workday:[bucket]}}` |
 | `daily/<id>.json` | `{store_id, fields, rows}`，`fields` 为 `collected_at,date_type,store_status,wait_minutes,display_called_no,group_queues_count,online_open`；后两列在 `bundle` 来源为 `null` |
 
-`bucket`：`time`（北京时间半小时起点，如 `18:00`）、`wait_days`、`wait_p50`、`wait_p80`、`called_days`、`called_p20`、`called_p50`、`called_p80`。只统计营业中的值，分位数线性插值，与应用图表一致（等待“通常要等”=P50、“八成日子不超过”=P80，叫号“常见范围”=P20–P80）。`*_days` 是参与统计的天数，少于 3 天时只能当参考。
+`bucket`：`time`（北京时间半小时起点，如 `18:00`）、`wait_days`、`wait_p50`、`wait_p80`、`called_days`、`called_p20`、`called_p50`、`called_p80`。只统计营业中的值，分位数线性插值，读数含义与应用图表相同（等待“通常要等”=P50、“八成日子不超过”=P80，叫号“常见范围”=P20–P80）。叫号列与应用一致；等待列把到达上限的值计为 180（`meta.wait_cap_minutes`），应用则当作未知，所以高峰时段这里的等待更长、天数更多。`bundle` 来源的 `wait_cap_minutes` 为 `null`，超过上限的等待是未知。`*_days` 是参与统计的天数，少于 3 天时只能当参考。
 
 `date_type`：节假日表（`meta.calendar`，`holiday`/`workday`）优先；否则周五 16:30 起、周六全天、周日 22:00 前为 `weekend`，其余 `weekday`。
 

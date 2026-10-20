@@ -39,12 +39,17 @@ jobs:
       - name: Choose source
         id: source
         env:
+          EVENT: ${{ github.event_name }}
           INPUT_SOURCE: ${{ github.event.inputs.source || 'turso' }}
           HAS_URL: ${{ secrets.SUSHIRO_HISTORY_DATABASE_URL != '' }}
           HAS_TOKEN: ${{ secrets.SUSHIRO_HISTORY_DATABASE_TOKEN != '' }}
         run: |
           if [ "$INPUT_SOURCE" = turso ] && { [ "$HAS_URL" != true ] || [ "$HAS_TOKEN" != true ]; }; then
-            echo "::notice::SUSHIRO_HISTORY_DATABASE_URL / SUSHIRO_HISTORY_DATABASE_TOKEN not set; skipping export."
+            if [ "$EVENT" != schedule ]; then
+              echo "::error::SUSHIRO_HISTORY_DATABASE_URL / SUSHIRO_HISTORY_DATABASE_TOKEN are not set; add them or run with source=bundle."
+              exit 1
+            fi
+            echo "::notice::SUSHIRO_HISTORY_DATABASE_URL / SUSHIRO_HISTORY_DATABASE_TOKEN not set; skipping scheduled export."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"

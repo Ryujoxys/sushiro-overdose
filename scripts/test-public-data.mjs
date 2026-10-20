@@ -3,7 +3,9 @@ import {test} from 'node:test';
 import fs from 'node:fs';
 import {gunzipSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
-import {buildDataset,buildPatterns,halfHour,quantile} from './export-public-data.mjs';
+import os from 'node:os';
+import path from 'node:path';
+import {buildDataset,buildPatterns,halfHour,quantile,writeDataset} from './export-public-data.mjs';
 
 const row=(time,extra={})=>({store_id:1,collected_at:'2026-09-04T'+time+':00+08:00',date_type:'weekday',store_status:'OPEN',wait_minutes:30,display_called_no:500,...extra});
 
@@ -59,4 +61,18 @@ test('patterns from the bundled history match the app chart readouts',()=>{
   const slot=p.all.find(b=>b.time==='18:00');
   assert.deepEqual([slot.called_p50,Math.floor(slot.called_p20),Math.ceil(slot.called_p80),slot.called_days],[676,535,1244,75]);
   assert.deepEqual([slot.wait_p50,slot.wait_p80,slot.wait_days],[165,175,14]);
+});
+
+test('writing never deletes a checkout or unrelated files',async()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'pubdata-'));
+  const files=buildDataset({source:'bundle',stores:[{id:1,name:'A',city:'',area:''}],records:[row('18:05')],cutoffAt:'2026-09-04T18:05:00+08:00',generatedAt:'x',windowDays:180,waitCap:null});
+  await writeDataset(dir,files);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'meta.json'))).wait_cap_minutes,null);
+  await writeDataset(dir,files); // a previous dataset is replaced
+  fs.mkdirSync(path.join(dir,'.git'));
+  await assert.rejects(writeDataset(dir,files),/found \.git/);
+  assert.ok(fs.existsSync(path.join(dir,'.git')));
+  const other=fs.mkdtempSync(path.join(os.tmpdir(),'other-'));fs.writeFileSync(path.join(other,'keep.txt'),'x');
+  await assert.rejects(writeDataset(other,files));
+  assert.ok(fs.existsSync(path.join(other,'keep.txt')));
 });

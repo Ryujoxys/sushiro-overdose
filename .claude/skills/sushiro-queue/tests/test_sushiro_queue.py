@@ -65,6 +65,25 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(10, p["16:00"]["wait_p50"])
         self.assertEqual(90, p["17:00"]["wait_p50"])
 
+    def test_called_numbers_compare_whole_days_of_the_same_kind(self):
+        # A Thursday and a Saturday: neither may lend its called numbers to a Friday evening.
+        rows = [row("2026-09-03T18:00:00+08:00", called=300), row("2026-09-05T18:00:00+08:00", called=900, date_type="weekend"),
+                row("2026-09-04T18:00:00+08:00", called=600, date_type="weekend"), row("2026-09-04T12:00:00+08:00", called=100)]
+        p = sq.day_patterns(rows, "2026-10-23", {})
+        self.assertEqual((600, 1, "friday"), (p["18:00"]["called_p50"], p["18:00"]["called_days"], p["18:00"]["called_basis"]))
+        self.assertEqual(100, p["12:00"]["called_p50"])
+        self.assertEqual(900, sq.day_patterns(rows, "2026-10-24", {})["18:00"]["called_p50"])
+        self.assertEqual("holiday", sq.day_kind("2026-10-01", {"2026-10-01": "holiday"}))
+
+    def test_time_and_date_arguments_are_strict(self):
+        self.assertEqual("19:30", sq.hhmm_arg("1930"))
+        self.assertEqual("07:05", sq.hhmm_arg("7:05"))
+        for bad in ("7pm", "25:00", "19:60", ""):
+            with self.assertRaises(sq.argparse.ArgumentTypeError):
+                sq.hhmm_arg(bad)
+        with self.assertRaises(sq.argparse.ArgumentTypeError):
+            sq.date_arg("10/24")
+
     def test_bundle_parity_with_published_patterns(self):
         src = sq.Source(base="/nonexistent")
         rows = src.daily(1)
@@ -122,6 +141,18 @@ class SourceAndCliTests(unittest.TestCase):
         with self.assertRaises(sq.DataError):
             sq.Source().daily(1)
 
+    def test_corrupt_cache_is_replaced(self):
+        src = sq.Source()
+        src.daily(1)
+        cached = next(self.cache.glob("*.json"))
+        cached.write_text("{")
+        self.assertEqual(2, len(sq.Source().daily(1)))
+
+    def test_network_error_after_meta_is_a_clean_error(self):
+        (self.root / "daily/1.json").unlink()
+        code = sq.main(["pattern", "1"])
+        self.assertEqual(1, code)
+
     def test_store_lookup(self):
         src = sq.Source()
         self.assertEqual(1, sq.find_store(src, "东方宝泰").get("id"))
@@ -143,6 +174,16 @@ class SourceAndCliTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("不是实时", out)
         self.assertIn("321", out)
+        latest = json.loads((self.root / "latest.json").read_text())
+        latest["stores"][0].update(wait_minutes=None, group_queues_count=None)
+        write_dataset(self.root, [row("2026-09-04T18:05:00+08:00")])
+        raw = json.dumps(latest).encode()
+        (self.root / "latest.json").write_bytes(raw)
+        meta = json.loads((self.root / "meta.json").read_text())
+        meta["files"]["latest.json"] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        (self.root / "meta.json").write_text(json.dumps(meta))
+        code, out = self.run_cli("live", "1")
+        self.assertNotIn("None", out)
 
     def test_status_warns_about_stale_data(self):
         code, out = self.run_cli("status")

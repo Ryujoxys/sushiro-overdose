@@ -62,6 +62,7 @@ export function openDatabase(url,token) {
 export async function readPublicRecords(query,{since='',withExtras=false}={}) {
   const [range]=await query('SELECT MIN(slot) AS first_slot, MAX(slot) AS last_slot FROM queue_records');
   if(!range?.first_slot)throw new Error('No public records available');
+  // Fixed before reading: a frame the collector writes into the open slot meanwhile is left out, not mixed in.
   const [bounds]=await query('SELECT MAX(collected_at) AS cutoff_at FROM queue_records WHERE slot = ?',[range.last_slot]);
   const dimensions=await query('SELECT store_id, name, city, area FROM store_dimension ORDER BY store_id');
   const calendar=new Map((await query('SELECT date_key,date_type FROM holiday_calendar')).filter(r=>['workday','holiday'].includes(r.date_type)).map(r=>[r.date_key,r.date_type]));
@@ -70,7 +71,7 @@ export async function readPublicRecords(query,{since='',withExtras=false}={}) {
   const plusDays=(day,n)=>new Date(Date.parse(day+'T00:00:00Z')+n*86400000).toISOString().slice(0,10);
   const first=range.first_slot.slice(0,10),last=range.last_slot.slice(0,10);
   for(let start=since&&since>first?since:first;start<=last;start=plusDays(start,7)){
-    const batch=await query('SELECT slot,store_id,collected_at,store_status,online_open,wait_minutes,group_queues_count,display_called_no FROM queue_records WHERE slot >= ? AND slot < ? AND slot <= ? ORDER BY slot,store_id',[start,plusDays(start,7),range.last_slot]);
+    const batch=await query('SELECT slot,store_id,collected_at,store_status,online_open,wait_minutes,group_queues_count,display_called_no FROM queue_records WHERE slot >= ? AND slot < ? AND slot <= ? AND collected_at <= ? ORDER BY slot,store_id',[start,plusDays(start,7),range.last_slot,bounds.cutoff_at]);
     for(const raw of batch){
       const row=normalizeRecord(raw,calendar);
       if(!byID.has(row.store_id)){quality.orphans++;continue;}

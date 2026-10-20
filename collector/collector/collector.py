@@ -34,6 +34,21 @@ def _fmt_dt() -> str:
     return now_cst_iso()
 
 
+_schema_checked = False
+
+
+def ensure_v2_schema(turso: TursoClient) -> None:
+    """库还是 v1 时拒绝写入：否则会先写进 queue_records、再在旧 store_latest 上失败。"""
+    global _schema_checked
+    if _schema_checked:
+        return
+    tables = {r.get("name") for r in turso.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    cols = {r.get("name") for r in turso.execute("SELECT name FROM pragma_table_info('store_latest')")}
+    if "queue_records" not in tables or "updated_at" in cols:
+        raise RuntimeError("数据库还是 v1 结构：先执行 migrate-v2（见 README「从 v1 升级」），再启动新采集器")
+    _schema_checked = True
+
+
 def collect_once(
     cfg: Optional[Dict[str, Any]] = None,
     *,
@@ -55,6 +70,7 @@ def collect_once(
         timeout=float(coll_cfg.get("per_call_timeout_seconds", 15)),
     )
     turso = TursoClient(turso_url, turso_token)
+    ensure_v2_schema(turso)
 
     run_id = uuid.uuid4().hex[:16]
     started_at = _fmt_dt()
