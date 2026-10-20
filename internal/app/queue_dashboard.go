@@ -455,7 +455,8 @@ func buildQueueDashboardLatestRows(query QueueDashboardQuery, baseline QueueBase
 			continue
 		}
 		at, ok := parseRFC3339Local(queueObservationCollectedAt(observation))
-		if !ok {
+		if _, known := queueKnownWait(observation); !ok || !known {
+			// 手动记一笔的等待未知，不当作门店排队状态。
 			continue
 		}
 		snapshot := queueDashboardSnapshot{
@@ -579,6 +580,8 @@ func buildQueueDashboardCalledCurve(query QueueDashboardQuery, baselineRecords [
 			continue
 		}
 		bucket := queueDashboardTimeBucket(at, query.BucketMinutes).Format("15:04")
+		// 手动记一笔的叫号照常进曲线，但等待未知（负数），按缺失记 0，不输出负的等待。
+		wait, _ := queueKnownWait(observation)
 		samples = append(samples, queueDashboardCalledSample{
 			storeID:     storeID,
 			storeName:   dashboardStoreName(names, storeID, ""),
@@ -587,7 +590,7 @@ func buildQueueDashboardCalledCurve(query QueueDashboardQuery, baselineRecords [
 			day:         at.Format("2006-01-02"),
 			calledNo:    calledNo,
 			queueGroups: observation.GroupQueuesCount,
-			waitMinutes: observation.WaitMinutes,
+			waitMinutes: wait,
 		})
 	}
 	if len(samples) == 0 {
@@ -1264,7 +1267,8 @@ func buildQueueDashboardLocalTrend(query QueueDashboardQuery, baselineRecords []
 			continue
 		}
 		at, ok := parseRFC3339Local(queueObservationCollectedAt(observation))
-		if !ok {
+		if _, known := queueKnownWait(observation); !ok || !known {
+			// 手动记一笔的等待未知，不进排队压力趋势。
 			continue
 		}
 		addSnapshot(queueDashboardSnapshot{

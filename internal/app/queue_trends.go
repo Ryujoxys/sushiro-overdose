@@ -624,10 +624,11 @@ func addQueueObservationsToTrend(series map[string]*queueTrendAccumulator, summa
 			if !queueTrendMatches(query, at, storeFilter, storeID, holidays, workdays) {
 				continue
 			}
-			if observation.WaitMinutes > 0 {
+			// 等待 <= 0 不进分布：0 多为未营业/接口缺值，负数是手动记一笔的“等待未知”。
+			if wait, known := queueKnownWait(observation); known && wait > 0 {
 				dateType := queueTrendDateType(at, holidays, workdays)
 				acc := queueTrendAcc(series, storeID, storeNames[storeID], dateType, queueTrendBucket(at, query.BucketMinutes))
-				acc.waits = append(acc.waits, float64(observation.WaitMinutes))
+				acc.waits = append(acc.waits, float64(wait))
 				acc.point.ObservationSamples++
 				if at.After(acc.lastObservedAt) {
 					acc.lastObservedAt = at

@@ -338,7 +338,11 @@ func queueAlertEvaluateRule(rule QueueAlertRule, obs QueueObservation, state map
 
 	switch rule.Type {
 	case queueAlertWaitBelow:
-		wait := obs.WaitMinutes
+		// 手动记一笔的等待未知（负数）：既不武装也不触发，避免误报“可以去取号了”。
+		wait, known := queueKnownWait(obs)
+		if !known {
+			return "", "", false
+		}
 		if wait > rule.WaitMinutes+queueAlertWaitHysteresis {
 			// 等待较高，武装规则，等它落下来再提醒。
 			if !st.Armed {

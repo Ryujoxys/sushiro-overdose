@@ -39,7 +39,7 @@ type QueueLivePanel struct {
 const queuePanelSparkMax = 40
 
 func buildQueueLivePanel(ctx context.Context, storeID string, now time.Time) (QueueLivePanel, error) {
-	store, err := NewQueueLiveClient().GetStore(ctx, storeID)
+	store, err := fetchQueueLiveStore(ctx, storeID)
 	if err != nil {
 		return QueueLivePanel{}, err
 	}

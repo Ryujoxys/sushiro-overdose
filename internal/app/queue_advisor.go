@@ -68,6 +68,11 @@ type QueueAdvisorEta struct {
 	SourceNote             string          `json:"source_note,omitempty"`
 	Risk                   string          `json:"risk"`                    // low/medium/high/unknown
 	AccuracyNote           string          `json:"accuracy_note,omitempty"` // 基于实测回测的可信度话术
+	// HH:MM 字段与上面的 RFC3339 字段同时给出，页面直接显示这两个，不用自己解析时区。
+	EstimatedCalledAtHHMM string          `json:"estimated_called_at_hhmm,omitempty"`
+	RangeHHMM             *QueueTimeRange `json:"range_hhmm,omitempty"`
+	// Basis 用白话说明推算依据；离线推算时标出历史截止日期。
+	Basis string `json:"basis,omitempty"`
 }
 
 type QueueAdvisor struct {
@@ -80,6 +85,16 @@ type QueueAdvisor struct {
 	Eta            *QueueAdvisorEta     `json:"eta,omitempty"`
 	SamplingPoints int                  `json:"sampling_points"`
 	Warnings       []string             `json:"warnings,omitempty"`
+
+	// 以下字段描述离线推算：没有实时数据时按填写或记下的叫号、以往叫号速度推算。
+	Offline       bool   `json:"offline,omitempty"`
+	Source        string `json:"source,omitempty"`  // live | input | manual | recent
+	History       string `json:"history,omitempty"` // 例如“历史截至 2026-09-06”
+	CalledAt      string `json:"called_at,omitempty"`
+	CalledAtHHMM  string `json:"called_at_hhmm,omitempty"`
+	NeedsCalledNo bool   `json:"needs_called_no,omitempty"`
+	Code          string `json:"code,omitempty"`
+	Message       string `json:"message,omitempty"`
 }
 
 // ---------- 排队压力模型（纯函数，便于测试） ----------
@@ -333,15 +348,41 @@ func estimateWaitRange(waitGroups, officialWait int, rate, cv float64, realtimeN
 // 数据来源：实时快照（snapshot，当前一次 GetStore）+ 本机历史采样（all）+ 官方等待/封顶（store）。
 // 注意 history/recent15 都把实时 snapshot 临时 append 进去（不落盘），让速率/趋势窗口能用到「当前」这一刻。
 func buildQueueAdvisor(ctx context.Context, storeID string, targetNo, travelMinutes int, now time.Time) (QueueAdvisor, error) {
+	return buildQueueAdvisorWithReading(ctx, storeID, targetNo, travelMinutes, nil, now)
+}
+
+// buildQueueAdvisorWithReading 在实时之外支持离线推算：
+//   - 用户填了现在叫到几号（reading 非空）：不请求实时，按以往叫号速度推算；
+//   - 实时失败但 30 分钟内有本机叫号记录（含手动记一笔）：用它推算；
+//   - 都没有：返回 needs_called_no，请用户填小程序里现在叫到的号，不报错。
+func buildQueueAdvisorWithReading(ctx context.Context, storeID string, targetNo, travelMinutes int, reading *queueCalledReading, now time.Time) (QueueAdvisor, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	// 出发时间、叫到时间都按 CST 解释（门店营业/排队是 CST 现实）。
 	// 不归一化的话 TZ=UTC/海外机会把「建议 18:30 出发」显示成机器本地时间，差 8 小时。
 	now = now.In(SushiroTimezone)
-	store, err := NewQueueLiveClient().GetStore(ctx, storeID)
+	if reading != nil {
+		return buildOfflineQueueAdvisor(storeID, targetNo, travelMinutes, *reading, now), nil
+	}
+	store, err := fetchQueueLiveStore(ctx, storeID)
 	if err != nil {
-		return QueueAdvisor{}, err
+		if recent, ok := latestQueueReading(storeID, now, queueReadingMaxAge); ok {
+			advisor := buildOfflineQueueAdvisor(storeID, targetNo, travelMinutes, recent, now)
+			advisor.Code = liveErrorCode(err)
+			return advisor, nil
+		}
+		return QueueAdvisor{
+			StoreID:       storeID,
+			StoreName:     offlineStoreName(storeID),
+			GeneratedAt:   now.Format(time.RFC3339),
+			Pressure:      queueOfflinePressure(0, ""),
+			Offline:       true,
+			History:       queueHistoryLabel(),
+			NeedsCalledNo: true,
+			Code:          liveErrorCode(err),
+			Message:       withQueueHistoryLabel("暂时拿不到实时叫号。填上小程序里现在叫到几号，就能按这家店以往的叫号速度推算你的号几点叫到"),
+		}, nil
 	}
 	snapshot := queueObservationFromLiveStore(store, now)
 
@@ -434,6 +475,7 @@ func buildQueueAdvisor(ctx context.Context, storeID string, targetNo, travelMinu
 		},
 		SamplingPoints: len(history),
 		Warnings:       warnings,
+		Source:         "live",
 	}
 
 	if targetNo > 0 {
@@ -449,6 +491,76 @@ func buildQueueAdvisor(ctx context.Context, storeID string, targetNo, travelMinu
 		}
 	}
 	return advisor, nil
+}
+
+// queueOfflinePressure 是离线时的排队压力：只有读数里带了在等桌数才判档。
+// 桌数可能是用户手动记下的，也可能来自最近一次自动记录，说明里分开讲清楚。
+func queueOfflinePressure(waitGroups int, source string) QueueAdvisorPressure {
+	level := queuePressureLevel(waitGroups, 0)
+	reason := "没有实时数据，排队压力未知；叫到时间按以往叫号速度推算。"
+	if waitGroups > 0 {
+		who := "你记下"
+		if source == "recent" {
+			who = "最近一次记录显示"
+		}
+		reason = fmt.Sprintf("%s在等约 %d 桌；叫到时间按以往叫号速度推算。", who, waitGroups)
+	}
+	return QueueAdvisorPressure{
+		Level:      level,
+		Label:      queuePressureLabel(level),
+		Score:      queuePressureScore(waitGroups, 0),
+		Trend:      "unknown",
+		TrendLabel: "数据不足",
+		Reason:     reason,
+	}
+}
+
+// buildOfflineQueueAdvisor 用一次叫号读数和以往叫号速度给出叫到时间，不请求实时。
+func buildOfflineQueueAdvisor(storeID string, targetNo, travelMinutes int, reading queueCalledReading, now time.Time) QueueAdvisor {
+	now = now.In(SushiroTimezone)
+	at := reading.at
+	if at.IsZero() || at.After(now) {
+		at = now
+	}
+	// 观测文件里的时间可能带机器时区（例如 Z），与其他字段一样统一成门店时间输出。
+	at = at.In(SushiroTimezone)
+	advisor := QueueAdvisor{
+		StoreID:     storeID,
+		StoreName:   offlineStoreName(storeID),
+		GeneratedAt: now.Format(time.RFC3339),
+		Current: QueueAdvisorCurrent{
+			CalledNo:      reading.calledNo,
+			WaitingGroups: reading.groupQueues,
+		},
+		Pressure:     queueOfflinePressure(reading.groupQueues, reading.source),
+		Offline:      true,
+		Source:       reading.source,
+		History:      queueHistoryLabel(),
+		CalledAt:     at.Format(time.RFC3339),
+		CalledAtHHMM: queueClockHHMM(at),
+	}
+	switch reading.source {
+	case "manual":
+		advisor.Warnings = append(advisor.Warnings, fmt.Sprintf("实时叫号暂时拿不到，按你 %s 记下的叫到 %d 号推算。", queueClockHHMM(at), reading.calledNo))
+	case "recent":
+		advisor.Warnings = append(advisor.Warnings, fmt.Sprintf("实时叫号暂时拿不到，按 %s 最近一次记录的叫到 %d 号推算。", queueClockHHMM(at), reading.calledNo))
+	}
+	if targetNo <= 0 {
+		advisor.Message = "填上你的号码，就能推算几点叫到。"
+		return advisor
+	}
+	eta := estimateCalledAt(storeID, targetNo, reading.calledNo, at, now)
+	if eta.ArrivalSuggestion == "" && eta.EstimatedCalledAtRange != nil {
+		if early, err := time.Parse(time.RFC3339, eta.EstimatedCalledAtRange.Early); err == nil {
+			eta.ArrivalSuggestion = queueEtaArrivalSuggestion(early, travelMinutes, now)
+		}
+	}
+	advisor.Eta = &eta
+	if targetNo < reading.calledNo {
+		advisor.Warnings = append(advisor.Warnings,
+			fmt.Sprintf("你输入的 %d 号比叫到的 %d 号还小，可能已经过号或号码输错了，请到小程序核对后再判断。", targetNo, reading.calledNo))
+	}
+	return advisor
 }
 
 // buildQueueAdvisorEta 取今日同日型、同门店、当前半小时 bucket 的历史 P50/P80 作为 hist 兜底，
@@ -502,14 +614,8 @@ func applyEtaCalibration(eta *QueueAdvisorEta, cal etaCalibration, travelMinutes
 	early := now.Add(time.Duration(lowMin) * time.Minute)
 	late := now.Add(time.Duration(highMin) * time.Minute)
 	mid := now.Add(time.Duration((lowMin+highMin)/2) * time.Minute)
-	eta.EstimatedCalledAt = mid.Format(time.RFC3339)
-	eta.EstimatedCalledAtRange = &QueueTimeRange{Early: early.Format(time.RFC3339), Late: late.Format(time.RFC3339)}
-	depart := early.Add(-time.Duration(max(0, travelMinutes)) * time.Minute)
-	if depart.Before(now) {
-		eta.ArrivalSuggestion = "建议现在就出发。"
-	} else {
-		eta.ArrivalSuggestion = fmt.Sprintf("建议 %s 前后出发。", depart.Format("15:04"))
-	}
+	setQueueEtaTimes(eta, mid, early, late)
+	eta.ArrivalSuggestion = queueEtaArrivalSuggestion(early, travelMinutes, now)
 	eta.AccuracyNote = etaAccuracyNote(cal)
 }
 
@@ -555,7 +661,7 @@ func computeQueueEta(targetNo, calledNo, travelMinutes, officialWait, waitCap in
 			return eta
 		}
 		// 即将轮到分支：targetNo==calledNo，号码正好在叫。
-		eta.EstimatedCalledAt = now.Format(time.RFC3339)
+		setQueueEtaTimes(eta, now, time.Time{}, time.Time{})
 		eta.WaitMinutesRange = &QueueWaitRange{Low: 0, High: 0}
 		eta.Risk = "low"
 		eta.ArrivalSuggestion = "已轮到或即将轮到你，请尽快到店。"
@@ -604,15 +710,9 @@ func computeQueueEta(targetNo, calledNo, travelMinutes, officialWait, waitCap in
 	early := now.Add(time.Duration(waitRange.Low) * time.Minute)
 	late := now.Add(time.Duration(waitRange.High) * time.Minute)
 	mid := now.Add(time.Duration((waitRange.Low+waitRange.High)/2) * time.Minute)
-	eta.EstimatedCalledAt = mid.Format(time.RFC3339)
-	eta.EstimatedCalledAtRange = &QueueTimeRange{Early: early.Format(time.RFC3339), Late: late.Format(time.RFC3339)}
+	setQueueEtaTimes(eta, mid, early, late)
 	// 建议出发：按偏早叫到时间倒减路程（travelMinutes 钳到 >=0 防负）。
-	depart := early.Add(-time.Duration(max(0, travelMinutes)) * time.Minute)
-	if depart.Before(now) {
-		eta.ArrivalSuggestion = "建议现在就出发。"
-	} else {
-		eta.ArrivalSuggestion = fmt.Sprintf("建议 %s 前后出发。", depart.Format("15:04"))
-	}
+	eta.ArrivalSuggestion = queueEtaArrivalSuggestion(early, travelMinutes, now)
 	eta.Risk = queueEtaRisk(source, officialWait, remaining, rate)
 	return eta
 }
@@ -780,14 +880,16 @@ func buildLocalQueuePressureCurvePoints(storeID, date string) []QueuePressureCur
 	points := make([]QueuePressureCurvePoint, 0, len(dayObservations))
 	for _, o := range dayObservations {
 		at, _ := parseRFC3339Local(queueObservationCollectedAt(o))
-		level := queuePressureLevel(o.GroupQueuesCount, o.WaitMinutes)
+		// 手动记一笔的等待未知（负数），按缺失处理，不当成“没人等”也不显示负数。
+		wait, _ := queueKnownWait(o)
+		level := queuePressureLevel(o.GroupQueuesCount, wait)
 		points = append(points, QueuePressureCurvePoint{
 			Time:                at.Format("15:04"),
 			CalledNo:            o.DisplayCalledNo,
 			WaitingGroups:       o.GroupQueuesCount,
-			OfficialWaitMinutes: o.WaitMinutes,
+			OfficialWaitMinutes: wait,
 			PressureLevel:       level,
-			PressureScore:       queuePressureScore(o.GroupQueuesCount, o.WaitMinutes),
+			PressureScore:       queuePressureScore(o.GroupQueuesCount, wait),
 			CalledSpeed15:       calledRateOverWindow(dayObservations, storeID, at, queueAdvisorWindow15),
 			Source:              "local",
 			SampleCount:         1,
@@ -959,6 +1061,11 @@ func queuePressureCurveSourceRank(source string) int {
 // historicalWaitByBucket 取某店今日日期类型的历史等待 P50/P80（按半小时 bucket）。
 func historicalWaitByBucket(storeID string, now time.Time) (map[string]QueueWaitRange, string) {
 	dt := queueAdvisorDateTypeForToday(now)
+	return historicalWaitByDateType(storeID, dt, now), queueTrendDateTypeName(dt)
+}
+
+// historicalWaitByDateType 取某店指定日期类型的本机等待 P50/P80（按半小时 bucket）。
+func historicalWaitByDateType(storeID, dt string, now time.Time) map[string]QueueWaitRange {
 	resp := BuildQueueTrends(QueueTrendQuery{StoreIDs: []string{storeID}, DateType: dt, BucketMinutes: 30}, now)
 	out := map[string]QueueWaitRange{}
 	for _, p := range resp.Series {
@@ -975,7 +1082,7 @@ func historicalWaitByBucket(storeID string, now time.Time) (map[string]QueueWait
 		}
 		out[p.Bucket] = QueueWaitRange{Low: low, High: high}
 	}
-	return out, queueTrendDateTypeName(dt)
+	return out
 }
 
 func queueAdvisorDateTypeForToday(now time.Time) string {
@@ -991,11 +1098,14 @@ type QueuePickupPlan struct {
 	Risk             string          `json:"risk"`
 	Basis            string          `json:"basis"`
 	Message          string          `json:"message,omitempty"`
+	Source           string          `json:"source,omitempty"`  // live | local | history
+	History          string          `json:"history,omitempty"` // 用到内置历史时的截止说明
 }
 
 type QueueMealPlan struct {
 	StoreID              string          `json:"store_id"`
 	TargetMeal           string          `json:"target_meal"`
+	TravelMinutes        int             `json:"travel_minutes,omitempty"`
 	RecommendPickupRange *QueueTimeRange `json:"recommend_pickup_range,omitempty"`
 	StablePickup         string          `json:"stable_pickup,omitempty"`
 	LatestPickup         string          `json:"latest_pickup,omitempty"`
@@ -1003,6 +1113,8 @@ type QueueMealPlan struct {
 	Risk                 string          `json:"risk"`
 	Basis                string          `json:"basis"`
 	Message              string          `json:"message,omitempty"`
+	Source               string          `json:"source,omitempty"`  // live | local | history
+	History              string          `json:"history,omitempty"` // 用到内置历史时的截止说明
 }
 
 // parseHHMM 把 "1210"/"12:10" 解析为今天对应的本地时间。
@@ -1032,9 +1144,12 @@ func atoiStrict(s string) (int, bool) {
 	return n, true
 }
 
-// liveWaitEstimate 用公开实时接口取“现在等多久”的粗估区间，作为没有历史样本时的兜底，
-// 让只读用户第一次打开就能得到答案。返回 false 表示连实时数据也拿不到。
+// liveWaitEstimate 用实时接口取“现在等多久”的粗估区间。实时刚失败过（或没有连接）时
+// 立刻返回 false，不再为粗估等一次超时；返回 false 表示拿不到实时数据。
 func liveWaitEstimate(ctx context.Context, storeID string, now time.Time) (QueueWaitRange, bool) {
+	if queueLiveRecentlyFailed() {
+		return QueueWaitRange{}, false
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1073,6 +1188,22 @@ var queueLiveWaitEstimate = liveWaitEstimate
 const queuePlanLiveBasis = "按当前实时等待粗估（适合现在取号）"
 const queuePlanLiveHint = "先按此刻的实时等待粗估；开启「预测准确度」积累几天后，会自动换成更准的历史曲线。"
 
+// applyPlanWait 把一段等待规律写进“取号→入座”结果，并标注来源。
+func (out *QueuePickupPlan) applyPlanWait(storeID string, pickup, now time.Time, w queuePlanWait) {
+	wr := w.rng
+	out.WaitMinutesRange = &wr
+	out.MealRange = &QueueTimeRange{
+		Early: pickup.Add(time.Duration(wr.Low) * time.Minute).Format("15:04"),
+		Late:  pickup.Add(time.Duration(wr.High) * time.Minute).Format("15:04"),
+	}
+	out.Basis = w.basis()
+	out.Source = w.source
+	if w.source == "history" {
+		out.History = queueHistoryLabel()
+	}
+	out.Risk = queuePlanRisk(storeID, now, wr)
+}
+
 func buildQueuePickupPlan(ctx context.Context, storeID, pickupRaw string, now time.Time) QueuePickupPlan {
 	if now.IsZero() {
 		now = time.Now()
@@ -1084,47 +1215,41 @@ func buildQueuePickupPlan(ctx context.Context, storeID, pickupRaw string, now ti
 		return out
 	}
 	out.Pickup = pickup.Format("15:04")
-	if queuePickupShouldPreferLiveWait(pickup, now) {
-		if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
-			out.WaitMinutesRange = &lw
-			out.MealRange = &QueueTimeRange{
-				Early: pickup.Add(time.Duration(lw.Low) * time.Minute).Format("15:04"),
-				Late:  pickup.Add(time.Duration(lw.High) * time.Minute).Format("15:04"),
-			}
-			out.Basis = queuePlanLiveBasis
-			out.Risk = queuePlanRisk(storeID, now, lw)
-			out.Message = "现在取号优先按此刻实时等待估算；历史曲线只作为未来计划参考。"
-			return out
+	useLive := func(lw QueueWaitRange, message string) {
+		out.WaitMinutesRange = &lw
+		out.MealRange = &QueueTimeRange{
+			Early: pickup.Add(time.Duration(lw.Low) * time.Minute).Format("15:04"),
+			Late:  pickup.Add(time.Duration(lw.High) * time.Minute).Format("15:04"),
 		}
 		out.Basis = queuePlanLiveBasis
-		out.Message = "当前实时取号等待不可用，可能门店未开放线上取号；请刷新或换一家门店。"
-		return out
+		out.Source = "live"
+		out.Risk = queuePlanRisk(storeID, now, lw)
+		out.Message = message
 	}
-	hist, basis := historicalWaitByBucket(storeID, now)
-	wr, found := hist[queueTrendBucket(pickup, 30)]
-	if !found {
+	waits := newQueuePlanWaitSource(storeID, now)
+	if queuePickupShouldPreferLiveWait(pickup, now) {
 		if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
-			out.WaitMinutesRange = &lw
-			out.MealRange = &QueueTimeRange{
-				Early: pickup.Add(time.Duration(lw.Low) * time.Minute).Format("15:04"),
-				Late:  pickup.Add(time.Duration(lw.High) * time.Minute).Format("15:04"),
-			}
-			out.Basis = queuePlanLiveBasis
-			out.Risk = queuePlanRisk(storeID, now, lw)
-			out.Message = queuePlanLiveHint
+			useLive(lw, "现在取号优先按此刻实时等待估算；历史曲线只作为未来计划参考。")
 			return out
 		}
-		out.Message = "这家店该时段的历史样本不足，先开启本机数据收集积累几次。"
-		out.Basis = basis
+		// 实时拿不到时按以往同一时段的等待规律估计，并标明来源。
+		if w, ok := waits.at(pickup); ok {
+			out.applyPlanWait(storeID, pickup, now, w)
+			out.Message = "暂时拿不到实时等待，先按以往同一时段的等待估计。"
+			return out
+		}
+		out.Message = "暂时拿不到实时等待，这家店这个时段也没有可用的历史规律，暂时估不出来。"
 		return out
 	}
-	out.WaitMinutesRange = &wr
-	out.MealRange = &QueueTimeRange{
-		Early: pickup.Add(time.Duration(wr.Low) * time.Minute).Format("15:04"),
-		Late:  pickup.Add(time.Duration(wr.High) * time.Minute).Format("15:04"),
+	if w, ok := waits.at(pickup); ok {
+		out.applyPlanWait(storeID, pickup, now, w)
+		return out
 	}
-	out.Basis = "同门店同日型历史等待；今日实时压力仅修正风险"
-	out.Risk = queuePlanRisk(storeID, now, wr)
+	if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
+		useLive(lw, queuePlanLiveHint)
+		return out
+	}
+	out.Message = "这家店这个时段的等待规律还不够，暂时估不出来。"
 	return out
 }
 
@@ -1138,53 +1263,52 @@ func queuePickupShouldPreferLiveWait(pickup, now time.Time) bool {
 	return diff >= -10*time.Minute && diff <= 20*time.Minute
 }
 
-// buildQueueMealPlan 计算“想几点吃→几点取号”。allowLiveFallback 为 true 时（Web 只读查询），
-// 没有历史样本会退回当前实时等待粗估；Routine 提醒必须传 false，维持“样本不足不乱提醒”的承诺。
+// buildQueueMealPlan 计算“想几点吃→几点取号”。等待规律优先用本机记录，不够时用内置历史
+// （按候选取号时刻的日期类型，含零等待）；候选取号时间不早于现在。
+// allowLiveFallback 为 true 时，两者都没有才退回当前实时等待粗估。
 func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinutes int, now time.Time, allowLiveFallback bool) QueueMealPlan {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	out := QueueMealPlan{StoreID: storeID, TargetMeal: compactTrendTime(mealRaw)}
+	travelMinutes = max(0, travelMinutes)
+	out := QueueMealPlan{StoreID: storeID, TargetMeal: compactTrendTime(mealRaw), TravelMinutes: travelMinutes}
 	meal, ok := parseHHMM(mealRaw, now)
 	if !ok {
 		out.Message = "请提供有效的目标就餐时间，例如 1300 或 13:00。"
 		return out
 	}
 	out.TargetMeal = meal.Format("15:04")
-	target := meal.Add(-time.Duration(max(0, travelMinutes)) * time.Minute)
-	hist, _ := historicalWaitByBucket(storeID, now)
-	if len(hist) == 0 {
-		if allowLiveFallback {
-			if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
-				stable := target.Add(-time.Duration(lw.High) * time.Minute)
-				latest := target.Add(-time.Duration(lw.Low) * time.Minute)
-				out.StablePickup = stable.Format("15:04")
-				out.LatestPickup = latest.Format("15:04")
-				out.RecommendPickupRange = &QueueTimeRange{Early: stable.Format("15:04"), Late: latest.Format("15:04")}
-				out.WaitMinutesRange = &lw
-				out.Basis = queuePlanLiveBasis
-				out.Risk = queuePlanRisk(storeID, now, lw)
-				out.Message = queuePlanLiveHint
-				return out
-			}
-		}
-		out.Message = "这家店历史样本不足，先开启本机数据收集积累几次。"
+	nowS := now.In(SushiroTimezone)
+	if !meal.After(nowS) {
+		out.Message = "请选择今天稍后的时间。"
 		return out
 	}
-	// 枚举候选取号时间（每 10 分钟），预测就餐时间，挑最接近目标的窗口。
+	target := meal.Add(-time.Duration(travelMinutes) * time.Minute)
+	// 候选取号时间：门店当地 10:00 起、不早于现在，按 10 分钟步进。
+	start := time.Date(nowS.Year(), nowS.Month(), nowS.Day(), 10, 0, 0, 0, SushiroTimezone)
+	first := nowS.Truncate(time.Minute)
+	if first.Before(nowS) {
+		first = first.Add(time.Minute)
+	}
+	if first.After(start) {
+		start = first.Add(time.Duration((10-first.Minute()%10)%10) * time.Minute)
+		// 离想吃的时间不到一个整 10 分钟时，至少按“现在取号”算一次，
+		// 否则没有候选会被误报成“等待规律还不够”。
+		if start.After(meal) {
+			start = first
+		}
+	}
+	waits := newQueuePlanWaitSource(storeID, now)
 	var best, latest time.Time
-	var bestWR QueueWaitRange
+	var bestW queuePlanWait
 	bestGap := math.MaxFloat64
-	// 从门店当地 10:00 起按 10 分钟步进找最接近 meal 的历史桶，时区必须用门店时区。
-	nowS := now.In(SushiroTimezone)
-	dayStart := time.Date(nowS.Year(), nowS.Month(), nowS.Day(), 10, 0, 0, 0, SushiroTimezone)
-	for t := dayStart; !t.After(meal); t = t.Add(10 * time.Minute) {
-		wr, found := hist[queueTrendBucket(t, 30)]
+	for t := start; !t.After(meal); t = t.Add(10 * time.Minute) {
+		w, found := waits.at(t)
 		if !found {
 			continue
 		}
-		predEarly := t.Add(time.Duration(wr.Low) * time.Minute)
-		predLate := t.Add(time.Duration(wr.High) * time.Minute)
+		predEarly := t.Add(time.Duration(w.rng.Low) * time.Minute)
+		predLate := t.Add(time.Duration(w.rng.High) * time.Minute)
 		// 推荐取号窗口：偏稳就餐（P80）不晚于目标。
 		if !predLate.After(target) {
 			latest = t
@@ -1193,14 +1317,30 @@ func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinu
 		if gap < bestGap {
 			bestGap = gap
 			best = t
-			bestWR = wr
+			bestW = w
 		}
 	}
 	if best.IsZero() {
-		out.Message = "按历史样本，今天恐怕赶不上这个就餐时间，建议提早取号或换时段。"
+		if allowLiveFallback {
+			if lw, ok := queueLiveWaitEstimate(ctx, storeID, now); ok {
+				stable := target.Add(-time.Duration(lw.High) * time.Minute)
+				latestLive := target.Add(-time.Duration(lw.Low) * time.Minute)
+				out.StablePickup = stable.Format("15:04")
+				out.LatestPickup = latestLive.Format("15:04")
+				out.RecommendPickupRange = &QueueTimeRange{Early: stable.Format("15:04"), Late: latestLive.Format("15:04")}
+				out.WaitMinutesRange = &lw
+				out.Basis = queuePlanLiveBasis
+				out.Source = "live"
+				out.Risk = queuePlanRisk(storeID, now, lw)
+				out.Message = queuePlanLiveHint
+				return out
+			}
+		}
+		out.Message = "这家店这段时间的等待规律还不够，暂时估不出来。"
 		return out
 	}
 	out.StablePickup = best.Format("15:04")
+	bestWR := bestW.rng
 	out.WaitMinutesRange = &bestWR
 	// 推荐取号区间：best（最接近目标就餐时间的取号点）与 latest（不晚于目标的稳妥最晚取号点）
 	// 是独立选取的，best 可能晚于 latest，导致 Early>Late 倒序（前端显示成 12:30-12:00）。
@@ -1214,8 +1354,17 @@ func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinu
 		early, latePick = latePick, early
 	}
 	out.RecommendPickupRange = &QueueTimeRange{Early: early.Format("15:04"), Late: latePick.Format("15:04")}
-	out.Basis = "同门店同日型历史等待；今日实时压力仅修正风险"
+	out.Basis = bestW.basis()
+	out.Source = bestW.source
+	if bestW.source == "history" {
+		out.History = queueHistoryLabel()
+	}
 	out.Risk = queuePlanRisk(storeID, now, bestWR)
+	if bestEarly := best.Add(time.Duration(bestWR.Low) * time.Minute); bestEarly.Sub(target) > 10*time.Minute {
+		out.Risk = "high"
+		out.Message = fmt.Sprintf("按以往规律，%s 取号大约 %s–%s 入座，可能赶不上 %s，可以换个时间或门店。",
+			best.Format("15:04"), bestEarly.Format("15:04"), best.Add(time.Duration(bestWR.High)*time.Minute).Format("15:04"), out.TargetMeal)
+	}
 	return out
 }
 
@@ -1223,7 +1372,8 @@ func buildQueueMealPlan(ctx context.Context, storeID, mealRaw string, travelMinu
 func queuePlanRisk(storeID string, now time.Time, wr QueueWaitRange) string {
 	all := loadQueueObservations()
 	latest := latestQueueObservationsByStore(all)[storeID]
-	level := queuePressureLevel(latest.GroupQueuesCount, latest.WaitMinutes)
+	wait, _ := queueKnownWait(latest)
+	level := queuePressureLevel(latest.GroupQueuesCount, wait)
 	switch level {
 	case "extreme":
 		return "high"
