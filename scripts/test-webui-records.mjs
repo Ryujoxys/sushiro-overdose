@@ -4,6 +4,13 @@ import vm from 'node:vm';
 
 const root=new URL('../internal/app/webui/',import.meta.url);
 const source=['app.js','record_chart.js','store_select.js','auth_ticket.js'].map(name=>fs.readFileSync(new URL(name,root),'utf8')).join('\n');
+const page=fs.readFileSync(new URL('index.html',root),'utf8');
+// A mocked response may carry an HTTP status; anything else answers 200.
+const HTTP_STATUS=Symbol('status');
+const httpError=(status,body)=>({[HTTP_STATUS]:status,...body});
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+// Real advisor ETA shape: RFC3339 times for machines, HH:MM fields for the page.
+const liveEta={target_no:128,remaining_groups:16,estimated_called_at:'2026-10-20T18:30:00+08:00',estimated_called_at_hhmm:'18:30',estimated_called_at_range:{early:'2026-10-20T18:20:00+08:00',late:'2026-10-20T18:40:00+08:00'},range_hhmm:{early:'18:20',late:'18:40'},wait_minutes_range:{low:30,high:50},source:'realtime',risk:'medium'};
 {
   const bindings={app:{DesktopBridge:{}}};
   const browserGlobal=vm.createContext({go:bindings});
@@ -26,14 +33,20 @@ function fixture() {
     if(path.startsWith('/api/records?'))return {stores:[],available_stores:[{id:1012,name:'测试店'}],selected_store:1012,points:[],called_points:[],export_record_count:0,total_record_count:0};
     if(path.startsWith('/api/queue/live'))return {store_id:'1012',store_name:'测试店',store_status:'OPEN',online_open:true,called_no:112,wait_groups:15,server_wait_minutes:30};
     if(path.startsWith('/api/queue/plan'))return {meal_range:{early:'18:20',late:'18:40'}};
-    if(path.startsWith('/api/queue/advisor'))return {eta:{estimated_called_at_range:{early:'18:20',late:'18:40'},wait_minutes_range:{low:30,high:50}}};
+    if(path.startsWith('/api/queue/advisor'))return {store_id:'1012',current:{called_no:112},source:'live',eta:liveEta};
+    if(path==='/api/live-session')return {state:'none',connected:false,remaining_seconds:0};
     return {};
   };
   const ctx=vm.createContext({console,URL,URLSearchParams,AbortController,Option:function(text,value){this.text=text;this.value=value;},
     setTimeout(){return 1;},clearTimeout(){},setInterval(){},clearInterval(){},
     location:{hash:'#queue'},history:{replaceState(){}},window:{innerHeight:800,addEventListener(){}},
     document:{getElementById:node,querySelector(selector){return selector.includes('meta')?{content:'test-token'}:null;},querySelectorAll(){return[];},addEventListener(){},activeElement:null,createElement(tag){return node('created-'+tag);}},
-    fetch:async(path,options)=>{calls.push({path,options});return {ok:true,json:()=>respond(path,options)};}
+    fetch:async(path,options)=>{
+      calls.push({path,options});
+      let data;try{data=await respond(path,options);}catch(error){return {ok:true,status:200,json:()=>Promise.reject(error)};}
+      const status=data?.[HTTP_STATUS]||200;
+      return {ok:status>=200&&status<300,status,json:async()=>data};
+    }
   });
   vm.runInContext(source,ctx);
   node('ticket-adult').value='2';node('ticket-child').value='0';node('ticket-table').value='T';node('meal-mode').value='now';
@@ -415,4 +428,353 @@ function fixture() {
  await f.run('cancelTicket()');
  assert.equal(f.calls.filter(c=>c.path==='/api/queue/ticket/cancel').length,1,'cleared ticket can still cancel');
 }
-console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge).');
+{
+ // api() hands the server's machine-readable code to callers, in the browser and in the native window.
+ const f=fixture();
+ f.setRespond(async()=>httpError(502,{error:'实时叫号需要连接',code:'live_auth_required'}));
+ await assert.rejects(()=>f.run("api('/api/queue/live?store=1012')"),e=>e.code==='live_auth_required'&&e.status===502&&e.message==='实时叫号需要连接');
+ f.ctx.window.go={app:{DesktopBridge:{Request:async()=>({status:502,body:JSON.stringify({error:'实时叫号需要连接',code:'live_auth_required'})})}}};
+ await assert.rejects(()=>f.run("api('/api/queue/live?store=1012')"),e=>e.code==='live_auth_required'&&e.status===502);
+ f.ctx.window.go.app.DesktopBridge.Request=async()=>({status:400,body:'{"error":"缺少门店 ID"}'});
+ await assert.rejects(()=>f.run("api('/api/queue/live')"),e=>e.code===undefined&&e.status===400);
+}
+{
+ // No connection: a calm connect panel, the called-number estimate, a disabled ticket button with its reason, and a meal plan anyway.
+ const f=fixture();
+ f.run("chinaHHMM=()=>'12:00'");
+ f.setRespond(async path=>{
+   if(path.startsWith('/api/queue/live'))return httpError(502,{error:'实时叫号需要连接：打开寿司郎小程序刷新一下，再在应用里连接（约 1 小时有效）',code:'live_auth_required'});
+   if(path.startsWith('/api/queue/plan'))return {store_id:'1012',pickup:'12:00',meal_range:{early:'12:20',late:'12:45'},wait_minutes_range:{low:20,high:45},basis:'按这家店以往工作日的等待规律（历史截至 2026-09-06）',source:'history',history:'历史截至 2026-09-06',message:'暂时拿不到实时等待，先按以往同一时段的等待估计。'};
+   return {};
+ });
+ await f.run('loadLive()');
+ const panel=f.node('live-store').innerHTML;
+ assert.match(panel,/实时叫号需要连接/);
+ assert.match(panel,/data-action="goto-live"/);
+ assert.doesNotMatch(panel,/HTTP|403|VPN|未更新/,'connect panel shows a raw error');
+ assert.equal(f.run('state.liveAuthRequired'),true);
+ assert.equal(f.node('offline-eta').hidden,false,'called-number estimate hidden without a connection');
+ assert.equal(f.node('take-ticket').disabled,true);
+ assert.equal(f.node('take-ticket-reason').hidden,false);
+ assert.equal(f.node('take-ticket-reason').textContent,'先连接实时数据，或在小程序里取号后在这里填号码看叫到时间。');
+ assert.ok(f.calls.some(c=>c.path.startsWith('/api/queue/plan?')),'meal plan waited for live data');
+ assert.match(f.node('meal-plan').innerHTML,/现在取号，预计入座<strong>12:20–12:45<\/strong>/);
+ assert.equal((f.node('meal-plan').innerHTML.match(/历史截至 2026-09-06/g)||[]).length,1,'history cutoff missing or repeated');
+ await assert.rejects(()=>f.run('reviewTicket()'),/先连接实时数据/);
+ // The periodic refresh keeps the connect panel instead of flashing a loading line.
+ let resolve;f.setRespond(path=>path.startsWith('/api/queue/live')?new Promise(done=>{resolve=done;}):Promise.resolve({}));
+ const refresh=f.run('loadLive()');await tick();
+ assert.match(f.node('live-store').innerHTML,/实时叫号需要连接/,'refresh flashed the loading state');
+ resolve({store_id:'1012',store_name:'测试店',store_status:'OPEN',online_open:true,called_no:120,wait_groups:10,server_wait_minutes:20,observed_at:new Date().toISOString()});await refresh;
+ assert.equal(f.run('state.liveAuthRequired'),false);
+ assert.equal(f.node('offline-eta').hidden,true,'estimate inputs stayed after live data came back');
+ assert.equal(f.node('take-ticket').disabled,false);
+ assert.equal(f.node('take-ticket-reason').hidden,true);
+ assert.match(f.node('live-store').innerHTML,/实时数据 · /);
+ // Other failures keep the plain error and retry path.
+ f.run("state.liveStore='';state.live=null;");
+ f.setRespond(async path=>path.startsWith('/api/queue/live')?httpError(502,{error:'寿司郎服务暂时不可用',code:'live_unavailable'}):{});
+ await f.run('loadLive()');
+ assert.match(f.node('live-store').innerHTML,/寿司郎服务暂时不可用/);
+ assert.match(f.node('live-store').innerHTML,/refresh-live/);
+ assert.equal(f.node('take-ticket-reason').textContent,'排队信息还没更新，刷新后再取号。');
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'reading live data wrote something');
+}
+{
+ // "想几点吃" works with no live data and passes the travel minutes.
+ const f=fixture();
+ f.run("chinaHHMM=()=>'12:00';state.live=null;state.liveAuthRequired=true;");
+ f.node('meal-mode').value='target';f.node('meal-time').value='18:30';f.node('meal-travel').value='20';
+ f.setRespond(async path=>path.startsWith('/api/queue/plan')?{store_id:'1012',target_meal:'18:30',travel_minutes:20,recommend_pickup_range:{early:'17:20',late:'17:40'},basis:'按这家店以往工作日的等待规律（历史截至 2026-09-06）',source:'history',history:'历史截至 2026-09-06'}:{});
+ await f.run('loadMealPlan()');
+ const q=new URL(f.calls.find(c=>c.path.startsWith('/api/queue/plan?')).path,'http://local').searchParams;
+ assert.equal(q.get('store'),'1012');assert.equal(q.get('target_meal'),'1830');assert.equal(q.get('travel_minutes'),'20');
+ assert.match(f.node('meal-plan').innerHTML,/建议取号时间<strong>17:20–17:40<\/strong>按这家店以往工作日的等待规律（历史截至 2026-09-06），以门店叫号为准。/);
+ f.node('meal-travel').value='300';const before=f.calls.length;
+ await f.run('loadMealPlan()');
+ assert.equal(f.calls.length,before,'invalid travel minutes reached the server');
+ assert.match(f.node('meal-plan').textContent,/0 到 240/);
+ f.node('meal-travel').value='';
+ await f.run('loadMealPlan()');
+ assert.equal(new URL(f.calls.at(-1).path,'http://local').searchParams.has('travel_minutes'),false);
+ assert.match(f.run("mealPlanHTML({recommend_pickup_range:{early:'17:20',late:'17:40'},source:'live',basis:'按当前实时等待粗估（适合现在取号）',message:'先按此刻的实时等待粗估'},true,'18:30')"),/^建议取号时间<strong>17:20–17:40<\/strong>按当前实时等待粗估（适合现在取号），以门店叫号为准。$/,'live hint leaked into the plan');
+ assert.equal(f.run("mealPlanHTML({message:'这家店这段时间的等待规律还不够，暂时估不出来。'},true,'18:30')"),'这家店这段时间的等待规律还不够，暂时估不出来。');
+}
+{
+ // Called-number estimate: typed numbers go to the advisor and every time shown is HH:MM.
+ const f=fixture();
+ const offline={store_id:'1012',offline:true,source:'input',history:'历史截至 2026-09-06',called_at:'2026-10-20T17:55:00+08:00',called_at_hhmm:'17:55',current:{called_no:128},
+   eta:{target_no:156,remaining_groups:28,estimated_called_at:'2026-10-20T18:30:00+08:00',estimated_called_at_hhmm:'18:30',estimated_called_at_range:{early:'2026-10-20T18:20:00+08:00',late:'2026-10-20T18:45:00+08:00'},range_hhmm:{early:'18:20',late:'18:45'},wait_minutes_range:{low:25,high:50},source:'history_speed',basis:'按这家店以往的叫号速度推算（历史截至 2026-09-06）',arrival_suggestion:'建议 18:00 前后出发。'}};
+ f.setRespond(async path=>path.startsWith('/api/queue/advisor')?offline:{});
+ f.node('offline-called').value='128';f.node('offline-ticket').value='A156';
+ await f.run('offlineEta()');
+ const q=new URL(f.calls.find(c=>c.path.startsWith('/api/queue/advisor')).path,'http://local').searchParams;
+ assert.equal(q.get('store'),'1012');assert.equal(q.get('called_no'),'128');assert.equal(q.get('target_no'),'156');
+ const html=f.node('offline-result').innerHTML;
+ assert.equal(f.node('offline-result').hidden,false);
+ assert.match(html,/预计叫到<strong>18:20–18:45<\/strong>还要等 25–50 分钟。/);
+ assert.match(html,/建议 18:00 前后出发/);
+ assert.doesNotMatch(html,/2026-10-20T|\+08:00/,'printed an RFC3339 time');
+ assert.equal((html.match(/历史截至 2026-09-06/g)||[]).length,1,'history cutoff missing or repeated');
+ assert.equal(f.run("etaClock({estimated_called_at:'2026-10-20T18:30:00+08:00',estimated_called_at_hhmm:'18:30'})"),'约 18:30');
+ assert.equal(f.run("etaClock({estimated_called_at_range:{early:'2026-10-20T18:20:00+08:00',late:'2026-10-20T18:40:00+08:00'}})"),'','fell back to an RFC3339 range');
+ assert.equal(f.run("etaClock({range_hhmm:{early:'18:30',late:'18:30'}})"),'18:30');
+ // Without a typed number the server may use a recent reading, or ask for the current number.
+ f.setRespond(async()=>({store_id:'1012',offline:true,needs_called_no:true,code:'live_auth_required',message:'暂时拿不到实时叫号。填上小程序里现在叫到几号，就能按这家店以往的叫号速度推算你的号几点叫到（历史截至 2026-09-06）'}));
+ f.node('offline-called').value='';
+ await f.run('offlineEta()');
+ assert.equal(new URL(f.calls.at(-1).path,'http://local').searchParams.has('called_no'),false);
+ assert.match(f.node('offline-result').innerHTML,/填上小程序里现在叫到几号/);
+ f.node('offline-called').value='0';const before=f.calls.length;
+ await f.run('offlineEta()');
+ assert.equal(f.calls.length,before,'invalid called number reached the server');
+ assert.match(f.node('offline-result').innerHTML,/1 到 99999/);
+ f.node('offline-called').value='';f.node('offline-ticket').value='';
+ await f.run('offlineEta()');
+ assert.equal(f.calls.length,before,'empty inputs reached the server');
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'estimating wrote something');
+}
+{
+ // "记一笔" writes one manual reading and only then estimates when a ticket number is filled in.
+ const f=fixture();
+ f.setRespond(async path=>path==='/api/queue/reading'?{ok:true,store_id:'1012',called_no:128,observed_at:'2026-10-20T17:55:00+08:00',observed_at_hhmm:'17:55'}:path.startsWith('/api/queue/advisor')?{offline:true,eta:liveEta}:{});
+ f.node('offline-called').value='128';f.node('offline-ticket').value='';
+ await f.run('recordReading()');
+ const write=f.calls.find(c=>c.path==='/api/queue/reading');
+ assert.equal(write.options.method,'POST');
+ assert.equal(write.options.headers['X-Sushiro-CSRF'],'test-token');
+ assert.deepEqual(JSON.parse(write.options.body),{store_id:'1012',called_no:128});
+ assert.equal(f.node('toast').textContent,'已记下：17:55 叫到 128 号');
+ assert.equal(f.calls.filter(c=>c.path.startsWith('/api/queue/advisor')).length,0,'estimated without a ticket number');
+ f.node('offline-ticket').value='140';
+ await f.run('recordReading()');
+ assert.equal(f.calls.filter(c=>c.path.startsWith('/api/queue/advisor')).length,1);
+ assert.match(f.node('offline-result').innerHTML,/18:20–18:40/);
+ f.node('offline-called').value='';const writes=f.calls.filter(c=>c.path==='/api/queue/reading').length;
+ await f.run('recordReading()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/queue/reading').length,writes,'empty reading was written');
+ assert.match(f.node('offline-result').innerHTML,/先填小程序里现在叫到几号/);
+}
+{
+ // Ticket card: HH:MM from the live advisor; without live data it asks for the current number.
+ const f=fixture();
+ f.run("showTicket({ticket:{number:'A128',store_id:'1012'},cancel_token:'t'})");
+ for(let i=0;i<5;i++)await tick();
+ const forecast=f.node('ticket-forecast').innerHTML;
+ assert.match(forecast,/预计叫到<strong>18:20–18:40<\/strong>还要等 30–50 分钟。/);
+ assert.doesNotMatch(forecast,/2026-10-20T|\+08:00/,'ticket card printed an RFC3339 time');
+ f.run("state.live=null;state.liveAuthRequired=true;");
+ f.node('ticket-called-field').hidden=true;
+ f.setRespond(async path=>path.startsWith('/api/queue/advisor')?{store_id:'1012',offline:true,needs_called_no:true,message:'暂时拿不到实时叫号。'}:{});
+ await f.run("loadTicketForecast('1012','A128')");
+ assert.equal(f.node('ticket-called-field').hidden,false,'no way to enter the current number');
+ assert.match(f.node('ticket-forecast').textContent,/小程序里现在叫到几号/);
+ f.node('ticket-called').value='100';
+ f.setRespond(async path=>path.startsWith('/api/queue/advisor')?{store_id:'1012',offline:true,history:'历史截至 2026-09-06',current:{called_no:100},eta:{...liveEta,basis:'按这家店以往的叫号速度推算（历史截至 2026-09-06）'}}:{});
+ await f.run("loadTicketForecast('1012','A128')");
+ const q=new URL(f.calls.at(-1).path,'http://local').searchParams;
+ assert.equal(q.get('called_no'),'100');assert.equal(q.get('target_no'),'128');
+ assert.match(f.node('ticket-forecast').innerHTML,/18:20–18:40/);
+ assert.match(f.node('ticket-forecast').innerHTML,/历史截至 2026-09-06/);
+}
+{
+ // Store picker: offline answers are usable, say where they come from, and show the city label (nameKana).
+ const f=fixture();
+ f.run("state.selectedStore='';openStorePicker('queue')");await tick();
+ f.setRespond(async path=>path.startsWith('/api/queue/stores')?{stores:[{id:3006,name:'天环店',nameKana:'广州',area:'广州天河区'},{id:3014,name:'正佳店',nameKana:'广州'}],count:2,offline:true,source:'history',code:'live_auth_required',message:'暂时连不上实时数据'}:{});
+ f.node('store-search').value='广州';await f.run('searchStores()');
+ assert.equal(f.node('store-offline-note').hidden,false,'offline list looked live');
+ assert.match(page,/id="store-offline-note"[^>]*>实时门店列表暂时取不到，这里是已知门店。</);
+ assert.match(f.node('store-results').innerHTML,/<b>天环店<\/b><small>广州天河区<\/small>/);
+ assert.match(f.node('store-results').innerHTML,/<b>正佳店<\/b><small>广州<\/small>/,'nameKana city label dropped');
+ f.run("state.picker.add('3006');updatePicked();");
+ assert.equal(f.node('store-save').disabled,false,'offline store cannot be chosen');
+ f.run("state.analysisStores=[{id:3014}]");
+ assert.equal(f.run("filterAnalysisStores('广州').join(',')"),'3014','chart search ignored nameKana');
+ f.setRespond(async()=>({stores:[{id:1,name:'在线店',nameKana:'上海'}],count:1}));
+ await f.run('searchStores()');
+ assert.equal(f.node('store-offline-note').hidden,true);
+ assert.doesNotMatch(source,/name_kana/,'store city read from a key the API never sends');
+}
+{
+ // Recording status: waiting for a connection, backoff and rate limits are said plainly; nothing promises an automatic retry.
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("state.service.config.enabled=true;state.service.background_running=true;state.service.state={store_ids:['1012'],waiting_for_connection:true,last_error_code:'live_auth_required',last_error:'实时数据连接未建立或已失效',next_attempt_at:new Date(Date.now()+6*3600e3).toISOString()};renderService();");
+ assert.equal(f.node('service-status').textContent,'等待连接');
+ assert.equal(f.node('service-detail').hidden,false);
+ assert.equal(f.node('service-detail-text').textContent,'记录需要连接实时数据（应用开着时记录）。');
+ assert.equal(f.node('service-connect').hidden,false,'no way to connect from the recording status');
+ f.run("state.service.state={store_ids:['1012'],last_error:'寿司郎服务暂时不可用（HTTP 502），请稍后重试',last_error_code:'live_unavailable',next_attempt_at:'2099-01-01T10:30:00+08:00'};renderService();");
+ assert.equal(f.node('service-status').textContent,'记录出错');
+ assert.equal(f.node('service-detail-text').textContent,'上次没记上：寿司郎服务暂时不可用，请稍后重试。下一次在 10:30 之后。');
+ assert.equal(f.node('service-connect').hidden,true);
+ f.run("state.service.state={store_ids:['1012'],last_error:'请求太频繁（HTTP 429）：请稍后再试',last_error_code:'live_rate_limited',next_attempt_at:'2000-01-01T10:30:00+08:00'};renderService();");
+ assert.equal(f.node('service-detail-text').textContent,'寿司郎提示请求太频繁，记录先放慢。','past retry time or status code shown');
+ f.run("state.service.config.enabled=false;renderService();");
+ assert.equal(f.node('service-detail').hidden,true,'paused recording reported an old error');
+ for(const text of [source,page])assert.doesNotMatch(text,/会自动重试|不用连接账号|关掉窗口也会继续|不用登录/,'copy promises recording without a connection');
+}
+{
+ // Settings card states for the live-data connection.
+ const f=fixture();
+ const view=s=>f.run('liveSessionView('+JSON.stringify(s)+')');
+ assert.equal(view({state:'active',connected:true,remaining_seconds:2580,expires_at:'2026-10-20T19:00:00+08:00'}).label,'已连接，还剩 43 分钟');
+ assert.match(view({state:'active',connected:true,remaining_seconds:2580,expires_at:'2026-10-20T19:00:00+08:00'}).detail,/约 19:00 到期/);
+ assert.equal(view({state:'expiring',connected:true,remaining_seconds:400}).label,'快到期，还剩 6 分钟');
+ assert.equal(view({state:'expiring',connected:true,remaining_seconds:30}).label,'快到期，还剩不到 1 分钟');
+ assert.match(view({state:'expiring',connected:true,remaining_seconds:400}).detail,/打开小程序刷新一下，再连接一次/);
+ assert.equal(view({state:'none',connected:false}).label,'未连接');
+ assert.equal(view({state:'expired',connected:false}).label,'已到期');
+ assert.match(view({state:'expired',connected:false}).detail,/打开小程序刷新一下，再连接一次/);
+ let platform='linux',session={state:'active',connected:true,remaining_seconds:1800};
+ f.setRespond(async path=>path==='/api/live-session'?session:path==='/api/status'?{platform,version:'t',engine:{status:'idle'}}:{});
+ await f.run('loadStatus()');await f.run('refreshLiveSession()');
+ assert.equal(f.node('live-session-state').textContent,'已连接，还剩 30 分钟');
+ assert.match(f.node('live-session-state').className,/green/);
+ assert.equal(f.node('live-disconnect').hidden,false);
+ assert.equal(f.node('live-desktop').hidden,true,'computer capture offered where the account capture is not');
+ platform='windows';session={state:'none',connected:false,remaining_seconds:0};
+ await f.run('loadStatus()');await f.run('refreshLiveSession()');
+ assert.equal(f.node('live-session-state').textContent,'未连接');
+ assert.equal(f.node('live-disconnect').hidden,true);
+ assert.equal(f.node('live-desktop').hidden,false);
+ session={state:'expired',connected:false,remaining_seconds:0};await f.run('refreshLiveSession()');
+ assert.equal(f.node('live-session-state').textContent,'已到期');assert.match(f.node('live-session-state').className,/amber/);
+ assert.equal(f.node('live-disconnect').hidden,false,'expired connection cannot be removed');
+ // Refreshes only while the settings page is shown.
+ const reads=()=>f.calls.filter(c=>c.path==='/api/live-session').length,count=reads();
+ f.run("state.page='queue';refreshLiveSessionIfShown()");
+ assert.equal(reads(),count,'refreshed while settings was hidden');
+ f.run("state.page='settings';refreshLiveSessionIfShown()");await tick();
+ assert.equal(reads(),count+1);
+ let focused='';f.node('live-title').focus=()=>{focused='live';};
+ f.run("state.page='queue';gotoLiveSettings()");
+ assert.equal(f.run('state.page'),'settings');assert.equal(focused,'live','connect button did not land on the card');
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,0,'reading the connection state wrote something');
+}
+{
+ // Phone capture: starts once, keeps the guide, stops the capture as soon as a new connection is saved.
+ const f=fixture();let connected=false;
+ f.setRespond(async path=>{
+   if(path==='/api/live-session')return connected?{state:'active',connected:true,remaining_seconds:3500,captured_at:'2026-10-20T18:00:00+08:00'}:{state:'expired',connected:false,remaining_seconds:0,captured_at:'2026-10-20T16:00:00+08:00'};
+   if(path==='/api/mobile-auth/start')return {active:true,addresses:[{url:'http://192.168.1.5:50000/mobile-auth/x',qr_svg:'<svg/>'}]};
+   if(path==='/api/mobile-auth')return {active:true};
+   if(path==='/api/mobile-auth/stop')return {active:false};
+   return {};
+ });
+ await f.run('refreshLiveSession()');
+ await Promise.all([f.run("startLiveCapture('mobile')"),f.run("startLiveCapture('mobile')")]);
+ assert.equal(f.calls.filter(c=>c.path==='/api/mobile-auth/start').length,1,'double click started two captures');
+ assert.equal(f.run('liveCaptureMode'),'mobile');
+ assert.equal(f.node('live-guide').hidden,false,'phone guide not shown');
+ assert.equal(f.node('live-qr').src.startsWith('data:image/svg+xml'),true);
+ assert.equal(f.node('live-capture-stop').hidden,false);
+ assert.equal(f.node('live-mobile').disabled,true);
+ assert.match(f.node('live-capture-progress').textContent,/iPhone 扫码/);
+ await f.run('pollLiveCapture()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/mobile-auth/stop').length,0,'stopped before a connection arrived');
+ connected=true;await f.run('pollLiveCapture()');
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.equal(f.node('live-session-state').textContent,'已连接，还剩 58 分钟');
+ assert.match(f.node('live-capture-progress').textContent,/关闭手机 Wi-Fi 代理/);
+ assert.equal(f.node('live-capture-stop').hidden,true);
+ const posts=f.calls.filter(c=>c.options.method==='POST');
+ assert.deepEqual(posts.map(c=>c.path),['/api/mobile-auth/start','/api/mobile-auth/stop']);
+ for(const post of posts)assert.equal(post.options.headers['X-Sushiro-CSRF'],'test-token');
+ await f.run('pollLiveCapture()');
+ assert.equal(f.calls.filter(c=>c.options.method==='POST').length,2,'finished capture kept polling');
+}
+{
+ // Phone capture that ends without a connection, a refused start, and the stop button.
+ const f=fixture();let active=true;
+ f.setRespond(async path=>{
+   if(path==='/api/live-session')return {state:'none',connected:false,remaining_seconds:0};
+   if(path==='/api/mobile-auth/start')return {active:true,addresses:[{url:'http://192.168.1.5:50000/mobile-auth/x',qr_svg:'<svg/>'}]};
+   if(path==='/api/mobile-auth')return {active};
+   if(path==='/api/mobile-auth/stop')return {active:false};
+   return {};
+ });
+ await f.run("startLiveCapture('mobile')");
+ active=false;await f.run('pollLiveCapture()');
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.match(f.node('live-capture-progress').textContent,/还没收到实时数据/);
+ await f.run("startLiveCapture('mobile')");
+ await f.run('stopLiveCapture()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/mobile-auth/stop').length,1);
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.match(f.node('live-capture-progress').textContent,/连接已停止/);
+ f.setRespond(async path=>path==='/api/mobile-auth/start'?httpError(500,{error:'启动手机凭证捕获失败: 没有可供手机连接的局域网地址'}):{});
+ await f.run("startLiveCapture('mobile')");
+ assert.equal(f.run('liveCaptureMode'),'','refused start kept a capture handle');
+ assert.match(f.node('live-error').textContent,/局域网地址/);
+ f.setRespond(async path=>{if(path==='/api/mobile-auth/start')throw new Error('network timeout');return {};});
+ await f.run("startLiveCapture('mobile')");
+ assert.equal(f.run('liveCaptureMode'),'mobile','unanswered start lost its stop handle');
+}
+{
+ // Computer capture (macOS / Windows) uses the existing engine capture and restores the proxy when done.
+ const f=fixture();let connected=false,engine={status:'capturing',stage:'waiting_capture'};
+ f.setRespond(async path=>{
+   if(path==='/api/live-session')return connected?{state:'active',connected:true,remaining_seconds:3500,captured_at:'B'}:{state:'none',connected:false,remaining_seconds:0};
+   if(path==='/api/status')return {platform:'darwin',version:'t',engine};
+   if(path==='/api/engine/capture')return {ok:true};
+   if(path==='/api/engine/stop')return {ok:true,engine:{status:'idle'}};
+   return {};
+ });
+ await f.run('loadStatus()');await f.run('refreshLiveSession()');
+ assert.equal(f.node('live-desktop').hidden,false);
+ await f.run("startLiveCapture('desktop')");
+ await f.run('pollLiveCapture()');
+ assert.match(f.node('live-capture-progress').textContent,/电脑微信/);
+ connected=true;await f.run('pollLiveCapture()');
+ assert.deepEqual(f.calls.filter(c=>c.options.method==='POST').map(c=>c.path),['/api/engine/capture','/api/engine/stop']);
+ assert.match(f.node('live-capture-progress').textContent,/已恢复本应用修改的代理/);
+ connected=false;engine={status:'idle'};
+ await f.run("startLiveCapture('desktop')");await f.run('pollLiveCapture()');
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.match(f.node('live-capture-progress').textContent,/电脑微信连接已结束/);
+}
+{
+ // Pasting a capture: errors keep the paste; success says so; disconnect asks first.
+ const f=fixture();
+ f.setRespond(async(path,options)=>{
+   if(path==='/api/live-session/import')return JSON.parse(options.body).text.includes('sapi.sushiro.com.cn')?{state:'active',connected:true,remaining_seconds:3000,saved:true,message:'实时数据已连接'}:httpError(400,{error:'没找到寿司郎新接口的请求：请抓小程序门店或排队页发往 sapi.sushiro.com.cn 的请求'});
+   if(path==='/api/live-session/clear')return {state:'none',connected:false,remaining_seconds:0};
+   return {};
+ });
+ f.node('live-text').value='';await f.run('importLiveSession()');
+ assert.equal(f.calls.length,0,'empty paste reached the server');
+ assert.match(f.node('live-error').textContent,/先粘贴/);
+ const old="curl 'https://crm-cn-prd.sushiro.com.cn/wechat/api/2.0/getStoreById?storeId=1012'";
+ f.node('live-text').value=old;await f.run('importLiveSession()');
+ assert.equal(f.node('live-error').hidden,false);
+ assert.match(f.node('live-error').textContent,/没找到寿司郎新接口的请求/);
+ assert.equal(f.node('live-text').value,old,'failed import discarded the paste');
+ f.node('live-text').value="curl 'https://sapi.sushiro.com.cn/gateway/wechat/api/2.0/getStoreById?storeId=1012' -H 'authorization: Bearer x'";
+ await f.run('importLiveSession()');
+ assert.equal(f.node('live-error').hidden,true);
+ assert.equal(f.node('live-text').value,'','pasted request kept on screen after connecting');
+ assert.equal(f.node('live-session-state').textContent,'已连接，还剩 50 分钟');
+ assert.equal(f.node('toast').textContent,'实时数据已连接');
+ const imports=f.calls.filter(c=>c.path==='/api/live-session/import');
+ assert.equal(imports.length,2);
+ assert.equal(imports[1].options.headers['X-Sushiro-CSRF'],'test-token');
+ f.run('confirmDialog=async()=>false');await f.run('disconnectLive()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/live-session/clear').length,0,'disconnected without asking');
+ f.run('confirmDialog=async()=>true');await f.run('disconnectLive()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/live-session/clear').length,1);
+ assert.equal(f.node('live-session-state').textContent,'未连接');
+ assert.equal(f.node('live-disconnect').hidden,true);
+}
+{
+ // Opening the account dialog first stops a live-data capture, so two captures never run at once.
+ const f=fixture();
+ f.setRespond(async path=>path==='/api/mobile-auth/start'?{active:true,addresses:[{url:'http://192.168.1.5:50000/mobile-auth/x',qr_svg:'<svg/>'}]}:path==='/api/status'?{has_config:false,platform:'windows',engine:{status:'idle'}}:{});
+ await f.run("startLiveCapture('mobile')");
+ await f.run("openAuth('settings')");
+ assert.equal(f.calls.filter(c=>c.path==='/api/mobile-auth/stop').length,1);
+ assert.equal(f.run('liveCaptureMode'),'');
+ assert.equal(f.node('auth-dialog').open,true);
+}
+console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge, live code branching, offline estimate and reading, HH:MM times, offline store note, recording status copy, live-data card and capture).');

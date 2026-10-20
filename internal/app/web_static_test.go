@@ -155,6 +155,47 @@ func TestEmbeddedRecordingFirstSurface(t *testing.T) {
 	}
 }
 
+// TestEmbeddedLiveDataSurface 守住 spec 018 的界面契约：实时数据连接卡片、没连接时的叫号估算、
+// 取号按钮的原因说明和离线门店提示都在；页面按机器可读的 code 分支，不再承诺“没连接也会记录”或“会自动重试”。
+func TestEmbeddedLiveDataSurface(t *testing.T) {
+	ids := satisfiedDOMIDs()
+	for _, id := range []string{
+		"live-card", "live-session-state", "live-mobile", "live-desktop", "live-disconnect", "live-text", "live-capture-stop",
+		"offline-eta", "offline-called", "offline-ticket", "offline-result", "take-ticket-reason",
+		"store-offline-note", "service-detail-text", "service-connect", "meal-travel", "ticket-called-field",
+	} {
+		if !ids[id] {
+			t.Errorf("missing %s", id)
+		}
+	}
+	for _, required := range []string{
+		"/api/live-session", "/api/live-session/import", "/api/live-session/clear", "/api/queue/reading",
+		"/api/mobile-auth/start", "/api/mobile-auth/stop", "/api/engine/stop",
+		"live_auth_required", "needs_called_no", "range_hhmm", "estimated_called_at_hhmm", "waiting_for_connection",
+		"nameKana", "travel_minutes", "实时数据", "用手机连接", "粘贴抓包",
+		"用的是你自己的小程序登录，约 1 小时有效，只保存在这台电脑上；到期后打开小程序刷新一下再连接。",
+		"先连接实时数据，或在小程序里取号后在这里填号码看叫到时间。",
+		"实时门店列表暂时取不到，这里是已知门店。",
+		"记录需要连接实时数据（应用开着时记录）",
+	} {
+		if !strings.Contains(indexHTML, required) {
+			t.Errorf("missing %s", required)
+		}
+	}
+	// 只查自己写的页面源码；开源许可文本不在检查范围内。
+	for _, name := range []string{"webui/index.html", "webui/app.js", "webui/auth_ticket.js", "webui/store_select.js", "webui/record_chart.js"} {
+		data, err := webuiFS.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"会自动重试", "不用连接账号", "关掉窗口也会继续", "不用登录", "VPN", "HTTP 403", "name_kana", "estimated_called_at_range"} {
+			if strings.Contains(string(data), forbidden) {
+				t.Errorf("%s still contains %q", name, forbidden)
+			}
+		}
+	}
+}
+
 func TestWebUIBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
