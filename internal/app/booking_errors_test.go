@@ -73,9 +73,9 @@ func TestTicketAlreadyIssuedError(t *testing.T) {
 func TestFriendlyPublicQueueErrorHidesBlockPages(t *testing.T) {
 	block := &api.APIError{StatusCode: 403, Body: "<html>\r\n<head><title>403 Forbidden</title></head></html>"}
 	for err, want := range map[error]string{
-		block:                                                     "海外 VPN",
-		fmt.Errorf("store 1012: %w", block):                       "海外 VPN",
-		errors.Join(block, errors.New("model")):                   "海外 VPN",
+		block:                                                     "更换实时接口",
+		fmt.Errorf("store 1012: %w", block):                       "更换实时接口",
+		errors.Join(block, errors.New("model")):                   "已有记录仍可查看",
 		&api.APIError{StatusCode: 429}:                            "太频繁",
 		&api.APIError{StatusCode: 502, Body: "x"}:                 "暂时不可用",
 		&api.APIError{StatusCode: 404, Body: "<HTML>gone</HTML>"}: "异常页面",

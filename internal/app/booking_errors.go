@@ -112,7 +112,8 @@ func friendlyPublicQueueError(err error) string {
 		html := strings.Contains(strings.ToLower(apiErr.Body), "<html")
 		switch {
 		case (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusUnavailableForLegalReasons) && html:
-			return "寿司郎服务器拒绝了这次请求（HTTP " + code + "）：如果开着海外 VPN 或代理，请关闭后重试"
+			// 2026-10 起小程序改用新网关和会员 token，本应用的旧地址加固定 token 会被拒绝。
+			return "寿司郎拒绝了这次请求（HTTP " + code + "）：寿司郎已更换实时接口的认证方式，当前版本暂时取不到实时叫号，已有记录仍可查看；开着海外 VPN 时也请关闭"
 		case apiErr.StatusCode == http.StatusTooManyRequests:
 			return "请求太频繁（HTTP 429）：请稍后再试"
 		case apiErr.StatusCode >= 500:
