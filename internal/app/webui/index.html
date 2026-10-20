@@ -27,24 +27,24 @@
     <div id="records-error" class="notice error" role="alert" hidden></div>
     <section class="card record-layout" aria-labelledby="record-status-title">
       <ol id="record-steps" class="steps" aria-label="开始使用" hidden>
-        <li data-step="stores"><b>选常去的店</b><span>不用登录，选几家常去的就够</span></li>
-        <li data-step="start"><b>开始记录</b><span>关掉窗口也会继续</span></li>
+        <li data-step="stores"><b>选常去的店</b><span>选几家常去的就够</span></li>
+        <li data-step="start"><b>开始记录</b><span>连接实时数据后，应用开着时记录</span></li>
         <li data-step="data"><b>看规律</b><span>记录越久越准</span></li>
       </ol>
       <div class="record-status">
         <div><h2 id="record-status-title" class="status-title"><span class="sr-only">记录状态：</span><span id="service-status" class="status">读取中</span></h2><p id="service-summary" class="status-sub">正在读取…</p></div>
         <button id="record-toggle" class="button primary" data-action="toggle-recording" disabled hidden>开始记录</button>
       </div>
-      <p id="service-detail" class="notice" role="status" hidden></p>
+      <div id="service-detail" class="notice service-detail" role="status" hidden><p id="service-detail-text"></p><button id="service-connect" class="button secondary small" data-action="goto-live" hidden>去连接</button></div>
       <div class="record-block">
         <div class="section-heading"><div><h3>记录哪些店</h3><p id="record-overview" class="caption" hidden></p></div><button id="pick-records" class="button secondary small" data-action="pick-records">选择门店</button></div>
         <div id="record-stores" class="store-list"><p class="empty" role="status">正在读取本机记录…</p></div>
       </div>
       <div id="record-settings" class="record-block record-settings">
         <label class="field inline-field">记录间隔<select id="record-interval"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option></select></label>
-        <label class="check-row"><input id="autostart" type="checkbox">登录电脑后自动记录</label>
+        <label class="check-row"><input id="autostart" type="checkbox">登录电脑后启动后台记录</label>
         <button id="repair-autostart" class="button secondary small" data-action="repair-autostart" hidden>更新自启动位置</button>
-        <p class="caption">关掉窗口也会继续记录，电脑休眠时暂停。</p>
+        <p class="caption">应用开着并连接了实时数据时记录；关掉窗口、连接到期或电脑休眠时暂停，已有记录都保留。</p>
       </div>
     </section>
     <section class="card analysis-card" aria-labelledby="analysis-title">
@@ -66,17 +66,27 @@
     </section>
   </section>
   <section id="page-queue" aria-labelledby="queue-title" hidden>
-    <div class="page-heading"><div><h1 id="queue-title">今天，去哪家吃</h1><p>看排队不用认证，确认后才取号。</p></div><button class="button secondary" data-action="query-ticket">查看已有号码</button></div>
+    <div class="page-heading"><div><h1 id="queue-title">今天，去哪家吃</h1><p>实时排队需要连接；不连接也能按叫号估算时间。确认后才取号。</p></div><button class="button secondary" data-action="query-ticket">查看已有号码</button></div>
     <div id="ticket-result" class="card ticket-result" role="status" tabindex="-1" hidden></div>
     <div class="queue-layout">
-      <section class="card"><div class="section-heading"><h2>选择门店</h2><button class="button secondary small" data-action="pick-queue">换家店</button></div><div id="live-store"><p class="empty">先选一家门店。</p></div></section>
+      <section class="card"><div class="section-heading"><h2>选择门店</h2><button class="button secondary small" data-action="pick-queue">换家店</button></div><div id="live-store"><p class="empty">先选一家门店。</p></div>
+        <div id="offline-eta" class="offline-eta" hidden>
+          <h3>按叫号估算</h3>
+          <p class="caption">在小程序里看一眼现在叫到几号，填在这里，按这家店以往的叫号速度推算。</p>
+          <div class="fields"><label class="field">小程序里现在叫到几号<input id="offline-called" type="number" min="1" max="99999" step="1" inputmode="numeric" placeholder="例如 128" autocomplete="off"></label><label class="field">我的号码<input id="offline-ticket" type="text" inputmode="numeric" placeholder="例如 156" autocomplete="off"></label></div>
+          <div class="actions"><button class="button primary small" data-action="offline-eta">算叫到时间</button><button class="button secondary small" data-action="record-reading">记一笔</button></div>
+          <div id="offline-result" class="plan" aria-live="polite" hidden></div>
+          <p class="caption">“记一笔”只保存在这台电脑上，用来推算叫到时间和叫号提醒。</p>
+        </div>
+      </section>
       <section class="card">
         <h2>本次用餐</h2>
         <div class="fields"><label class="field">成人<input id="ticket-adult" type="number" min="0" max="10" value="2" inputmode="numeric"></label><label class="field">儿童<input id="ticket-child" type="number" min="0" max="10" value="0" inputmode="numeric"></label><label class="field">座位<select id="ticket-table"><option value="T">桌位</option><option value="C">吧台</option></select></label></div>
         <label class="field">用餐时间<select id="meal-mode"><option value="now">尽快吃</option><option value="target">想几点吃</option></select></label>
-        <div id="meal-fields" class="fields" hidden><label class="field">想几点吃<input id="meal-time" type="time" value="18:30"></label></div>
+        <div id="meal-fields" class="fields" hidden><label class="field">想几点吃<input id="meal-time" type="time" value="18:30"></label><label class="field">路程（分钟，选填）<input id="meal-travel" type="number" min="0" max="240" step="1" inputmode="numeric" placeholder="例如 20"></label></div>
         <div id="meal-plan" class="plan" aria-live="polite">选好门店后查看预计时间。</div>
-        <button id="take-ticket" class="button primary wide" data-action="review-ticket" disabled>核对并取号</button>
+        <button id="take-ticket" class="button primary wide" data-action="review-ticket" aria-describedby="take-ticket-reason" disabled>核对并取号</button>
+        <p id="take-ticket-reason" class="caption take-ticket-reason" hidden></p>
         <p class="caption">取号时间是建议，不保证准点入座。</p>
       </section>
     </div>
@@ -85,9 +95,17 @@
     <div class="page-heading"><div><h1 id="settings-title">设置</h1><p id="version"></p></div></div>
     <div class="settings-grid">
       <section class="card"><h2>数据在本机</h2><code id="data-path">正在读取…</code><div class="actions"><a id="backup-records" class="button secondary" aria-disabled="true" tabindex="-1">备份全部记录</a><button id="restore-records" class="button quiet" data-action="restore-records">从备份恢复</button></div><input id="restore-file" type="file" accept=".jsonl,application/x-ndjson,text/plain" hidden><p id="backup-hint" class="caption">所有门店、所有日期，不含内置历史和账号凭证。</p><p class="caption">恢复只补充缺少的记录，不覆盖或删除现有数据。</p></section>
-      <section class="card"><h2>手动取号账号</h2><p id="account-state" class="muted">还未读取</p><div class="actions"><button class="button secondary" data-action="connect-account">连接账号</button><button class="button quiet" data-action="reset-account">断开账号</button></div><p class="caption">只记录数据，不需要连接账号。</p></section>
+      <section class="card"><h2>手动取号账号</h2><p id="account-state" class="muted">还未读取</p><div class="actions"><button class="button secondary" data-action="connect-account">连接账号</button><button class="button quiet" data-action="reset-account">断开账号</button></div><p class="caption">只用于手动取号和查询号码。实时叫号和记录用下面的“实时数据”连接。</p></section>
+      <section id="live-card" class="card live-card" aria-labelledby="live-title">
+        <div class="live-card-head"><div><h2 id="live-title" tabindex="-1">实时数据</h2><p class="status-line"><span id="live-session-state" class="status">读取中</span></p><p id="live-session-detail" class="muted" role="status"></p></div>
+        <div class="actions"><button id="live-mobile" class="button secondary" data-action="live-connect-mobile">用手机连接</button><button id="live-desktop" class="button secondary" data-action="live-connect-desktop" hidden>用电脑微信连接</button><button id="live-disconnect" class="button quiet" data-action="live-disconnect" hidden>断开</button></div></div>
+        <p class="caption">用的是你自己的小程序登录，约 1 小时有效，只保存在这台电脑上；到期后打开小程序刷新一下再连接。</p>
+        <div id="live-capture" class="live-capture" hidden><p id="live-capture-progress" role="status" aria-live="polite"></p><div id="live-guide" class="mobile-guide" hidden></div><button id="live-capture-stop" class="button secondary" data-action="live-capture-stop">停止连接</button></div>
+        <details id="live-paste"><summary>粘贴抓包</summary><label class="field">粘贴一条寿司郎小程序的请求（curl、请求头或 HAR 文件内容）<textarea id="live-text" rows="5" autocomplete="off" spellcheck="false"></textarea></label><p class="caption">抓小程序门店或排队页发往 sapi.sushiro.com.cn 的请求。</p><button id="live-import" class="button secondary" data-action="live-import">连接</button></details>
+        <p id="live-error" class="notice error" role="alert" hidden></p>
+      </section>
       <section class="card"><h2>遇到问题</h2><div class="actions"><button class="button secondary" data-action="repair-proxy">恢复系统代理</button><a class="button secondary" href="/api/diagnostics/bundle">导出诊断包</a></div><p class="caption">恢复代理不会删除记录。</p></section>
-      <section class="card"><h2>应用与后台</h2><p class="muted">关窗口不停止后台记录。更新程序前，可在这里全部退出。</p><button class="button secondary" data-action="quit-app">退出应用及后台记录</button><p class="caption">保留记录和自启动设置。</p></section>
+      <section class="card"><h2>应用与后台</h2><p class="muted">关窗口不会停止后台进程，但后台不使用实时数据连接，关窗后不会记录。更新程序前，可在这里全部退出。</p><button class="button secondary" data-action="quit-app">退出应用及后台记录</button><p class="caption">保留记录和自启动设置。</p></section>
       <section class="card about-card" aria-labelledby="about-title"><div class="about-row"><div><h2 id="about-title">版本与更新</h2><p id="update-state" class="muted" role="status">点击检查是否有新版本。</p></div><div class="actions"><button id="check-update" class="button secondary" data-action="check-update">检查更新</button><a id="update-link" class="button primary" href="https://github.com/Ryujoxys/sushiro-overdose/releases/latest" target="_blank" rel="noopener noreferrer" hidden>前往下载</a></div></div><p class="caption">只在点击时访问 GitHub 发布页，不上传记录。升级前先在上方退出后台。</p><details class="license-card"><summary>开源许可</summary><pre>{{OPEN_SOURCE_NOTICES}}</pre></details></section>
     </div>
   </section>
@@ -97,6 +115,7 @@
   <div class="dialog-heading"><h2 id="store-dialog-title">选择记录门店</h2><button class="icon-button" data-action="close-store" aria-label="关闭门店选择">×</button></div>
   <section id="store-selection" class="picker-selection" aria-label="已选记录门店"><div id="store-selected" class="selected-stores"></div><p id="store-selection-hint" class="caption"></p></section>
   <label class="field">搜索城市或门店<input id="store-search" type="search" placeholder="例如 深圳、海岸城" autocomplete="off"></label>
+  <p id="store-offline-note" class="caption store-offline-note" role="status" hidden>实时门店列表暂时取不到，这里是已知门店。</p>
   <div id="store-results" class="picker-results" role="status"></div>
   <p id="store-error" class="notice error" role="alert" hidden></p>
   <div class="dialog-footer"><span id="store-picked" class="muted" role="status"></span><button id="store-save" class="button primary" data-action="save-stores">保存门店</button></div>

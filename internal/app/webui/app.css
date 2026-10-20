@@ -108,3 +108,16 @@ dialog{width:min(560px,calc(100% - 32px));max-height:calc(100dvh - 48px);overflo
 th.num,td.num{text-align:right;font-variant-numeric:tabular-nums}td.missing{color:var(--text2)}
 @media(max-width:768px){.chart{min-height:200px}.record-settings .inline-field{width:100%}}
 @media(max-width:480px){.record-status>.button{flex:1 1 100%}}
+
+.live-card{grid-column:1/-1}
+.live-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px 20px;flex-wrap:wrap;width:100%}
+.live-card-head .status-line{margin-top:8px;font-size:16px}.live-card-head .muted{margin-top:4px;font-size:14px}
+.live-capture{width:100%;padding:16px;border-radius:8px;background:var(--surface-2)}.live-capture p{font-size:14px;color:var(--text2)}.live-capture>.button{margin-top:12px}
+.mobile-guide img{width:180px;height:180px;display:block;margin:12px auto}.mobile-guide a{color:var(--red-text);word-break:break-all}
+#live-paste{width:100%}#live-paste .caption{margin-top:8px}#live-paste .button{margin-top:12px}#live-error{width:100%;margin:0}
+.live-connect{margin:20px 0 4px;padding:16px;border-radius:8px;background:var(--surface-2)}.live-connect .caption{margin-top:4px}.live-connect .actions{margin-top:12px}
+.offline-eta{margin-top:20px;padding-top:20px;border-top:1px solid var(--border)}.offline-eta>.caption{margin-top:4px}.offline-eta .fields{margin:16px 0}.offline-eta .plan{margin:16px 0 8px}.offline-eta .plan p{margin-top:6px}
+.plan .caption{margin-top:6px}.plan-error{color:var(--red-text)}
+.service-detail{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap}.service-detail .button{flex-shrink:0}
+.store-offline-note{margin-top:10px}
+@media(max-width:480px){.offline-eta .fields{flex-direction:column}.live-card-head .actions{width:100%}.live-card-head .actions .button{flex:1 1 auto}}

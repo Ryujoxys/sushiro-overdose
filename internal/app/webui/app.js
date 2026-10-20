@@ -16,8 +16,10 @@ function chinaDate(date=new Date()) {
   return part.year+'-'+part.month+'-'+part.day;
 }
 function chinaHHMM(date=new Date()) { return date.toLocaleTimeString('en-GB',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}); }
+function needsLiveConnection(data) { return !!(data?.state?.waiting_for_connection||data?.state?.last_error_code==='live_auth_required'); }
 function serviceLabel(data) {
   if(!data?.config?.enabled)return [data?.model?.sample_count?'已暂停':'未记录',''];
+  if(needsLiveConnection(data))return ['等待连接','amber'];
   if(data.state?.last_error)return ['记录出错','amber'];
   if(data.state?.paused_reason)return ['稍后继续','amber'];
   if(data.state?.running)return ['记录中','green'];
@@ -51,13 +53,19 @@ function ticketOptions(adult,child,table) {
   if(!['T','C'].includes(table))throw new Error('请选择座位。');
   return {adult:a,child:c,table_type:table};
 }
+// The page branches on the server's machine-readable code (e.g. live_auth_required), never on wording.
+function apiError(data,status) {
+  const error=new Error(data?.error||'请求失败，请重试。');error.status=status;
+  if(data?.code)error.code=data.code;
+  return error;
+}
 async function api(path,body,options={}) {
   const bridge=window.go?.app?.DesktopBridge;
   if(bridge){
     try {
       const response=await bridge.Request(body===undefined?'GET':'POST',path,body===undefined?'':JSON.stringify(body),options.timeout||15000);
       const data=JSON.parse(response.body);
-      if(response.status<200||response.status>=300||data.error){const error=new Error(data.error||'请求失败，请重试。');error.status=response.status;throw error;}
+      if(response.status<200||response.status>=300||data.error)throw apiError(data,response.status);
       return data;
     }catch(error){throw typeof error==='string'?new Error(error):error;}
   }
@@ -67,7 +75,7 @@ async function api(path,body,options={}) {
     if(body!==undefined){headers['Content-Type']='application/json';headers['X-Sushiro-CSRF']=document.querySelector('meta[name="sushiro-csrf"]').content;}
     const response=await fetch(path,{method:body===undefined?'GET':'POST',headers,body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal,cache:'no-store'});
     const data=await response.json();
-    if(!response.ok||data.error){const error=new Error(data.error||'请求失败，请重试。');error.status=response.status;throw error;}
+    if(!response.ok||data.error)throw apiError(data,response.status);
     return data;
   } catch(error) {
     if(error.name==='AbortError')throw new Error('请求超时，请稍后重试。');
@@ -102,9 +110,9 @@ function navigatePage(page) {
   document.querySelectorAll('[data-page]').forEach(n=>{if(n.dataset.page===page)n.setAttribute('aria-current','page');else n.removeAttribute('aria-current');});
   if(location.hash!=='#'+page)history.replaceState(null,'','#'+page);
   closeAnalysisStores();
-  if(page==='queue'){if(!state.selectedStore)state.selectedStore=String(recordIDs()[0]||'');if(state.selectedStore)loadLive();}
+  if(page==='queue'){if(!state.selectedStore)state.selectedStore=String(recordIDs()[0]||'');if(state.selectedStore)loadLive();else renderTakeTicket();}
   if(page==='records'&&state.records)renderAnalysis();
-  if(page==='settings')loadStatus().catch(e=>toast(e.message));
+  if(page==='settings'){loadStatus().catch(e=>toast(e.message));refreshLiveSession();}
 }
 function recordIDs(){return (state.service?.state?.store_ids||state.service?.config?.store_ids||[]).map(String);}
 function recordQuery() {
@@ -175,7 +183,7 @@ function renderRecords() {
     return '<div class="store-row"'+(current?' aria-current="true"':'')+'><div><button class="store-name" data-action="analyze-store" data-id="'+escapeHTML(id)+'">'+escapeHTML(storeName(id))+'<span aria-hidden="true"> ›</span></button><p class="store-fresh"><span class="dot '+tone+'" aria-hidden="true"></span>'+escapeHTML(fresh+(s?' · 共 '+s.samples+' 条':''))+(current?'<span class="tag">图表中</span>':'')+'</p></div>'+(latest?'<p class="store-last">'+escapeHTML(storeLatestText(latest))+'</p>':'')+'</div>';
   });
   const focused=document.activeElement?.closest?.('#record-stores .store-name')?.dataset.id;
-  setMarkup('record-stores',rows.join('')||'<div class="empty"><strong>先选常去的几家店</strong>不用连接账号，也能开始记录。</div>');
+  setMarkup('record-stores',rows.join('')||'<div class="empty"><strong>先选常去的几家店</strong>连接实时数据后，应用开着时就会记录。</div>');
   if(focused&&document.activeElement===document.body)[...el('record-stores').querySelectorAll('.store-name')].find(node=>node.dataset.id===focused)?.focus({preventScroll:true});
   el('data-path').textContent=state.service.data_path||'~/.sushiro/';
   setExportLink('backup-records',Number(state.records.total_record_count)>0,'/api/records/export?days=all');
@@ -200,10 +208,27 @@ function renderService() {
   el('repair-autostart').hidden=!auto.needs_update;el('repair-autostart').disabled=state.busy.has('service');
   el('record-settings').hidden=!ids.length&&!auto.enabled&&!auto.needs_update;
   // Only exceptions get a line here; the normal state is already in the status line.
-  const err=cfg.enabled?data.state.last_error:'';
-  const detail=err?'上次没记上：'+err+'。会自动重试。':(cfg.enabled&&data.state.paused_reason?pausedText(data.state.paused_reason):'')||(auto.needs_update?'程序位置变了，请点“更新自启动位置”。':'')||auto.error||(cfg.enabled&&!data.background_running?'后台没有运行，请先保持这个窗口打开。':'');
-  el('service-detail').textContent=detail;el('service-detail').hidden=!detail;el('service-detail').className='notice'+(err?' warn':'');
+  const detail=serviceDetail(data);
+  el('service-detail-text').textContent=detail.text;el('service-detail').hidden=!detail.text;el('service-detail').className='notice service-detail'+(detail.warn?' warn':'');
+  el('service-connect').hidden=!detail.connect;
 }
+// Says what blocks recording. It never promises an automatic retry: after a rejected or missing
+// connection nothing is sent until the user connects again.
+function serviceDetail(data) {
+  const cfg=data?.config||{},st=data?.state||{},auto=data?.autostart||{};
+  if(cfg.enabled&&needsLiveConnection(data))return {text:'记录需要连接实时数据（应用开着时记录）。',warn:true,connect:true};
+  if(cfg.enabled&&st.last_error){
+    const next=st.next_attempt_at&&new Date(st.next_attempt_at).getTime()>Date.now()?clockHHMM(st.next_attempt_at):'';
+    const lead=st.last_error_code==='live_rate_limited'?'寿司郎提示请求太频繁，记录先放慢':'上次没记上：'+plainError(st.last_error);
+    return {text:lead+'。'+(next?'下一次在 '+next+' 之后。':''),warn:true,connect:false};
+  }
+  const text=(cfg.enabled&&st.paused_reason?pausedText(st.paused_reason):'')||(auto.needs_update?'程序位置变了，请点“更新自启动位置”。':'')||auto.error||(cfg.enabled&&!data.background_running?'后台没有运行，请先保持这个窗口打开。':'');
+  return {text,warn:false,connect:false};
+}
+// Server messages sometimes carry a status code for logs; the page shows only the words
+// (recording status, the store card and the store search all use this).
+function plainError(message) { return String(message||'').replace(/\s*[（(]HTTP \d+[）)]/g,'').replace(/[。.\s]+$/,''); }
+function clockHHMM(value) { const d=new Date(value);return Number.isNaN(d.getTime())?'':chinaHHMM(d); }
 function setExportLink(id,enabled,path) {
   const link=el(id);link.setAttribute('aria-disabled',String(!enabled));
   if(enabled){link.href=path;link.removeAttribute('tabindex');}else{link.removeAttribute('href');link.setAttribute('tabindex','-1');}
@@ -261,7 +286,7 @@ async function toggleRecording() {
 async function changeAutostart() {
   const enabled=el('autostart').checked;el('autostart').disabled=true;
   await guard('service',async()=>{
-    if(enabled&&!await confirmDialog('登录后自动记录','请把程序放在固定位置。登录电脑后会启动公开数据记录，不会取号。')){renderService();return;}
+    if(enabled&&!await confirmDialog('登录后启动后台记录','请把程序放在固定位置。登录电脑后会启动后台记录，不会取号。后台不使用实时数据连接，需要打开应用并连接后才会记录。')){renderService();return;}
     try{await saveRecordConfig();await api('/api/queue/service',{action:enabled?'enable_autostart':'disable_autostart'},{timeout:20000});}
     finally{await refreshRecords();}
   });
@@ -338,17 +363,24 @@ function closeStorePicker(){
 }
 async function searchStores() {
   const revision=++state.searchRevision,q=el('store-search').value.trim();
-  el('store-results').innerHTML='<p class="empty">正在找门店…</p>';
+  el('store-results').innerHTML='<p class="empty">正在找门店…</p>';el('store-offline-note').hidden=true;
   try{
     // Without a keyword, chosen and usual stores come first so they need no search.
     const mine=q?[]:[...new Set([...state.picker,...recordIDs()])];
     const [data,usual]=await Promise.all([api('/api/queue/stores?limit=100&q='+encodeURIComponent(q)),mine.length?api('/api/queue/stores?limit=50&stores='+encodeURIComponent(mine.join(','))).catch(()=>({stores:[]})):{stores:[]}]);
     if(revision!==state.searchRevision)return;
     const seen=new Set(),list=[...(usual.stores||[]),...(data.stores||[])].filter(s=>!seen.has(String(s.id))&&seen.add(String(s.id)));
-    for(const store of list)state.stores.set(String(store.id),store);
-    el('store-results').innerHTML=list.map(s=>'<label class="picker-row"><input type="'+(state.pickerMode==='records'?'checkbox':'radio')+'" name="picked-store" value="'+escapeHTML(s.id)+'" '+(state.picker.has(String(s.id))?'checked':'')+'><span><b>'+escapeHTML(s.name)+'</b><small>'+escapeHTML([s.name_kana||s.city,s.address].filter(Boolean).join(' · '))+'</small></span></label>').join('')||'<p class="empty">没有找到，试试城市或其他店名。</p>';
+    for(const store of list)state.stores.set(String(store.id),{...state.stores.get(String(store.id)),...store});
+    // Without a connection the server answers from bundled history and local records (offline: true).
+    el('store-offline-note').hidden=!(data.offline||usual.offline);
+    el('store-results').innerHTML=list.map(s=>'<label class="picker-row"><input type="'+(state.pickerMode==='records'?'checkbox':'radio')+'" name="picked-store" value="'+escapeHTML(s.id)+'" '+(state.picker.has(String(s.id))?'checked':'')+'><span><b>'+escapeHTML(s.name)+'</b><small>'+escapeHTML(storePlace(s))+'</small></span></label>').join('')||'<p class="empty">没有找到，试试城市或其他店名。</p>';
     updatePicked();
-  }catch(e){if(revision===state.searchRevision)el('store-results').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="retry-stores">重试</button>';}
+  }catch(e){if(revision===state.searchRevision)el('store-results').innerHTML='<p class="empty">'+escapeHTML(plainError(e.message)+'。')+'</p><button class="button secondary" data-action="retry-stores">重试</button>';}
+}
+// Store lists label the city as nameKana; records and bundled history use city/area.
+function storePlace(s) {
+  const city=String(s.nameKana||s.city||''),area=String(s.area||'');
+  return [...(city&&area.includes(city)?[area]:[city,area]),s.address].filter(Boolean).join(' · ');
 }
 async function savePickedStores() {
   await guard('stores',async()=>{
@@ -367,40 +399,138 @@ async function loadLive() {
   if(!id||state.livePending===id)return;
   const revision=++state.liveRevision;state.livePending=id;
   state.planRevision++;
-  const keep=state.liveStore===id&&state.live;
-  el('take-ticket').disabled=true;
-  if(!keep){state.live=null;el('live-store').innerHTML='<p class="empty">正在获取排队…</p>';el('meal-plan').textContent='正在读取预计时间…';}
+  const same=state.liveStore===id,keep=same&&state.live,waiting=same&&state.liveAuthRequired;
+  if(!same)resetOfflineEta();
+  renderTakeTicket();
+  // A store that needs a connection keeps its connect panel while it is checked again, so the periodic refresh does not flash.
+  if(!keep&&!waiting){state.live=null;state.liveStale=false;state.liveAuthRequired=false;el('live-store').innerHTML='<p class="empty">正在获取排队…</p>';el('meal-plan').textContent='正在读取预计时间…';}
   el('live-store').setAttribute('aria-busy','true');
   try{
     const panel=await api('/api/queue/live?store='+encodeURIComponent(id));
     if(revision!==state.liveRevision)return;
-    state.live=panel;state.liveStore=id;state.liveStale=false;state.stores.set(id,{...state.stores.get(id),name:panel.store_name});
+    state.live=panel;state.liveStore=id;state.liveStale=false;state.liveAuthRequired=false;state.stores.set(id,{...state.stores.get(id),name:panel.store_name});
     renderLive();
-    el('take-ticket').disabled=!panel.online_open||!!state.ticketUncertain;await loadMealPlan();
-  }catch(e){if(revision===state.liveRevision){state.liveStale=true;if(keep)renderLive(e.message);else el('live-store').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="refresh-live">重试</button>';el('meal-plan').textContent='实时数据未更新，请重试。';}}
-  finally{if(revision===state.liveRevision){state.livePending='';el('live-store').removeAttribute('aria-busy');}}
+  }catch(e){
+    if(revision!==state.liveRevision)return;
+    state.liveStore=id;
+    if(e.code==='live_auth_required'){state.live=null;state.liveStale=false;state.liveAuthRequired=true;renderLiveConnect();}
+    else{state.liveStale=true;state.liveAuthRequired=false;const message=plainError(e.message)+'。';if(keep)renderLive(message);else el('live-store').innerHTML='<p class="empty">'+escapeHTML(message)+'</p><button class="button secondary" data-action="refresh-live">重试</button>';}
+  }
+  finally{if(revision===state.liveRevision){state.livePending='';el('live-store').removeAttribute('aria-busy');renderTakeTicket();renderOfflineEta();}}
+  if(revision===state.liveRevision)await loadMealPlan();
 }
 function renderLive(error='') {
   const panel=state.live,open=panel.store_status==='OPEN',stale=state.liveStale;
   const restoreFocus=!!document.activeElement?.closest('#live-store [data-action="refresh-live"]');
-  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(panel.store_name)+'</h3><p>'+escapeHTML(stale?'上次读取的排队状态':(open?'营业中':'当前未营业')+' · '+(panel.online_open?'可线上取号':'线上取号暂未开放'))+'</p></div><div class="live-numbers"><div><strong>'+escapeHTML(panel.called_no>0?panel.called_no:'—')+'</strong><span>'+(stale?'上次叫到':'当前叫到')+'</span></div><div><strong>'+escapeHTML(open?panel.wait_groups:'—')+'</strong><span>在等桌数</span></div><div><strong>'+escapeHTML(open?panel.server_wait_minutes:'—')+'</strong><span>官方等待 / 分钟</span></div></div>'+(stale?'<p class="notice error" role="status">未更新：'+escapeHTML(error)+'</p>':'')+'<div class="live-foot"><p class="caption">官方公开数据 · '+escapeHTML(freshness(panel.observed_at))+'</p><div class="actions"><button class="button quiet small" data-action="live-history">看历史规律</button><button class="button secondary small" data-action="refresh-live">刷新排队</button></div></div>');
+  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(panel.store_name)+'</h3><p>'+escapeHTML(stale?'上次读取的排队状态':(open?'营业中':'当前未营业')+' · '+(panel.online_open?'可线上取号':'线上取号暂未开放'))+'</p></div><div class="live-numbers"><div><strong>'+escapeHTML(panel.called_no>0?panel.called_no:'—')+'</strong><span>'+(stale?'上次叫到':'当前叫到')+'</span></div><div><strong>'+escapeHTML(open?panel.wait_groups:'—')+'</strong><span>在等桌数</span></div><div><strong>'+escapeHTML(open?panel.server_wait_minutes:'—')+'</strong><span>官方等待 / 分钟</span></div></div>'+(stale?'<p class="notice error" role="status">未更新：'+escapeHTML(error)+'</p>':'')+'<div class="live-foot"><p class="caption">实时数据 · '+escapeHTML(freshness(panel.observed_at))+'</p><div class="actions"><button class="button quiet small" data-action="live-history">看历史规律</button><button class="button secondary small" data-action="refresh-live">刷新排队</button></div></div>');
   if(restoreFocus)el('live-store').querySelector('[data-action="refresh-live"]')?.focus();
 }
+// Without a connection the store card stays calm: one line on why, one way to connect, and the
+// called-number estimate right below it.
+function renderLiveConnect() {
+  setMarkup('live-store','<div class="live-title"><h3>'+escapeHTML(storeName(state.selectedStore))+'</h3><p>还没有实时数据</p></div><div class="live-connect"><p><b>实时叫号需要连接</b>（约 1 小时有效）</p><p class="caption">在设置里用你自己的小程序登录连接一次，就能看实时叫号和在等桌数。没连接时，可以在下面填小程序里的叫号来估算。</p><div class="actions"><button class="button primary small" data-action="goto-live">去连接</button><button class="button quiet small" data-action="live-history">看历史规律</button></div></div>');
+}
+// Taking a ticket needs a fresh live reading; the reason is always said next to the disabled button.
+function takeTicketBlock() {
+  if(!state.selectedStore)return '先选一家门店。';
+  if(state.ticketUncertain)return '上次取号结果还没确认，请先查询已有号码。';
+  if(state.livePending)return '';
+  if(state.liveAuthRequired)return '先连接实时数据，或在小程序里取号后在这里填号码看叫到时间。';
+  if(!state.live||state.liveStale)return '排队信息还没更新，刷新后再取号。';
+  if(!state.live.online_open)return '这家店现在不能线上取号。';
+  return null;
+}
+function renderTakeTicket() {
+  const reason=takeTicketBlock(),note=el('take-ticket-reason');
+  el('take-ticket').disabled=reason!==null;note.textContent=reason||'';note.hidden=!reason;
+}
+function offlineEtaVisible() { return !!state.selectedStore&&(state.liveAuthRequired||(!state.live&&state.liveStale)); }
+function renderOfflineEta() {
+  const visible=offlineEtaVisible();el('offline-eta').hidden=!visible;
+  const ticket=state.currentTicket;
+  if(visible&&ticket&&ticketStoreID(ticket)===String(state.selectedStore)&&!el('offline-ticket').value)el('offline-ticket').value=String(ticket.number||'').match(/\d+/)?.[0]||'';
+}
+function resetOfflineEta() {
+  state.offlineRevision=(state.offlineRevision||0)+1;
+  el('offline-called').value='';el('offline-ticket').value='';el('offline-result').hidden=true;el('offline-result').innerHTML='';el('offline-eta').hidden=true;
+}
+function showOfflineResult(html) { const box=el('offline-result');box.innerHTML=html;box.hidden=!html; }
+function readingInputs() {
+  const called=String(el('offline-called').value??'').trim(),mine=String(el('offline-ticket').value??'').match(/\d+/)?.[0]||'';
+  if(called&&(!/^\d+$/.test(called)||Number(called)<1||Number(called)>99999))throw new Error('叫到的号码请填 1 到 99999 之间的整数。');
+  return {called,mine};
+}
+// Called-number estimate without live data: the server uses what is typed, or a reading noted in the last half hour.
+async function offlineEta() {
+  await guard('offline-eta',async()=>{
+    const id=state.selectedStore,revision=state.offlineRevision=(state.offlineRevision||0)+1;
+    try{
+      if(!id)throw new Error('先选一家门店。');
+      const {called,mine}=readingInputs();
+      if(!called&&!mine){el('offline-called').focus();throw new Error('填上小程序里现在叫到几号和你的号码。');}
+      const q=new URLSearchParams({store:id});if(mine)q.set('target_no',mine);if(called)q.set('called_no',called);
+      const data=await api('/api/queue/advisor?'+q);
+      if(revision!==state.offlineRevision||id!==state.selectedStore)return;
+      if(data.needs_called_no){el('offline-called').focus();showOfflineResult(escapeHTML(data.message||'先填小程序里现在叫到几号。'));return;}
+      if(!mine){el('offline-ticket').focus();showOfflineResult(escapeHTML(data.message||'填上你的号码，就能推算几点叫到。'));return;}
+      showOfflineResult(etaHTML(data)||escapeHTML(data.message||'暂时推算不出来，请以小程序叫号为准。'));
+    }catch(e){if(revision===state.offlineRevision)showOfflineResult('<span class="plan-error">'+escapeHTML(e.message)+'</span>');}
+  });
+}
+// "记一笔" stores one manual reading on this computer only; it feeds estimates and alerts, not the wait chart.
+async function recordReading() {
+  let recorded=false;
+  await guard('reading',async()=>{
+    try{
+      const id=state.selectedStore;if(!id)throw new Error('先选一家门店。');
+      const {called}=readingInputs();
+      if(!called){el('offline-called').focus();throw new Error('先填小程序里现在叫到几号。');}
+      const result=await api('/api/queue/reading',{store_id:String(id),called_no:Number(called)});
+      recorded=true;toast('已记下：'+(result.observed_at_hhmm?result.observed_at_hhmm+' ':'')+'叫到 '+(result.called_no||called)+' 号');
+    }catch(e){showOfflineResult('<span class="plan-error">'+escapeHTML(e.message)+'</span>');}
+  });
+  if(recorded&&/\d/.test(String(el('offline-ticket').value??'')))await offlineEta();
+}
+// Every time shown comes from the server's HH:MM fields; RFC3339 values are never printed.
+function etaClock(eta) {
+  const r=eta?.range_hhmm;
+  if(r?.early&&r?.late)return r.early===r.late?r.early:r.early+'–'+r.late;
+  return eta?.estimated_called_at_hhmm?'约 '+eta.estimated_called_at_hhmm:'';
+}
+function sourceNote(basis,history) { basis=String(basis||'');return [basis,history&&!basis.includes(history)?history:''].filter(Boolean).join(' · '); }
+function etaHTML(data) {
+  const eta=data?.eta||{},time=etaClock(eta),wait=eta.wait_minutes_range,parts=[];
+  if(time)parts.push('预计叫到<strong>'+escapeHTML(time)+'</strong>'+(wait&&wait.high>0?escapeHTML('还要等 '+(wait.low===wait.high?wait.high:wait.low+'–'+wait.high)+' 分钟。'):''));
+  if(eta.arrival_suggestion)parts.push('<p>'+escapeHTML(eta.arrival_suggestion)+'</p>');
+  if(!parts.length)return '';
+  const note=sourceNote(eta.basis,data.offline?data.history:'');
+  parts.push('<p class="caption">'+escapeHTML((note?note+'，':'')+'以小程序叫号为准。')+'</p>');
+  for(const warning of data.warnings||[])parts.push('<p class="caption">'+escapeHTML(warning)+'</p>');
+  return parts.join('');
+}
+// "想几点吃" needs no live data: the server falls back to local records or bundled history and labels which.
 async function loadMealPlan() {
   const revision=++state.planRevision;
-  if(!state.selectedStore||!state.live||state.liveStale)return;
   const target=el('meal-mode').value==='target',time=target?el('meal-time').value:chinaHHMM();
   el('meal-fields').hidden=!target;
+  if(!state.selectedStore){el('meal-plan').textContent='选好门店后查看预计时间。';return;}
   if(target&&(!time||time<=chinaHHMM())){el('meal-plan').textContent='请选择今天稍后的时间。';return;}
+  const travelRaw=target?String(el('meal-travel').value??'').trim():'',travel=Number(travelRaw||0);
+  if(!Number.isInteger(travel)||travel<0||travel>240){el('meal-plan').textContent='路程请填写 0 到 240 的整数分钟。';return;}
   el('meal-plan').textContent='正在估算…';
   try{
-    const data=await api('/api/queue/plan?store='+encodeURIComponent(state.selectedStore)+'&'+(target?'target_meal':'pickup')+'='+encodeURIComponent(time.replace(':','')));
+    const q=new URLSearchParams({store:state.selectedStore});q.set(target?'target_meal':'pickup',time.replace(':',''));if(travelRaw)q.set('travel_minutes',String(travel));
+    const data=await api('/api/queue/plan?'+q);
     if(revision!==state.planRevision)return;
-    const range=target?data.recommend_pickup_range:data.meal_range;
-    if(!range){el('meal-plan').textContent=target?'这个时段的本机记录还不够，暂时算不准。':data.message||'当前暂时无法估计。';return;}
-    if(target&&range.late<chinaHHMM()){el('meal-plan').textContent='可能赶不上 '+time+'，可以换个时间或门店。';return;}
-    el('meal-plan').innerHTML=(target?'建议取号时间':'现在取号，预计入座')+'<strong>'+escapeHTML(range.early+'–'+range.late)+'</strong>'+(target?'本机历史参考':'当前等待参考')+' · 以门店叫号为准。';
+    el('meal-plan').innerHTML=mealPlanHTML(data,target,time);
   }catch(e){if(revision===state.planRevision)el('meal-plan').textContent=e.message;}
+}
+function mealPlanHTML(data,target,time) {
+  const range=target?data.recommend_pickup_range:data.meal_range;
+  if(!range?.early||!range?.late)return escapeHTML(data.message||(target?'这家店这段时间的等待规律还不够，暂时估不出来。':'暂时估不出来。'));
+  if(target&&range.late<chinaHHMM())return escapeHTML('可能赶不上 '+time+'，可以换个时间或门店。');
+  const note=sourceNote(data.basis,data.history);
+  return (target?'建议取号时间':'现在取号，预计入座')+'<strong>'+escapeHTML(range.early===range.late?range.early:range.early+'–'+range.late)+'</strong>'+escapeHTML((note?note+'，':'')+'以门店叫号为准。')+(data.message&&data.source!=='live'?'<p class="caption">'+escapeHTML(data.message)+'</p>':'');
 }
 let confirmResolve;
 function confirmDialog(title,message) {
@@ -414,6 +544,7 @@ async function loadStatus(){
   state.status=await api('/api/status');
   el('version').textContent='v'+state.status.version+(state.status.edition?' · '+state.status.edition:'');
   el('account-state').textContent=!state.status.has_config?'未连接':state.status.auth_health?.status==='stale'?'连接需重新验证':state.status.auth_health?.status==='ok'?'已连接':'凭证已保存，尚未验证';
+  renderLiveSession();
   return state.status;
 }
 async function checkUpdate() {
@@ -444,7 +575,9 @@ function init() {
     'review-ticket':reviewTicket,'confirm-ticket':confirmTicket,'close-ticket':()=>{if(!state.busy.has('ticket'))el('ticket-dialog').close();},
     'query-ticket':queryTicket,'cancel-ticket':cancelTicket,'connect-account':()=>openAuth('settings'),'start-auth':startAuth,'stop-auth':stopAuth,'verify-auth':verifyAuth,'close-auth':closeAuth,'import-auth':importAuth,'auth-continue':finishAuth,
     'reset-account':()=>guard('account',async()=>{if(await confirmDialog('断开账号','只删除本机凭证，不删除排队记录，也不取消已取号码。')){await api('/api/auth/reset',{});clearTicketView();await loadStatus();toast('已断开');}}),
-    'repair-proxy':()=>guard('repair',async()=>{if(await confirmDialog('恢复系统代理','会停止当前认证并恢复本应用修改过的代理。')){await api('/api/repair-proxy',{});toast('代理已恢复');}})
+    'repair-proxy':()=>guard('repair',async()=>{if(await confirmDialog('恢复系统代理','会停止当前认证并恢复本应用修改过的代理。')){await api('/api/repair-proxy',{});toast('代理已恢复');}}),
+    'goto-live':gotoLiveSettings,'live-connect-mobile':()=>startLiveCapture('mobile'),'live-connect-desktop':()=>startLiveCapture('desktop'),'live-capture-stop':stopLiveCapture,'live-import':importLiveSession,'live-disconnect':disconnectLive,
+    'offline-eta':offlineEta,'record-reading':recordReading
   };
   document.addEventListener('click',event=>{const button=event.target.closest('[data-action]');if(button&&!button.disabled&&actions[button.dataset.action])Promise.resolve(actions[button.dataset.action](button)).catch(e=>toast(e.message));const answer=event.target.closest('[data-answer]');if(answer)finishConfirm(answer.dataset.answer==='yes');});
   window.addEventListener('hashchange',()=>navigatePage(location.hash.slice(1)));
@@ -459,15 +592,21 @@ function init() {
   for(const id of ['analysis-store','analysis-days','analysis-date-type'])el(id).addEventListener('change',()=>{el('analysis-date').value='';refreshRecords();});
   el('analysis-date').addEventListener('change',refreshRecords);
   el('include-history').addEventListener('change',changeHistory);
-  for(const id of ['meal-mode','meal-time'])el(id).addEventListener('change',()=>{el('meal-fields').hidden=el('meal-mode').value!=='target';loadMealPlan();});
+  for(const id of ['meal-mode','meal-time','meal-travel'])el(id).addEventListener('change',()=>{el('meal-fields').hidden=el('meal-mode').value!=='target';loadMealPlan();});
+  for(const id of ['offline-called','offline-ticket'])el(id).addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing){event.preventDefault();offlineEta();}});
   el('auth-method').addEventListener('change',renderAuthInstructions);
   el('auth-dialog').addEventListener('cancel',event=>{event.preventDefault();closeAuth();});
   el('ticket-dialog').addEventListener('cancel',event=>{if(state.busy.has('ticket'))event.preventDefault();});
   el('confirm-dialog').addEventListener('cancel',event=>{event.preventDefault();finishConfirm(false);});
   refreshRecords();navigatePage(location.hash.slice(1));loadStatus().catch(()=>{el('account-state').textContent='状态暂时读取失败，连接时会重试。';});
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisiblePage();});
+  if(state.page!=='settings')refreshLiveSession();
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshVisiblePage();refreshLiveSessionIfShown();}});
+  window.addEventListener('focus',refreshLiveSessionIfShown);
   setInterval(refreshVisiblePage,30000);
+  // The remaining minutes on the settings card stay current without polling while it is out of sight.
+  setInterval(refreshLiveSessionIfShown,60000);
 }
+function refreshLiveSessionIfShown() { if(!document.hidden&&!state.quitting&&state.page==='settings'&&!liveCaptureMode)refreshLiveSession(); }
 function refreshVisiblePage() {
   if(document.hidden||state.quitting||state.busy.size||document.querySelector('dialog[open]'))return;
   if(state.page==='queue'){loadLive();refreshTicketForecast();}
