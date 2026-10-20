@@ -10,11 +10,6 @@
     "url": "libsql://YOUR_DB.turso.io",
     "auth_token": "PUT_YOUR_TURSO_TOKEN_HERE_OR_USE_ENV"
   },
-  "old_turso": {
-    "_comment": "仅 migrate-old 命令用到：从旧库读压力历史导入新库。不用可留空。",
-    "url": "",
-    "auth_token": ""
-  },
   "collect": {
     "interval_seconds": 900,
     "_comment_interval": "线上中频 15 分钟一轮；本机桌面端才是高频采集，不要调高数据库写入频率",
@@ -28,8 +23,9 @@
     "list_longitude": 113.26,
     "_comment_list_coords": "列表接口 stores? 要求经纬度参数，随便给一个国内坐标即可（只是触发全量返回）"
   },
-  "archive": {
-    "retention_days": 60,
-    "_comment": "原始 queue_snapshots 保留 60 天，超过的聚合后删除"
+  "retention": {
+    "records_days": 0,
+    "runs_days": 30,
+    "_comment": "queue_records 每店每半小时一条，一年约 60MB，默认永久保留（0）；collector_runs 只留 30 天"
   }
 }

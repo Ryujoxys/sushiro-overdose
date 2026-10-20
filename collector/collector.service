@@ -28,7 +28,7 @@ RestartSec=30
 
 # 优雅退出：SIGTERM 后给足时间完成当前采集轮。
 # 一轮最坏 ~200 店 × 15s timeout / concurrency 8 ≈ 375s，留 600s 余量。
-# 太短会在 Turso 批量写到一半时硬杀，导致 store_latest 与 snapshots 不一致。
+# 太短会在 Turso 批量写到一半时硬杀，导致 store_latest 与 queue_records 不一致。
 KillSignal=SIGTERM
 TimeoutStopSec=600
 

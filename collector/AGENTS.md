@@ -1,110 +1,57 @@
 # AGENTS.md — 采集器部署指南（给 LLM / 自动化）
 
-> 本文件专为 AI agent（Claude/Cursor 等）写，目标是**零猜测地把 sushiro 采集器部署到一台新服务器并跑起来**。
-> 人类可看 README.md；LLM 看本文件。按顺序执行，每步有验证检查点。
+> 目标：**零猜测地把 sushiro 采集器部署到一台服务器并跑起来**。按顺序执行，每步有验证检查点。人类看 README.md。
 
 ## 这是什么
 
-`collector/` 是一个 Python 采集器：每 15 分钟调寿司郎公开接口，采集**全国 116+ 家店的排队压力 + 叫号**，写入 Turso 数据库。桌面端图表（叫号曲线、忙率热力图）依赖这些数据。
+`collector/` 是 Python 采集器（3.9+，纯标准库）：每 15 分钟调寿司郎公开接口，把全国 130+ 家店的排队压力和叫号写进 Turso 的 `queue_records`（每店每半小时一条）。Turso 走 HTTP，无需 SDK。库结构与读法见 [查询指南](../docs/turso-readonly-query-guide.md)；公开副本见 [public-data.md](../docs/public-data.md)。
 
-技术栈：Python 3.9+，纯标准库（urllib），零外部依赖。Turso 走 HTTP，不需要 SDK。
+## 前置条件
 
-## 前置条件（部署前确认）
+1. `python3 --version` ≥ 3.9。
+2. Turso 库 `libsql://su-shiro-ryujoxys.aws-us-west-2.turso.io` 的**读写** token（只读 token 写入会失败）。
+3. 出站 HTTPS 能访问 Turso 和 `crm-cn-prd.sushiro.com.cn`。寿司郎接口对境外或机房 IP 可能直接返回 nginx 403，服务器优先放在中国大陆网络。
 
-1. **服务器有 Python ≥ 3.9**：`python3 --version`。没有就装（`apt install python3` / `brew install python`）。
-2. **Turso 库 + 读写 token**：
-   - 库：`libsql://su-shiro-ryujoxys.aws-us-west-2.turso.io`（已存在）
-   - token：**读写**（采集器要写入，不是只读；只读 token 会 INSERT 失败）
-   - 若要导入旧库历史，还需旧库 `libsql://sushiro-public-ryujoxys.aws-us-west-2.turso.io` 的**只读** token
-3. **能访问 Turso（出站 HTTPS）** 和 `crm-cn-prd.sushiro.com.cn`（寿司郎接口）。
+## 部署步骤
 
-## 部署步骤（按顺序，每步验证）
-
-### 1. 拿到代码
+### 1. 代码与 venv
 
 ```bash
 git clone https://github.com/Ryujoxys/sushiro-overdose.git
 cd sushiro-overdose/collector
-```
-
-或拷贝 `collector/` 目录到服务器。
-
-### 2. 建虚拟环境 + 安装（零外部依赖）
-
-```bash
 python3 -m venv venv
-venv/bin/pip install -r requirements.txt   # requirements.txt 实际无依赖，仅建 venv 环境
 ```
 
-**验证**：`venv/bin/python -c "import urllib, json; print('ok')"` → 输出 `ok`。
-
-### 3. 写配置（真实凭证，不进 git）
+### 2. 配置（不进 git）
 
 ```bash
-cp config.example.json config.json
+cp config.example.json config.json   # 或 cp .env.example .env 用环境变量
 ```
 
-编辑 `config.json`，填：
-- `turso.url` = `libsql://su-shiro-ryujoxys.aws-us-west-2.turso.io`
-- `turso.auth_token` = **读写** token
-- `sushiro.token` = 寿司郎公开 token（已在 example 里，一般不用改）
-- `old_turso.*` = 旧库只读 token（仅 `migrate-old` 用，不导入历史可留空）
+填 `turso.url`、`turso.auth_token`（读写）、`sushiro.token`。**验证**：
+`venv/bin/python -c "from collector.config import load_config; print(bool(load_config()['turso']['auth_token']))"` → `True`。
 
-**验证**：`venv/bin/python -c "from collector.config import load_config; c=load_config(); print('turso:', bool(c['turso']['auth_token']))"` → `turso: True`。
-
-### 4. 建表（Turso schema）
+### 3. 建表、日历、门店
 
 ```bash
-venv/bin/python -m collector.main init-schema
+venv/bin/python -m collector.main init-schema     # ✅ 现有表含 queue_records / store_latest / store_dimension / holiday_calendar / collector_runs
+venv/bin/python -m collector.main seed-holidays    # ✅ 写入 N 条节假日
+venv/bin/python -m collector.main bootstrap        # ✅ store_dimension 现有 1xx 行
 ```
 
-**验证**：输出含 9 张表（store_dimension / store_latest / queue_snapshots / store_bucket_rollups / daily_store_bucket_rollups / called_intervals_rollups / holiday_calendar / collector_runs / archive_runs）+ `✅ 建表完成`。
+库若还是 v1（有 `queue_snapshots`），先按 README「从 v1 升级」迁移，不要直接启动新代码：新代码写 v2 的 `store_latest` 列。
 
-### 5. 初始化节假日日历
-
-```bash
-venv/bin/python -m collector.main seed-holidays
-```
-
-**验证**：`✅ 写入 N 条节假日`（N ≈ 68）。
-
-### 6. 冷启动门店维度
-
-```bash
-venv/bin/python -m collector.main bootstrap
-```
-
-**验证**：`✅ store_dimension 现有 118 行`（或接近，寿司郎门店数会变）。
-
-### 7.（可选）导入旧库压力历史
-
-```bash
-venv/bin/python -m collector.main migrate-old
-```
-
-约 25000 行，跨太平洋写入慢（几分钟）。**验证**：`✅ 导入完成：快照 N 行`。
-
-### 8. 跑一轮验证采集
+### 4. 跑一轮
 
 ```bash
 venv/bin/python -m collector.main run-once
 ```
 
-**验证**：输出 `{'stores_seen': 1xx, 'snapshots_written': 1xx, 'detail_ok': 1xx, ...}`。每店每轮只落一帧；营业时段（10-22 点）`detail_ok` 应接近门店数，详情失败时由列表帧兜底。
+**验证**：`{'stores_seen': 1xx, 'snapshots_written': 1xx, 'detail_ok': 1xx, ...}`；营业时段 `detail_ok` 接近门店数。
 
-### 9.（可选）立即聚合一次
+### 5. systemd 常驻
 
-```bash
-venv/bin/python -m collector.main aggregate-now
-```
-
-**验证**：`✅ 聚合完成：rollups=N daily=N ...`。
-
-### 10. 装成 systemd 服务（常驻 + 开机自启 + 崩溃自愈）
-
-改 `collector.service` 里的路径：
-- `WorkingDirectory` = collector 目录绝对路径
-- `ExecStart` = `<collector目录>/venv/bin/python -m collector.main run`
+改 `collector.service` 的 `WorkingDirectory` 和 `ExecStart` 路径，然后：
 
 ```bash
 sudo cp collector.service /etc/systemd/system/
@@ -112,83 +59,75 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now collector
 ```
 
-**验证**：
-- `systemctl status collector` → `active (running)`
-- `journalctl -u collector -f` → 看到每 15 分钟一轮采集日志（营业时段）
-- 杀进程 `sudo kill $(pgrep -f collector.main)` → 30s 内自动重启（Restart=always）
+**验证**：`systemctl is-active collector` → `active`；`journalctl -u collector -f` 每 15 分钟一轮。
+
+### 6. 确认数据在涨
+
+```bash
+venv/bin/python -c "
+from collector.config import load_config
+from collector.turso import TursoClient
+c=load_config(); t=TursoClient(c['turso']['url'], c['turso']['auth_token'])
+print(t.execute('SELECT MAX(slot) AS s FROM queue_records')[0]['s'])
+print(t.execute(\"SELECT started_at, ok, substr(error_message,1,80) AS e FROM collector_runs ORDER BY started_at DESC LIMIT 3\"))
+"
+```
+
+`slot` 应是当前半小时；最近几轮 `ok=1`。
 
 ## 命令一览
 
 | 命令 | 作用 | 频率 |
 |------|------|------|
-| `init-schema` | 建 9 张表 | 首次一次 |
-| `seed-holidays [--year N]` | 写节假日日历 | 首次一次 |
-| `bootstrap` | 拉门店写 store_dimension | 首次一次 |
-| `migrate-old [--limit N] [--dry-run]` | 导旧库压力历史 | 首次一次（可选） |
-| `run-once [--stores id...] [--no-detail]` | 跑一轮采集 | 验证用 |
-| `aggregate-now [--days N]` | 立即聚合 | 验证用 |
-| `run` | 常驻：每 15min 采集 + 每日 02:00 聚合 + 03:00 归档 | systemd 跑这个 |
+| `init-schema` | 建表（幂等） | 首次 |
+| `seed-holidays [--year N]` | 节假日日历 | 首次 / 每年 |
+| `bootstrap` | 门店维度 | 首次 |
+| `run-once [--stores id...] [--no-detail]` | 一轮采集 | 验证 |
+| `migrate-v2 [--drop]` | v1 → v2；`--drop` 不可逆 | 升级一次 |
+| `run` | 每 15min 采集 + 每天 03:00 清理 | systemd |
 
-## 配置项（config.json）
+## 配置项
 
 ```json
 {
   "sushiro": { "base_url", "token", "referer", "user_agent" },
-  "turso": { "url", "auth_token" },              // 读写 token
-  "old_turso": { "url", "auth_token" },          // 只读，仅 migrate-old
-  "collect": {
-    "interval_seconds": 900,                       // 15 分钟
-    "store_ids": [],                              // 空=全国全采
-    "active_hours": [10, 22],                      // 营业时段才采
-    "concurrency": 8,
-    "list_latitude": 23.13, "list_longitude": 113.26
-  },
-  "archive": { "retention_days": 60 }
+  "turso": { "url", "auth_token" },
+  "collect": { "interval_seconds": 900, "store_ids": [], "active_hours": [10, 22], "concurrency": 8 },
+  "retention": { "records_days": 0, "runs_days": 30 }
 }
 ```
 
-也可用环境变量覆盖（systemd 用 EnvironmentFile）：`SUSHIRO_COLLECTOR_TURSO_URL` / `SUSHIRO_COLLECTOR_TURSO_AUTH_TOKEN` / `SUSHIRO_COLLECTOR_SUSHIRO_TOKEN`。
+`records_days=0` 永久保留半小时记录（约每年 60MB）；v1 的 `archive.retention_days` 已不生效。
+
+## 缩小数据库文件
+
+Turso HTTP 接口不允许 `VACUUM`。删表后空闲页会被之后的写入复用，文件本身不会立刻变小。要立刻缩小：
+
+1. 停采集器；用只读查询把 5 张表复制进一个新的本地 SQLite 文件（`journal_mode=WAL`）。
+2. 用 Turso CLI 从该文件建新库（如 `turso db create su-shiro-v2 --from-file <file>.db`，以 `turso db create --help` 为准），为新库生成读写和只读 token。
+3. 核对新库 `queue_records` 行数和 `MAX(slot)`，更新采集器配置和仓库 Actions secrets，再启动采集器。确认无误后删除旧库。
 
 ## 故障排查
 
 | 现象 | 原因 / 处理 |
 |------|------|
-| `init-schema` 报 401 Unauthorized | Turso token 错或过期；去 Turso 控制台重生成**读写** token |
-| `init-schema` 报 invalid type string expected f64 | （已修）args 编码问题，用最新代码 |
-| `bootstrap` 报 `stores_seen: 0` | 寿司郎接口不通；检查服务器能否访问 `crm-cn-prd.sushiro.com.cn` |
-| `run-once` detail_ok=0 全失败 | 同上，接口网络问题 |
-| 营业时段 `display_called_no` 全 0 | 门店都关了（非营业时段正常）；或 getStoreById 接口变了，查日志 |
-| systemd 启动后秒退 | WorkingDirectory/ExecStart 路径错；`journalctl -u collector` 看报错 |
-| 配置加载报 `缺少配置` | config.json 没填真值（还是 PUT_ 占位），或 venv 没激活 |
-| `migrate-old` 中途断 | 网络抖动；重跑幂等（INSERT OR IGNORE 跳过已导入） |
+| 401 Unauthorized | Turso token 错或过期；控制台重生成**读写** token |
+| `HTTP 403 stores: <html>…403 Forbidden` | 寿司郎网关拒绝了服务器：换中国大陆网络 / 出口 IP，或检查 `sushiro.token`、`referer` 是否随小程序版本变化 |
+| `stores_seen: 0` / `detail_ok=0` | 接口不通，同上 |
+| 营业时段 `display_called_no` 全是 NULL | 门店都关了，或 `getStoreById` 结构变了，查日志 |
+| `no such column` 写 `store_latest` | 库还是 v1，先 `migrate-v2` |
+| systemd 秒退 | 路径错；`journalctl -u collector` |
+| `缺少配置` | config.json 仍是 `PUT_` 占位 |
 
 ## 安全
 
-- `config.json` / `.env` / `venv/` 都在 `.gitignore`，**不进 git**
-- Turso token 是读写权限，**不要泄露**；systemd 用 EnvironmentFile 而非写进 service 文件
-- 日志里 token 已 redact
+- `config.json` / `.env` / `venv/` 都在 `.gitignore`；读写 token 只放 EnvironmentFile 或 config.json，权限 0600。
+- 日志里 token 已 redact；错误信息只存前 300 字符。
+- 公开导出只用**只读** token（仓库 Actions secrets），不复用采集器的读写 token。
 
-## 关键设计（LLM 理解上下文用）
+## 关键设计
 
-- **每店每轮一帧**：详情成功写 `store_detail`，失败才写 `stores_list` 兜底；历史存量仍可能同时存在两种来源。
-- **为什么调两个接口**：`stores?`（批量，全国压力，无叫号）+ `getStoreById?`（单店，叫号 groupQueues）。旧库只调前者所以零叫号。
-- **聚合只读 30 天**：按 `id` 分页读取，daily 定时任务只写最新/缺行日期，避免超大响应和历史行重写。
-- **脏数据过滤**：wait>180（cap）/groups>200 丢弃（接口异常值）。
-- **schema 兼容桌面端**：表名/列名（含 `called_no_slow/typical/fast`）与桌面端 Cloudflare Worker 一致，桌面端零改动读新库。
-
-## 验证采集真的在跑（部署后确认）
-
-```bash
-# 1. 进程在
-systemctl is-active collector   # → active
-
-# 2. 数据在涨（隔 15 分钟跑两次对比）
-venv/bin/python -c "
-from collector.config import load_config
-from collector.turso import TursoClient
-c=load_config(); t=TursoClient(c['turso']['url'], c['turso']['auth_token'])
-print('snapshots:', t.execute('SELECT COUNT(*) AS c FROM queue_snapshots')[0]['c'])
-print('latest:', t.execute('SELECT MAX(collected_at) AS m FROM queue_snapshots')[0]['m'])
-"
-# collected_at 应是几分钟内的时间戳；隔 15min 再跑一次 snapshots 数应增加
-```
+- **一张事实表**：每店每半小时一条，`(slot, store_id)` 主键、`WITHOUT ROWID`，按时间追加；同一半小时后一帧覆盖前一帧，乱序旧帧不覆盖。
+- **两个接口**：`stores?`（全国压力，无叫号）+ `getStoreById?`（叫号 `groupQueues`）；详情失败用列表帧兜底，叫号记 NULL。
+- **未知不当 0**：等待、桌数、叫号缺失都是 NULL；等待超过 180 分钟按原值存、读时当未知。
+- **不存聚合**：规律由读取方算（`scripts/export-public-data.mjs` 是参考实现），库里没有需要夜间重算的表。

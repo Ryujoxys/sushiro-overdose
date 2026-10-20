@@ -1,8 +1,8 @@
 """常驻运行循环。
 
-每 interval_seconds 采一轮（营业时段内）。每天凌晨：
-- 02:00 跑一次 30 天滚动聚合（产出 rollups + 叫号三档 + 间隔/吞吐）
-- 03:00 跑一次归档（裁剪超期原始快照）
+每 interval_seconds 采一轮（营业时段内），直接写 queue_records 的当前半小时。
+每天 03:00 起做一次清理：collector_runs 只留最近 30 天；queue_records 默认永久保留，
+只有配置了 retention.records_days 才裁剪更早的半小时记录。库里不再存聚合表，无需夜间聚合。
 
 优雅退出：SIGTERM/SIGINT 触发后完成当前轮再退出（systemd restart 不丢数据）。
 """
@@ -15,9 +15,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
-from .aggregator import aggregate_all
-from .archive import archive_old
 from .collector import _fmt_dt, _record_run, collect_once
+from .migrate_v2 import prune_runs
 from .config import require_credential
 from .turso import TursoClient, as_int
 
@@ -116,28 +115,59 @@ def _normalize_collect_cfg(
     return interval, active_hours
 
 
+def retention_days(cfg: Dict[str, Any]) -> tuple:
+    """(records_days, runs_days)。records_days=0 表示半小时记录永久保留。
+
+    v1 的 archive.retention_days 针对原始快照，故意不沿用，避免把历史按 60 天删掉。
+    """
+    ret = cfg.get("retention", {}) or {}
+    try:
+        records = max(0, int(ret.get("records_days", 0)))
+    except (TypeError, ValueError):
+        records = 0
+    try:
+        runs = max(1, int(ret.get("runs_days", 30)))
+    except (TypeError, ValueError):
+        runs = 30
+    return records, runs
+
+
+def prune(turso: TursoClient, records_days: int, runs_days: int, today: str) -> int:
+    """按保留期裁剪。走主键前缀（slot），不全表扫描。返回裁剪前计数（仅 records）。"""
+    removed = 0
+    if records_days > 0:
+        from datetime import date
+
+        cutoff = (date.fromisoformat(today) - timedelta(days=records_days)).isoformat()
+        rows = turso.execute("SELECT COUNT(*) AS c FROM queue_records WHERE slot < ?", (cutoff,))
+        removed = as_int(rows[0].get("c")) if rows else 0
+        if removed:
+            turso.execute("DELETE FROM queue_records WHERE slot < ?", (cutoff,), retry_safe=True)
+    prune_runs(turso, runs_days)
+    return removed
+
+
 def run_loop(cfg: Dict[str, Any]) -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
     coll_cfg = cfg.get("collect", {})
     interval, active_hours = _normalize_collect_cfg(coll_cfg)
-    retention = int(cfg.get("archive", {}).get("retention_days", 60))
+    records_days, runs_days = retention_days(cfg)
     maintenance_end_hour = 10
     if active_hours and len(active_hours) == 2:
         active_start = int(active_hours[0])
         if active_start > 3:
             maintenance_end_hour = active_start
 
-    last_aggregate_date = ""
-    last_archive_date = ""
+    last_prune_date = ""
 
     log.info(
-        "采集器启动：interval=%ds active=%s retention=%dd（对齐整点 :00/:15/:30/:45）",
-        interval, active_hours, retention,
+        "采集器启动：interval=%ds active=%s 记录保留=%s（对齐整点 :00/:15/:30/:45）",
+        interval, active_hours, f"{records_days} 天" if records_days else "永久",
     )
 
-    # 启动后先睡到下一个整点边界，让采集对齐 :00/:15/:30/:45（与 30min 聚合桶一致）
+    # 启动后先睡到下一个整点边界，让采集对齐 :00/:15/:30/:45（与 30min 半小时槽一致）
     first_wait = _seconds_until_next_boundary(datetime.now(CST), interval)
     log.info("首次采集等待 %ds 对齐到整点边界", first_wait)
     if _STOP.wait(first_wait):
@@ -148,69 +178,20 @@ def run_loop(cfg: Dict[str, Any]) -> None:
         now = datetime.now(CST)
         today = now.strftime("%Y-%m-%d")
 
-        # 每日聚合仅在 02:00 到营业开始前补跑，避免白天重启后抢占采集。
-        if 2 <= now.hour < maintenance_end_hour and last_aggregate_date != today:
-            log.info("每日聚合 %s", today)
+        # 每日清理限制在凌晨维护窗口，白天重启不补跑。
+        if 3 <= now.hour < maintenance_end_hour and last_prune_date != today:
             try:
                 turso = TursoClient(
                     require_credential(cfg, "turso", "url"),
                     require_credential(cfg, "turso", "auth_token"),
                 )
-                if _maintenance_done(turso, "aggregate", today):
-                    log.info("每日聚合 %s 已完成，跳过", today)
-                else:
+                if not _maintenance_done(turso, "prune", today):
                     started_at = _fmt_dt()
-                    daily_v2_ready = _maintenance_done(
-                        turso, "daily-rollup-v2", "baseline"
-                    )
-                    # 只聚合最近 30 天，并按主键分页读取，避免单个超大响应中断。
-                    stats = aggregate_all(
-                        turso,
-                        days=30,
-                        incremental_daily=daily_v2_ready,
-                    )
-                    if not daily_v2_ready:
-                        _record_maintenance(
-                            turso,
-                            "daily-rollup-v2",
-                            "baseline",
-                            started_at,
-                            stats["daily"],
-                        )
-                    _record_maintenance(
-                        turso,
-                        "aggregate",
-                        today,
-                        started_at,
-                        sum(stats.values()),
-                    )
-                last_aggregate_date = today
+                    removed = prune(turso, records_days, runs_days, today)
+                    _record_maintenance(turso, "prune", today, started_at, removed)
+                last_prune_date = today
             except Exception as e:
-                log.error("聚合失败: %s", e)
-
-        # 每日归档同样限制在凌晨维护窗口。
-        if 3 <= now.hour < maintenance_end_hour and last_archive_date != today:
-            log.info("每日归档 %s", today)
-            try:
-                turso = TursoClient(
-                    require_credential(cfg, "turso", "url"),
-                    require_credential(cfg, "turso", "auth_token"),
-                )
-                if _maintenance_done(turso, "archive", today):
-                    log.info("每日归档 %s 已完成，跳过", today)
-                else:
-                    started_at = _fmt_dt()
-                    stats = archive_old(turso, retention)
-                    _record_maintenance(
-                        turso,
-                        "archive",
-                        today,
-                        started_at,
-                        stats["deleted"],
-                    )
-                last_archive_date = today
-            except Exception as e:
-                log.error("归档失败: %s", e)
+                log.error("每日清理失败: %s", e)
 
         # 营业时段判断（active_hours=[10,22] 表示 10≤hour<22 才采）。
         # 只作用于采集，不影响上面的聚合/归档。

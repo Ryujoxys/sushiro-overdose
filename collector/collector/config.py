@@ -20,15 +20,12 @@ ENV_OVERRIDES = {
     "SUSHIRO_COLLECTOR_SUSHIRO_TOKEN": ("sushiro", "token"),
     "SUSHIRO_COLLECTOR_TURSO_URL": ("turso", "url"),
     "SUSHIRO_COLLECTOR_TURSO_AUTH_TOKEN": ("turso", "auth_token"),
-    "SUSHIRO_COLLECTOR_OLD_TURSO_URL": ("old_turso", "url"),
-    "SUSHIRO_COLLECTOR_OLD_TURSO_AUTH_TOKEN": ("old_turso", "auth_token"),
 }
 
 # 这些值含敏感信息，日志里要 redact
 SENSITIVE_PATHS = {
     ("sushiro", "token"),
     ("turso", "auth_token"),
-    ("old_turso", "auth_token"),
 }
 
 DEFAULTS = {
@@ -39,7 +36,6 @@ DEFAULTS = {
         "user_agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 MicroMessenger/8.0",
     },
     "turso": {"url": "", "auth_token": ""},
-    "old_turso": {"url": "", "auth_token": ""},
     "collect": {
         "interval_seconds": 900,
         "store_ids": [],
@@ -49,7 +45,7 @@ DEFAULTS = {
         "list_latitude": 23.13,
         "list_longitude": 113.26,
     },
-    "archive": {"retention_days": 60},
+    "retention": {"records_days": 0, "runs_days": 30},
 }
 
 

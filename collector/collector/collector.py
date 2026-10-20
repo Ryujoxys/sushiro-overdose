@@ -3,7 +3,7 @@
 数据流：
   1. list_stores → 先生成全国门店压力兜底帧
   2. 对每店 get_store → 详情成功时用带叫号的单店帧替换兜底帧
-  3. 每店每轮只写一条 queue_snapshots，避免压力与叫号重复占行
+  3. 每店每轮一帧 UPSERT 到 queue_records 的当前半小时，后一帧覆盖前一帧
   4. upsert store_latest；store_dimension 仅字段变化或跨日时实际更新
 """
 from __future__ import annotations
@@ -105,8 +105,10 @@ def collect_once(
     )
 
     # 3 & 4. 写库
-    _write_snapshots(turso, snapshots)
-    _upsert_store_latest(turso, list(store_by_id.values()), detail_at)
+    _write_records(turso, snapshots)
+    _upsert_store_latest(
+        turso, snapshots, {sid: s.net_ticket_status for sid, s in store_by_id.items()}
+    )
     _upsert_store_dimension(turso, list(store_by_id.values()), collected_at)
     # 关店退役只在「无门店过滤的完整轮」做：过滤轮里"没见到"是配置使然，不是关店。
     stores_retired = 0
@@ -174,6 +176,10 @@ def _merge_store(base: StoreInfo, detail: StoreInfo) -> StoreInfo:
         detail.area = base.area
     if not detail.address and base.address:
         detail.address = base.address
+    if detail.wait_minutes is None and base.wait_minutes is not None:
+        detail.wait_minutes = base.wait_minutes
+    if detail.group_queues_count is None and base.group_queues_count is not None:
+        detail.group_queues_count = base.group_queues_count
     if detail.tables_capacity == 0 and base.tables_capacity:
         detail.tables_capacity = base.tables_capacity
     if detail.counters_capacity == 0 and base.counters_capacity:
@@ -187,85 +193,58 @@ def _merge_store(base: StoreInfo, detail: StoreInfo) -> StoreInfo:
     return detail
 
 
-def _write_snapshots(turso: TursoClient, snapshots: List[Snapshot]) -> None:
-    if not snapshots:
-        return
-    sql = """
-    INSERT OR IGNORE INTO queue_snapshots
-      (collected_at, store_id, wait_minutes, group_queues_count, store_status,
-       net_ticket_status, reservation_status, online_open, wait_time_counter,
-       wait_time_cap, display_called_no, group_queues_json, dq_source,
-       api_profile_version, dq_anomaly)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
-    # 分批，每批 200 条（避免单请求过大）
+# 半小时内只留最后一帧（与迁移、导出和桌面端内置历史的代表值一致）；乱序到达的旧帧不覆盖新帧。
+RECORD_UPSERT = """
+INSERT INTO queue_records
+  (slot, store_id, collected_at, store_status, online_open, wait_minutes,
+   group_queues_count, display_called_no)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(slot, store_id) DO UPDATE SET
+  collected_at=excluded.collected_at, store_status=excluded.store_status,
+  online_open=excluded.online_open, wait_minutes=excluded.wait_minutes,
+  group_queues_count=excluded.group_queues_count, display_called_no=excluded.display_called_no
+WHERE excluded.collected_at >= queue_records.collected_at
+"""
+
+
+def _write_records(turso: TursoClient, snapshots: List[Snapshot]) -> None:
+    # 分批，每批 200 条（避免单请求过大）；UPSERT 幂等，可安全重试
     BATCH = 200
     for i in range(0, len(snapshots), BATCH):
-        batch = snapshots[i : i + BATCH]
-        stmts = [(_snapshot_args(s)) for s in batch]
-        # execute_many 接受 (sql, params) 但每条 sql 相同 → 用 args 列表形式
-        turso.execute_many([(sql, a) for a in stmts], retry_safe=True)
+        turso.execute_many(
+            [(RECORD_UPSERT, _record_args(s)) for s in snapshots[i : i + BATCH]],
+            retry_safe=True,
+        )
 
 
-def _snapshot_args(s: Snapshot) -> tuple:
+def _record_args(s: Snapshot) -> tuple:
     return (
-        s.collected_at,
-        s.store_id,
-        s.wait_minutes,
-        s.group_queues_count,
-        s.store_status,
-        s.net_ticket_status,
-        s.reservation_status,
-        s.online_open,
-        s.wait_time_counter,
-        s.wait_time_cap,
-        s.display_called_no,  # None → NULL
-        s.group_queues_json,
-        s.dq_source,
-        s.api_profile_version,
-        s.dq_anomaly,
+        s.slot, s.store_id, s.collected_at, s.store_status, s.online_open,
+        s.wait_minutes, s.group_queues_count, s.display_called_no,
     )
 
 
-def _upsert_store_latest(turso: TursoClient, stores: List[StoreInfo], collected_at: str) -> None:
-    if not stores:
-        return
-    updated_at = _fmt_dt()
+def _upsert_store_latest(turso: TursoClient, snapshots: List[Snapshot], net_status: Dict[int, str]) -> None:
     sql = """
     INSERT INTO store_latest
-      (store_id, collected_at, name, city, area, wait_minutes, group_queues_count,
-       store_status, net_ticket_status, reservation_status, online_open,
-       wait_time_counter, wait_time_cap, display_called_no, group_queues_json, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (store_id, collected_at, store_status, net_ticket_status, online_open,
+       wait_minutes, group_queues_count, display_called_no)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(store_id) DO UPDATE SET
-      collected_at=excluded.collected_at, name=excluded.name, city=excluded.city,
-      area=excluded.area, wait_minutes=excluded.wait_minutes,
-      group_queues_count=excluded.group_queues_count, store_status=excluded.store_status,
-      net_ticket_status=excluded.net_ticket_status,
-      reservation_status=excluded.reservation_status, online_open=excluded.online_open,
-      wait_time_counter=excluded.wait_time_counter, wait_time_cap=excluded.wait_time_cap,
-      display_called_no=excluded.display_called_no,
-      group_queues_json=excluded.group_queues_json, updated_at=excluded.updated_at
+      collected_at=excluded.collected_at, store_status=excluded.store_status,
+      net_ticket_status=excluded.net_ticket_status, online_open=excluded.online_open,
+      wait_minutes=excluded.wait_minutes, group_queues_count=excluded.group_queues_count,
+      display_called_no=excluded.display_called_no
     """
-    args_list = []
-    for s in stores:
-        import json as _json
-        gq_json = _json.dumps(s.group_queues, ensure_ascii=False) if s.group_queues else None
-        # store_latest 的叫号：单店帧才有（group_queues 非 None）。列表帧 store 的 group_queues
-        # 是 None → display_called_no 存 NULL（与"没取叫号"语义一致）。
-        called_no = None
-        if s.group_queues is not None:
-            from .called_no import current_called_no
-            called_no = current_called_no(s.group_queues)
-        args_list.append(
-            (
-                s.store_id, collected_at, s.name, s.city, s.area, s.wait_minutes,
-                s.group_queues_count, s.store_status, s.net_ticket_status,
-                s.reservation_status, 1 if s.online_open else 0,
-                s.wait_time_counter, s.wait_time_cap, called_no, gq_json, updated_at,
-            )
+    args_list = [
+        (
+            s.store_id, s.collected_at, s.store_status, net_status.get(s.store_id) or None,
+            s.online_open, s.wait_minutes, s.group_queues_count, s.display_called_no,
         )
-    turso.execute_many([(sql, a) for a in args_list], retry_safe=True)
+        for s in snapshots
+    ]
+    for i in range(0, len(args_list), 200):
+        turso.execute_many([(sql, a) for a in args_list[i : i + 200]], retry_safe=True)
 
 
 def _upsert_store_dimension(turso: TursoClient, stores: List[StoreInfo], now_iso: str) -> None:
@@ -370,7 +349,7 @@ def _record_run(
             sql,
             (
                 run_id, started_at, finished_at, endpoint, stores_seen,
-                records_written, 1 if ok else 0, error_message, "public-profile-v1",
+                records_written, 1 if ok else 0, (error_message or "")[:300], "public-profile-v1",
             ),
             retry_safe=True,
         )

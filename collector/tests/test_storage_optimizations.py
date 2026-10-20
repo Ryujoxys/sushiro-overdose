@@ -4,33 +4,31 @@ import sqlite3
 import unittest
 from unittest import mock
 
-from collector import aggregator
-from collector.aggregator import (
-    aggregate_all,
-    _load_snapshot_rows,
-    _select_daily_writes,
-    _write_daily_rollups,
-)
-from collector.archive import archive_old
 from collector.collector import (
     _select_snapshots,
     _upsert_store_dimension,
+    _upsert_store_latest,
+    _write_records,
 )
-from collector.models import StoreInfo
+from collector.migrate_v2 import copy_records, drop_legacy
+from collector.models import Snapshot, StoreInfo
+from collector.runner import prune, retention_days
 from collector.schema import SCHEMA_STATEMENTS
 from collector.turso import TursoClient, TursoError
 
 
 class SQLiteTurso:
-    def __init__(self):
-        self.conn = sqlite3.connect(":memory:")
+    def __init__(self, statements=SCHEMA_STATEMENTS):
+        self.conn = sqlite3.connect(":memory:", isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        for statement in SCHEMA_STATEMENTS:
+        for statement in statements:
             self.conn.execute(statement)
+
+    def __del__(self):
+        self.conn.close()
 
     def execute(self, sql, params=None, *, retry_safe=None):
         cursor = self.conn.execute(sql, params or ())
-        self.conn.commit()
         return [dict(row) for row in cursor.fetchall()]
 
     def execute_many(self, statements, *, retry_safe=None):
@@ -43,36 +41,14 @@ class SQLiteTurso:
                 params = statement[1] if len(statement) > 1 else ()
             cursor = self.conn.execute(sql, params or ())
             rows = [dict(row) for row in cursor.fetchall()]
-        self.conn.commit()
         return rows
 
 
-def daily_row(snapshot_date, store_id=1, bucket="19:30", updated_at=None):
-    return {
-        "snapshot_date": snapshot_date,
-        "store_id": store_id,
-        "date_type": "weekday",
-        "weekday": 0,
-        "time_bucket": bucket,
-        "sample_count": 1,
-        "open_count": 1,
-        "online_open_count": 1,
-        "busy_count": 1,
-        "open_rate": 1.0,
-        "online_open_rate": 1.0,
-        "busy_rate": 1.0,
-        "wait_typical_minutes": 30.0,
-        "wait_safe_minutes": 30.0,
-        "wait_max_minutes": 30,
-        "queue_groups_typical": 8.0,
-        "queue_groups_safe": 8.0,
-        "called_sample_count": 1,
-        "called_no_slow": 100,
-        "called_no_typical": 100,
-        "called_no_fast": 100,
-        "confidence": "low",
-        "updated_at": updated_at or f"{snapshot_date}T19:45:00+08:00",
-    }
+def frame(at, store_id=1, wait=30, called=None, status="OPEN", source="store_detail"):
+    return Snapshot(
+        collected_at=at, store_id=store_id, store_status=status, online_open=1,
+        wait_minutes=wait, group_queues_count=5, display_called_no=called, dq_source=source,
+    )
 
 
 class SnapshotSelectionTests(unittest.TestCase):
@@ -103,162 +79,131 @@ class SnapshotSelectionTests(unittest.TestCase):
         self.assertEqual("stores_list", by_id[2].dq_source)
         self.assertIsNone(by_id[2].display_called_no)
 
+    def test_unknown_values_stay_none_and_zero_called_is_none(self):
+        detail = StoreInfo.from_api({"storeId": 3, "storeStatus": "open", "groupQueues": {"boothQueue": []}})
+        snap = Snapshot.from_store(detail, "2026-07-27T19:29:59+08:00", "store_detail", True)
+        self.assertIsNone(snap.wait_minutes)
+        self.assertIsNone(snap.group_queues_count)
+        self.assertIsNone(snap.display_called_no)
+        self.assertEqual("OPEN", snap.store_status)
+        self.assertEqual("2026-07-27T19:00", snap.slot)
+        self.assertEqual(0, StoreInfo.from_api({"storeId": 3, "wait": 0}).wait_minutes)
 
-class SQLiteWriteTests(unittest.TestCase):
+
+class RecordWriteTests(unittest.TestCase):
     def setUp(self):
         self.db = SQLiteTurso()
 
     def tearDown(self):
         self.db.conn.close()
 
+    def rows(self):
+        return self.db.execute("SELECT * FROM queue_records ORDER BY slot, store_id")
+
+    def test_last_frame_in_half_hour_wins_and_late_old_frame_is_ignored(self):
+        _write_records(self.db, [frame("2026-07-27T19:30:05+08:00", called=100)])
+        _write_records(self.db, [frame("2026-07-27T19:45:05+08:00", wait=40, called=None, source="stores_list")])
+        _write_records(self.db, [frame("2026-07-27T19:31:00+08:00", wait=99, called=1)])
+        _write_records(self.db, [frame("2026-07-27T20:00:05+08:00", wait=0, called=120)])
+
+        rows = self.rows()
+        self.assertEqual(["2026-07-27T19:30", "2026-07-27T20:00"], [r["slot"] for r in rows])
+        self.assertEqual(("2026-07-27T19:45:05+08:00", 40, None), (rows[0]["collected_at"], rows[0]["wait_minutes"], rows[0]["display_called_no"]))
+        self.assertEqual(0, rows[1]["wait_minutes"], "zero wait is a real observation")
+
+    def test_store_latest_uses_v2_columns(self):
+        snaps = [frame("2026-07-27T19:45:05+08:00", called=88)]
+        _upsert_store_latest(self.db, snaps, {1: "ONLINE"})
+        _upsert_store_latest(self.db, [frame("2026-07-27T20:00:05+08:00", wait=None)], {1: ""})
+        row = self.db.execute("SELECT * FROM store_latest")[0]
+        self.assertEqual("2026-07-27T20:00:05+08:00", row["collected_at"])
+        self.assertIsNone(row["wait_minutes"])
+        self.assertIsNone(row["net_ticket_status"])
+
     def test_dimension_only_refreshes_when_changed_or_on_new_day(self):
         store = StoreInfo(store_id=1, name="one", city="Beijing")
-        _upsert_store_dimension(
-            self.db, [store], "2026-07-27T10:00:00+08:00"
-        )
-        _upsert_store_dimension(
-            self.db, [store], "2026-07-27T10:15:00+08:00"
-        )
-        row = self.db.execute(
-            "SELECT last_seen_at FROM store_dimension WHERE store_id = 1"
-        )[0]
+        _upsert_store_dimension(self.db, [store], "2026-07-27T10:00:00+08:00")
+        _upsert_store_dimension(self.db, [store], "2026-07-27T10:15:00+08:00")
+        row = self.db.execute("SELECT last_seen_at FROM store_dimension WHERE store_id = 1")[0]
         self.assertEqual("2026-07-27T10:00:00+08:00", row["last_seen_at"])
 
-        _upsert_store_dimension(
-            self.db, [store], "2026-07-28T10:00:00+08:00"
-        )
-        row = self.db.execute(
-            "SELECT last_seen_at FROM store_dimension WHERE store_id = 1"
-        )[0]
+        _upsert_store_dimension(self.db, [store], "2026-07-28T10:00:00+08:00")
+        row = self.db.execute("SELECT last_seen_at FROM store_dimension WHERE store_id = 1")[0]
         self.assertEqual("2026-07-28T10:00:00+08:00", row["last_seen_at"])
 
-    def test_daily_upsert_skips_equal_values_and_updates_all_changed_fields(self):
-        first = daily_row("2026-07-27")
-        _write_daily_rollups(self.db, [first])
 
-        same = daily_row(
-            "2026-07-27", updated_at="2026-07-28T02:00:00+08:00"
-        )
-        _write_daily_rollups(self.db, [same])
-        row = self.db.execute(
-            "SELECT updated_at FROM daily_store_bucket_rollups"
-        )[0]
-        self.assertEqual(first["updated_at"], row["updated_at"])
+class RetentionTests(unittest.TestCase):
+    def test_v1_archive_setting_is_not_applied_to_records(self):
+        self.assertEqual((0, 30), retention_days({"archive": {"retention_days": 60}}))
+        self.assertEqual((400, 7), retention_days({"retention": {"records_days": 400, "runs_days": 7}}))
+        self.assertEqual((0, 1), retention_days({"retention": {"records_days": "x", "runs_days": -1}}))
 
-        changed = dict(same)
-        changed["wait_safe_minutes"] = 45.0
-        changed["called_no_fast"] = 120
-        _write_daily_rollups(self.db, [changed])
-        row = self.db.execute(
-            "SELECT wait_safe_minutes, called_no_fast, updated_at "
-            "FROM daily_store_bucket_rollups"
-        )[0]
-        self.assertEqual(45.0, row["wait_safe_minutes"])
-        self.assertEqual(120.0, row["called_no_fast"])
-        self.assertEqual(changed["updated_at"], row["updated_at"])
+    def test_prune_keeps_records_by_default_and_trims_by_slot(self):
+        db = SQLiteTurso()
+        _write_records(db, [frame("2026-01-01T12:00:00+08:00"), frame("2026-07-27T12:00:00+08:00")])
+        self.assertEqual(0, prune(db, 0, 30, "2026-07-28"))
+        self.assertEqual(2, db.execute("SELECT COUNT(*) AS c FROM queue_records")[0]["c"])
+        self.assertEqual(1, prune(db, 100, 30, "2026-07-28"))
+        self.assertEqual(["2026-07-27T12:00"], [r["slot"] for r in db.execute("SELECT slot FROM queue_records")])
 
-    def test_incremental_daily_refreshes_latest_and_incomplete_dates(self):
-        existing = [
-            daily_row("2026-07-25", store_id=1),
-            daily_row("2026-07-25", store_id=2),
-            daily_row("2026-07-26", store_id=1),
-        ]
-        _write_daily_rollups(self.db, existing)
-        computed = [
-            daily_row("2026-07-25", store_id=1),
-            daily_row("2026-07-25", store_id=2),
-            daily_row("2026-07-26", store_id=1),
-            daily_row("2026-07-26", store_id=2),
-            daily_row("2026-07-27", store_id=1),
-            daily_row("2026-07-27", store_id=2),
-        ]
 
-        selected = _select_daily_writes(self.db, computed)
+LEGACY = [
+    """CREATE TABLE store_latest (store_id INTEGER PRIMARY KEY, collected_at TEXT NOT NULL, name TEXT,
+       wait_minutes INTEGER NOT NULL DEFAULT 0, group_queues_count INTEGER NOT NULL DEFAULT 0,
+       store_status TEXT, net_ticket_status TEXT, online_open INTEGER NOT NULL DEFAULT 0,
+       display_called_no INTEGER, group_queues_json TEXT, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE queue_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, collected_at TEXT NOT NULL,
+       store_id INTEGER NOT NULL, wait_minutes INTEGER NOT NULL DEFAULT 0,
+       group_queues_count INTEGER NOT NULL DEFAULT 0, store_status TEXT, online_open INTEGER NOT NULL DEFAULT 0,
+       display_called_no INTEGER, dq_source TEXT NOT NULL)""",
+    """CREATE TABLE daily_store_bucket_rollups (snapshot_date TEXT NOT NULL, store_id INTEGER NOT NULL,
+       time_bucket TEXT, sample_count INTEGER, open_count INTEGER, online_open_count INTEGER,
+       wait_typical_minutes REAL, queue_groups_typical REAL, called_sample_count INTEGER,
+       called_no_typical REAL, updated_at TEXT NOT NULL, PRIMARY KEY (snapshot_date, store_id, time_bucket))""",
+    "CREATE TABLE store_bucket_rollups (store_id INTEGER)",
+    "CREATE TABLE called_intervals_rollups (store_id INTEGER)",
+    "CREATE TABLE archive_runs (id INTEGER PRIMARY KEY)",
+    [s for s in SCHEMA_STATEMENTS if "collector_runs" in s][0],
+]
 
-        self.assertEqual(
-            {"2026-07-26", "2026-07-27"},
-            {row["snapshot_date"] for row in selected},
-        )
 
-    def test_snapshot_reader_uses_keyset_pages_without_losing_rows(self):
-        sql = """
-        INSERT INTO queue_snapshots
-          (collected_at, store_id, dq_source)
-        VALUES (?, ?, ?)
-        """
-        for i in range(12):
-            self.db.execute(
-                sql,
-                (
-                    f"2026-07-27T10:{i:02d}:00+08:00",
-                    i + 1,
-                    "store_detail",
-                ),
-            )
+class MigrateV2Tests(unittest.TestCase):
+    def setUp(self):
+        self.db = SQLiteTurso(LEGACY)
+        daily = "INSERT INTO daily_store_bucket_rollups VALUES (?, 1, ?, 1, ?, 1, ?, 8, 1, ?, ?)"
+        # Archived day: only rollup representatives remain.
+        self.db.execute(daily, ("2026-07-01", "12:00", 1, 45.0, 300.0, "2026-07-01T12:15:00+08:00"))
+        self.db.execute(daily, ("2026-07-01", "12:30", 0, None, 0.0, "2026-07-01T12:45:00+08:00"))
+        # Raw day: the rollup row is overridden by the last raw frame of the slot.
+        self.db.execute(daily, ("2026-07-10", "19:00", 1, 60.0, 500.0, "2026-07-10T19:15:05+08:00"))
+        raw = "INSERT INTO queue_snapshots (collected_at, store_id, wait_minutes, group_queues_count, store_status, online_open, display_called_no, dq_source) VALUES (?, 1, ?, 9, 'open', 1, ?, ?)"
+        self.db.execute(raw, ("2026-07-10T19:00:05+08:00", 50, 480, "store_detail"))
+        self.db.execute(raw, ("2026-07-10T19:15:05+08:00", 240, 0, "store_detail"))
+        self.db.execute(raw, ("2026-07-10T19:15:05+08:00", 240, None, "stores_list"))
+        self.db.execute("INSERT INTO store_latest (store_id, collected_at, name, wait_minutes, store_status, display_called_no, group_queues_json, updated_at) VALUES (1, '2026-07-10T19:15:05+08:00', 'one', 240, 'OPEN', 0, '{}', 'x')")
 
-        with mock.patch.object(aggregator, "READ_PAGE", 5):
-            rows = _load_snapshot_rows(self.db, days=None)
+    def test_copy_is_idempotent_and_keeps_semantics(self):
+        first = copy_records(self.db)
+        second = copy_records(self.db)
+        self.assertEqual(first, second)
+        rows = {r["slot"]: r for r in self.db.execute("SELECT * FROM queue_records")}
+        self.assertEqual(3, len(rows))
+        self.assertEqual((45, 8, 300, "OPEN"), tuple(rows["2026-07-01T12:00"][k] for k in ("wait_minutes", "group_queues_count", "display_called_no", "store_status")))
+        self.assertEqual(("CLOSED", None, None), tuple(rows["2026-07-01T12:30"][k] for k in ("store_status", "wait_minutes", "display_called_no")))
+        raw = rows["2026-07-10T19:00"]
+        self.assertEqual(("2026-07-10T19:15:05+08:00", 240, None, 9, "OPEN"), (raw["collected_at"], raw["wait_minutes"], raw["display_called_no"], raw["group_queues_count"], raw["store_status"]))
 
-        self.assertEqual(12, len(rows))
-        self.assertEqual(list(range(1, 13)), [row["id"] for row in rows])
-
-    def test_full_aggregate_executes_all_rollup_upserts(self):
-        _upsert_store_dimension(
-            self.db,
-            [StoreInfo(store_id=1, name="one", tables_capacity=20)],
-            "2026-07-27T10:00:00+08:00",
-        )
-        sql = """
-        INSERT INTO queue_snapshots
-          (collected_at, store_id, wait_minutes, group_queues_count,
-           store_status, online_open, wait_time_cap, display_called_no,
-           dq_source)
-        VALUES (?, 1, ?, ?, 'OPEN', 1, 180, ?, 'store_detail')
-        """
-        self.db.execute(
-            sql, ("2026-07-27T10:00:00+08:00", 20, 5, 10)
-        )
-        self.db.execute(
-            sql, ("2026-07-27T10:15:00+08:00", 25, 7, 12)
-        )
-
-        stats = aggregate_all(self.db, days=30)
-
-        self.assertEqual(
-            {"rollups": 1, "daily": 1, "intervals": 1},
-            stats,
-        )
-        self.assertEqual(
-            1,
-            self.db.execute(
-                "SELECT COUNT(*) AS c FROM called_intervals_rollups"
-            )[0]["c"],
-        )
-
-    def test_archive_skips_full_remaining_count_and_log_is_idempotent(self):
-        sql = """
-        INSERT INTO queue_snapshots
-          (collected_at, store_id, dq_source)
-        VALUES (?, ?, 'store_detail')
-        """
-        self.db.execute(sql, ("2026-05-01T10:00:00+08:00", 1))
-        self.db.execute(sql, ("2026-07-27T10:00:00+08:00", 1))
-
-        first = archive_old(self.db, retention_days=30)
-        second = archive_old(self.db, retention_days=30)
-
-        self.assertEqual({"deleted": 1, "remaining": -1}, first)
-        self.assertEqual({"deleted": 0, "remaining": -1}, second)
-        self.assertEqual(
-            1,
-            self.db.execute(
-                "SELECT COUNT(*) AS c FROM queue_snapshots"
-            )[0]["c"],
-        )
-        self.assertEqual(
-            1,
-            self.db.execute("SELECT COUNT(*) AS c FROM archive_runs")[0]["c"],
-        )
+    def test_drop_requires_copy_then_removes_legacy_and_rebuilds_latest(self):
+        with self.assertRaises(RuntimeError):
+            drop_legacy(self.db)
+        copy_records(self.db)
+        drop_legacy(self.db)
+        tables = {r["name"] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertEqual({"queue_records", "store_latest", "collector_runs"}, tables)
+        latest = self.db.execute("SELECT * FROM store_latest")[0]
+        self.assertEqual(["store_id", "collected_at", "store_status", "net_ticket_status", "online_open", "wait_minutes", "group_queues_count", "display_called_no"], list(latest))
+        self.assertIsNone(latest["display_called_no"])
+        drop_legacy(self.db)  # second run is a no-op
 
 
 class RetrySafetyTests(unittest.TestCase):
@@ -320,10 +265,6 @@ class RetrySafetyTests(unittest.TestCase):
         self.assertEqual([{"value": "1"}], rows)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RetireMissingStoresTests(unittest.TestCase):
     def _db_with_stores(self, ids):
         db = SQLiteTurso()
@@ -379,3 +320,7 @@ class RetireMissingStoresTests(unittest.TestCase):
         rows = db.execute("SELECT is_active, name FROM store_dimension WHERE store_id = 999")
         self.assertEqual(rows[0]["is_active"], 1)
         self.assertEqual(rows[0]["name"], "reborn")
+
+
+if __name__ == "__main__":
+    unittest.main()

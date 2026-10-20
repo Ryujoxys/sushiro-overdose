@@ -1,4 +1,4 @@
-"""数据模型（dataclass）。对应寿司郎接口返回 + Turso 快照行。"""
+"""数据模型（dataclass）。对应寿司郎接口返回 + Turso queue_records 行。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -20,12 +20,12 @@ class StoreInfo:
     distance: str = ""
     store_status: str = ""          # OPEN / CLOSED
     net_ticket_status: str = ""     # ONLINE / OFFLINE_*
-    wait_minutes: int = 0
+    wait_minutes: Optional[int] = None   # 接口没给就是未知，不当 0
     wait_time_counter: Optional[int] = None
     wait_time_cap: Optional[int] = None
     tables_capacity: int = 0
     counters_capacity: int = 0
-    group_queues_count: int = 0
+    group_queues_count: Optional[int] = None
     reservation_status: str = ""
     open_date: str = ""
     # group_queues 仅 getStoreById 返回
@@ -82,12 +82,12 @@ class StoreInfo:
             distance=str(d.get("distance") or ""),
             store_status=str(d.get("storeStatus") or ""),
             net_ticket_status=str(d.get("netTicketStatus") or ""),
-            wait_minutes=_int("wait"),
+            wait_minutes=_oint("wait"),
             wait_time_counter=_oint("waitTimeCounter"),
             wait_time_cap=_oint("waitTimeCap"),
             tables_capacity=_int("tablesCapacity"),
             counters_capacity=_int("countersCapacity"),
-            group_queues_count=_int("groupQueuesCount"),
+            group_queues_count=_oint("groupQueuesCount"),
             reservation_status=str(d.get("reservationStatus") or ""),
             open_date=str(d.get("openDate") or ""),
             group_queues=d.get("groupQueues") if isinstance(d.get("groupQueues"), dict) else None,
@@ -96,23 +96,26 @@ class StoreInfo:
 
 @dataclass
 class Snapshot:
-    """一行 queue_snapshots：单店单帧。display_called_no=None 表示本轮没取叫号。"""
+    """一帧公开状态，写入 queue_records 的一行（同一半小时内后写的覆盖先写的）。
+
+    缺失一律 None：display_called_no 只在详情接口给出大于 0 的堂食叫号时有值。
+    dq_source 只在内存里区分详情帧/列表兜底帧，不入库。
+    """
 
     collected_at: str
     store_id: int
-    wait_minutes: int = 0
-    group_queues_count: int = 0
-    store_status: str = ""
-    net_ticket_status: str = ""
-    reservation_status: str = ""
+    store_status: str = "UNKNOWN"
     online_open: int = 0
-    wait_time_counter: Optional[int] = None
-    wait_time_cap: Optional[int] = None
-    display_called_no: Optional[int] = None  # None=没取叫号; 0=取了但无堂食叫号; >0=当前叫到
-    group_queues_json: Optional[str] = None
+    wait_minutes: Optional[int] = None
+    group_queues_count: Optional[int] = None
+    display_called_no: Optional[int] = None
     dq_source: str = "stores_list"           # 'stores_list' | 'store_detail'
-    api_profile_version: str = ""
-    dq_anomaly: int = 0
+
+    @property
+    def slot(self) -> str:
+        """门店时区半小时起点 'YYYY-MM-DDTHH:MM'。collected_at 已是 +08:00 文本。"""
+        minute = "00" if int(self.collected_at[14:16]) < 30 else "30"
+        return self.collected_at[:14] + minute
 
     @classmethod
     def from_store(
@@ -121,32 +124,22 @@ class Snapshot:
         collected_at: str,
         dq_source: str,
         include_called: bool,
-        api_profile_version: str = "public-profile-v1",
     ) -> "Snapshot":
-        import json as _json
-
-        gq_json = None
         called_no: Optional[int] = None
         if include_called:
-            # 取了叫号：把 group_queues 序列化；叫号值用算法算（可能 0）
-            gq = store.group_queues or {}
-            gq_json = _json.dumps(gq, ensure_ascii=False) if gq else None
             from .called_no import current_called_no
-            called_no = current_called_no(gq)
+            called_no = current_called_no(store.group_queues) or None
+
+        def _non_negative(v: Optional[int]) -> Optional[int]:
+            return v if v is not None and v >= 0 else None
 
         return cls(
             collected_at=collected_at,
             store_id=store.store_id,
-            wait_minutes=store.wait_minutes,
-            group_queues_count=store.group_queues_count,
-            store_status=store.store_status,
-            net_ticket_status=store.net_ticket_status,
-            reservation_status=store.reservation_status,
+            store_status=(store.store_status or "UNKNOWN").upper(),
             online_open=1 if store.online_open else 0,
-            wait_time_counter=store.wait_time_counter,
-            wait_time_cap=store.wait_time_cap,
+            wait_minutes=_non_negative(store.wait_minutes),
+            group_queues_count=_non_negative(store.group_queues_count),
             display_called_no=called_no,
-            group_queues_json=gq_json,
             dq_source=dq_source,
-            api_profile_version=api_profile_version,
         )

@@ -1,14 +1,20 @@
-"""新 Turso 库 schema（DDL）。
+"""Turso 库 schema（v2，精简版）。
 
-设计原则：压力 + 叫号同表分层（queue_snapshots），用 dq_source + display_called_no IS NULL
-区分"没取叫号"(NULL) vs "取了但当前无堂食叫号"(0)。表名/列名兼容现有 Cloudflare Worker
-和 Go 客户端（store_dimension/store_latest/store_bucket_rollups + called_no_*），桌面端零改动。
+只存一份事实表：每店每半小时一条公开状态（queue_records），与桌面端内置历史包、
+data 分支公开数据同一粒度和语义。规律（P50/P80 等）由读取方按需计算，库里不再存聚合表。
+
+- slot：门店时区（UTC+8）半小时起点，'YYYY-MM-DDTHH:MM'。同一半小时内后采到的一帧覆盖前一帧。
+- 缺失或未知一律 NULL，不写 0 冒充：wait_minutes 为接口原值（读取方把超过 180 分钟的
+  官方封顶外数值当作未知），display_called_no 只存大于 0 的堂食叫号。
+- 日期类型（工作日/周末/节假日）不入库，读取时由 holiday_calendar + 周末窗口规则推出。
 """
 from __future__ import annotations
 
 from typing import List
 
-# 按顺序执行。CREATE INDEX 跟在对应表后面。
+SCHEMA_VERSION = 2
+
+# 按顺序执行，全部幂等。
 SCHEMA_STATEMENTS: List[str] = [
     # 1. 门店维度
     """
@@ -23,100 +29,34 @@ SCHEMA_STATEMENTS: List[str] = [
       is_active          INTEGER NOT NULL DEFAULT 1
     )
     """,
-    # 2. 每店最新一帧（worker 查它做实时总览；叫号列兼容 worker 两段式查询）
+    # 2. 每店最新一帧（实时总览）
     """
     CREATE TABLE IF NOT EXISTS store_latest (
       store_id           INTEGER PRIMARY KEY,
       collected_at       TEXT NOT NULL,
-      name TEXT, city TEXT, area TEXT,
-      wait_minutes       INTEGER NOT NULL DEFAULT 0,
-      group_queues_count INTEGER NOT NULL DEFAULT 0,
-      store_status TEXT, net_ticket_status TEXT, reservation_status TEXT,
-      online_open        INTEGER NOT NULL DEFAULT 0,
-      wait_time_counter  INTEGER, wait_time_cap INTEGER,
-      display_called_no  INTEGER,
-      group_queues_json  TEXT,
-      updated_at         TEXT NOT NULL
+      store_status       TEXT NOT NULL,
+      net_ticket_status  TEXT,
+      online_open        INTEGER,
+      wait_minutes       INTEGER,
+      group_queues_count INTEGER,
+      display_called_no  INTEGER
     )
     """,
-    # 3. 原始逐帧快照（压力+叫号同表，聚合源）
+    # 3. 半小时公开状态（唯一事实表）。slot 在前：按时间追加写入、按时间范围读取都走主键。
     """
-    CREATE TABLE IF NOT EXISTS queue_snapshots (
-      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    CREATE TABLE IF NOT EXISTS queue_records (
+      slot               TEXT NOT NULL,
+      store_id           INTEGER NOT NULL,
       collected_at       TEXT NOT NULL,
-      store_id           INTEGER NOT NULL,
-      wait_minutes       INTEGER NOT NULL DEFAULT 0,
-      group_queues_count INTEGER NOT NULL DEFAULT 0,
-      store_status TEXT, net_ticket_status TEXT, reservation_status TEXT,
-      online_open        INTEGER NOT NULL DEFAULT 0,
-      wait_time_counter  INTEGER, wait_time_cap INTEGER,
+      store_status       TEXT NOT NULL,
+      online_open        INTEGER,
+      wait_minutes       INTEGER,
+      group_queues_count INTEGER,
       display_called_no  INTEGER,
-      group_queues_json  TEXT,
-      dq_source          TEXT NOT NULL,
-      api_profile_version TEXT,
-      dq_anomaly         INTEGER NOT NULL DEFAULT 0
-    )
+      PRIMARY KEY (slot, store_id)
+    ) WITHOUT ROWID
     """,
-    "CREATE INDEX IF NOT EXISTS idx_snap_store_time ON queue_snapshots(store_id, collected_at)",
-    "CREATE INDEX IF NOT EXISTS idx_snap_collected  ON queue_snapshots(collected_at)",
-    # 幂等去重：同 collected_at+store_id+dq_source 唯一，让 migrate 可安全重跑（INSERT OR IGNORE 跳过已存在）
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_snap_dedup ON queue_snapshots(collected_at, store_id, dq_source)",
-    # 4. 时段聚合（worker 查它画热力图/趋势/到店建议；含叫号三档）
-    """
-    CREATE TABLE IF NOT EXISTS store_bucket_rollups (
-      store_id           INTEGER NOT NULL,
-      date_type          TEXT NOT NULL,
-      weekday            INTEGER NOT NULL,
-      time_bucket        TEXT NOT NULL,
-      sample_count       INTEGER NOT NULL DEFAULT 0,
-      open_rate          REAL, online_open_rate REAL, busy_rate REAL,
-      wait_typical_minutes REAL,
-      wait_safe_minutes  REAL,
-      wait_max_minutes   INTEGER,
-      queue_groups_typical REAL,
-      queue_groups_safe  REAL,
-      called_sample_count INTEGER NOT NULL DEFAULT 0,
-      called_no_slow     REAL,
-      called_no_typical  REAL,
-      called_no_fast     REAL,
-      dq_anomaly_rate    REAL,
-      confidence         TEXT,
-      updated_at         TEXT NOT NULL,
-      PRIMARY KEY (store_id, date_type, weekday, time_bucket)
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_rollup_store ON store_bucket_rollups(store_id)",
-    # 5. 按天细分 rollup
-    """
-    CREATE TABLE IF NOT EXISTS daily_store_bucket_rollups (
-      snapshot_date      TEXT NOT NULL,
-      store_id           INTEGER NOT NULL,
-      date_type TEXT, weekday INTEGER, time_bucket TEXT,
-      sample_count INTEGER, open_count INTEGER, online_open_count INTEGER, busy_count INTEGER,
-      open_rate REAL, online_open_rate REAL, busy_rate REAL,
-      wait_typical_minutes REAL, wait_safe_minutes REAL, wait_max_minutes INTEGER,
-      queue_groups_typical REAL, queue_groups_safe REAL,
-      called_sample_count INTEGER, called_no_slow REAL, called_no_typical REAL, called_no_fast REAL,
-      confidence TEXT, updated_at TEXT NOT NULL,
-      PRIMARY KEY (snapshot_date, store_id, time_bucket)
-    )
-    """,
-    # 6. 叫号间隔/吞吐率聚合（预测辅助）
-    """
-    CREATE TABLE IF NOT EXISTS called_intervals_rollups (
-      store_id           INTEGER NOT NULL,
-      date_type          TEXT NOT NULL,
-      time_bucket        TEXT NOT NULL,
-      pair_count         INTEGER NOT NULL,
-      interval_typical_seconds REAL,
-      delta_typical      REAL,
-      throughput_per_hour REAL,
-      capacity_utilization REAL,
-      updated_at         TEXT NOT NULL,
-      PRIMARY KEY (store_id, date_type, time_bucket)
-    )
-    """,
-    # 7. 节假日日历
+    # 4. 节假日日历（holiday / workday 调休）
     """
     CREATE TABLE IF NOT EXISTS holiday_calendar (
       date_key           TEXT PRIMARY KEY,
@@ -125,7 +65,7 @@ SCHEMA_STATEMENTS: List[str] = [
       region             TEXT
     )
     """,
-    # 8. 采集任务日志
+    # 5. 采集与维护日志（只保留最近 30 天）
     """
     CREATE TABLE IF NOT EXISTS collector_runs (
       run_id             TEXT PRIMARY KEY,
@@ -134,15 +74,13 @@ SCHEMA_STATEMENTS: List[str] = [
       ok INTEGER, error_message TEXT, api_profile_version TEXT
     )
     """,
-    # 9. 归档日志
-    """
-    CREATE TABLE IF NOT EXISTS archive_runs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      archive_date TEXT, archive_path TEXT,
-      snapshots INTEGER, rollups_written INTEGER, global_rollups INTEGER,
-      raw_deleted INTEGER, raw_remaining INTEGER, retention_days INTEGER,
-      prune_before TEXT, ok INTEGER, error_message TEXT,
-      created_at TEXT, updated_at TEXT
-    )
-    """,
+]
+
+# v1 遗留表：原始逐帧快照、各类聚合与归档日志。由 migrate-v2 迁移后删除。
+LEGACY_TABLES = [
+    "queue_snapshots",
+    "store_bucket_rollups",
+    "daily_store_bucket_rollups",
+    "called_intervals_rollups",
+    "archive_runs",
 ]

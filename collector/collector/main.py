@@ -4,10 +4,9 @@
   python -m collector.main init-schema        建全部表
   python -m collector.main bootstrap          冷启动：从 stores? 拉全量写 store_dimension
   python -m collector.main run-once           跑一轮采集（stores + 每店 getStoreById）
-  python -m collector.main migrate-old        从旧库导入压力历史（叫号 NULL）
   python -m collector.main seed-holidays      初始化节假日日历
-  python -m collector.main aggregate-now      立即跑一次聚合（产出 rollups）
-  python -m collector.main run                常驻：内置循环，每 15min 采集 + 定时聚合/归档
+  python -m collector.main migrate-v2         v1 原始快照/聚合表 → queue_records（加 --drop 删除旧表）
+  python -m collector.main run                常驻：内置循环，每 15min 采集 + 每日清理
 """
 from __future__ import annotations
 
@@ -83,22 +82,20 @@ def cmd_run_once(args, cfg) -> None:
     print(stats)
 
 
-def cmd_migrate_old(args, cfg) -> None:
-    from .migrate_old import migrate_old
+def cmd_migrate_v2(args, cfg) -> None:
+    from .migrate_v2 import copy_records, drop_legacy
 
-    migrate_old(cfg, limit=args.limit, dry_run=args.dry_run)
+    turso = _turso_from_cfg(cfg)
+    if args.drop:
+        log.info("✅ %s", drop_legacy(turso))
+    else:
+        log.info("✅ %s", copy_records(turso))
 
 
 def cmd_seed_holidays(args, cfg) -> None:
     from .seed_holidays import seed_holidays
 
     seed_holidays(_turso_from_cfg(cfg), year=args.year)
-
-
-def cmd_aggregate_now(args, cfg) -> None:
-    from .aggregator import aggregate_all
-
-    aggregate_all(_turso_from_cfg(cfg), days=args.days)
 
 
 def cmd_run(args, cfg) -> None:
@@ -111,9 +108,8 @@ COMMANDS = {
     "init-schema": cmd_init_schema,
     "bootstrap": cmd_bootstrap,
     "run-once": cmd_run_once,
-    "migrate-old": cmd_migrate_old,
+    "migrate-v2": cmd_migrate_v2,
     "seed-holidays": cmd_seed_holidays,
-    "aggregate-now": cmd_aggregate_now,
     "run": cmd_run,
 }
 
@@ -125,10 +121,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--stores", nargs="*", type=int, help="run-once: 只采这些店 id")
     parser.add_argument("--no-detail", action="store_true", help="run-once: 跳过 getStoreById 叫号")
-    parser.add_argument("--limit", type=int, help="migrate-old: 最多导多少行")
-    parser.add_argument("--dry-run", action="store_true", help="migrate-old: 只读不写")
+    parser.add_argument("--drop", action="store_true", help="migrate-v2: 删除 v1 遗留表并 VACUUM（先备份）")
     parser.add_argument("--year", type=int, help="seed-holidays: 年份")
-    parser.add_argument("--days", type=int, default=None, help="aggregate-now: 聚合最近 N 天")
     args = parser.parse_args(argv)
 
     _setup_logging(args.verbose)

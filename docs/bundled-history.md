@@ -27,8 +27,9 @@
 
 来源是维护者原线上数据库中的公开门店快照，不包含用户账号、手机号、票号或凭证。没有修改线上记录。
 
-- 2026-07-08 至截止时间：从 `queue_snapshots` 取同店、同日、同半小时最后一条；时间相同时优先 `store_detail`，再按原记录 ID 排序。
-- 更早的日期：使用 `daily_store_bucket_rollups` 已归档的单条半小时代表值，不把跨日聚合拆成虚构记录。
+- 2026-07-08 至截止时间：同店、同日、同半小时最后一帧（同一时刻优先单店详情）。
+- 更早的日期：旧归档里的单条半小时代表值，不把跨日聚合拆成虚构记录。
+- 2026-10-20 起数据库只保留这一粒度的 `queue_records` 表，与本包逐条一致（238,786 / 238,786）；重新导出直接读该表，见 [查询指南](turso-readonly-query-guide.md)。
 - 旧归档过程丢失了部分零等待值。保留为 `null`，因此早期曲线可能高估等待；界面会注明，不能当作无偏的完整历史。
 - 异常标记、负数、超过接口等待上限的值也记为 `null`。只统计营业且等待值已知的记录；0 是有效值。
 - 叫号来自 `display_called_no`，即堂食 `boothQueue`、`mixedQueue`、`counterQueue` 的最大整数，不含预约队列。它不是在等桌数、叫号速度或特定桌型已轮到的号码，也不能说明更小的号都已入座。早期逐日表只有 `called_sample_count = 1` 才可作为原始代表值，禁止对跨日分位数再求分位数。
@@ -64,7 +65,7 @@ node scripts/export-history-bundle.mjs --config /absolute/path/read-only-config.
 
 配置字段为 `database_url`、`auth_token`，也支持 `SUSHIRO_HISTORY_DATABASE_URL`、`SUSHIRO_HISTORY_DATABASE_TOKEN` 环境变量。不把 token 放进命令行、代码、包或日志，不将含凭证的配置提交到仓库。
 
-导出只执行预设的 SELECT 查询，先固定原始记录的最大 ID 和截止时间，分周读取、校验、压缩。运行前应确认源表没有并发历史重写；它不是跨多次 HTTP 请求的数据库事务快照。脚本输出目录默认为 `internal/app/data`，可以用 `--out` 指定临时目录先核对。
+导出只执行预设的 SELECT 查询，先固定最后一个半小时槽和截止时间，按周读取 `queue_records`、校验、压缩。运行前应确认源表没有并发历史重写；它不是跨多次 HTTP 请求的数据库事务快照。脚本输出目录默认为 `internal/app/data`，可以用 `--out` 指定临时目录先核对。
 
 替换包时一起更新清单和本页覆盖说明，再运行：
 
