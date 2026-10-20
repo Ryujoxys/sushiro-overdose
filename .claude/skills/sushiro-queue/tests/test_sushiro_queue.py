@@ -117,6 +117,50 @@ class PlanTests(unittest.TestCase):
         self.assertIsNone(sq.build_eta(pat, 5000)["slow"])
 
 
+class AnchoredEtaTests(unittest.TestCase):
+    def test_speed_profile_uses_consecutive_half_hours_of_the_same_day_kind(self):
+        rows = [row("2026-09-03T18:00:00+08:00", called=100), row("2026-09-03T18:30:00+08:00", called=160),
+                row("2026-09-03T19:00:00+08:00", called=150),  # number went down: ignored
+                row("2026-09-04T18:00:00+08:00", called=100, date_type="weekend"), row("2026-09-04T18:30:00+08:00", called=400, date_type="weekend")]
+        p = sq.speed_profile(rows, "2026-10-22", {})  # a Thursday
+        self.assertEqual("weekday", p["kind"])
+        # Thursday 18:00 has one day (2/min); with fewer than 3 days it borrows the Friday value (10/min).
+        self.assertEqual(2, p["buckets"]["18:00"]["days"])
+        self.assertNotIn("18:30", p["buckets"])
+
+    def test_eta_integrates_speed_from_the_typed_number(self):
+        profile = {"buckets": {"18:00": {"mean": 2.0, "p20": 1.0, "p80": 4.0}, "18:30": {"mean": 1.0, "p20": 0.5, "p80": 2.0}}, "overall": {"mean": 1.0, "p20": 0.5, "p80": 1.0}}
+        e = sq.eta_from_called(profile, 160, 100, "18:00")
+        self.assertEqual(("18:15", "18:30", "19:30"), (e["fast"], e["typical"], e["slow"]))
+        self.assertTrue(sq.eta_from_called(profile, 90, 100, "18:00")["already"])
+        self.assertIsNone(sq.eta_from_called({"buckets": {}, "overall": None}, 160, 100, "18:00")["typical"])
+
+    def test_backtest_on_bundled_history_one_hour_ahead(self):
+        src = sq.Source(base="/nonexistent")
+        errors = []
+        for sid in (1, 2, 3, 3004, 3006):
+            rows = src.daily(sid)
+            train = [r for r in rows if r["collected_at"][:10] < "2026-08-15"]
+            test = [r for r in rows if r["collected_at"][:10] >= "2026-08-15" and r["store_status"] == "OPEN" and r["display_called_no"] is not None]
+            days = {}
+            for r in test:
+                days.setdefault(r["collected_at"][:10], []).append(r)
+            for d, items in days.items():
+                prof = sq.speed_profile(train, d, {})
+                items.sort(key=lambda r: r["collected_at"])
+                for i, a in enumerate(items):
+                    ta = sq.datetime.fromisoformat(a["collected_at"])
+                    for b in items[i + 1:]:
+                        tb = sq.datetime.fromisoformat(b["collected_at"])
+                        if 55 <= (tb - ta).total_seconds() / 60 <= 65 and b["display_called_no"] > a["display_called_no"]:
+                            e = sq.eta_from_called(prof, b["display_called_no"], a["display_called_no"], a["collected_at"][11:16])
+                            if e["typical"]:
+                                errors.append(abs(sq.minutes_of(e["typical"]) - (tb.hour * 60 + tb.minute)))
+                            break
+        self.assertGreater(len(errors), 200)
+        self.assertLessEqual(sum(errors) / len(errors), 25)
+
+
 class SourceAndCliTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

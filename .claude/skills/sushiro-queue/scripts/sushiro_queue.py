@@ -312,6 +312,69 @@ def build_eta(pattern: Dict[str, Dict[str, Any]], ticket: int, after: str = "00:
     return out
 
 
+def trimmed_mean(values: List[float], cut: float = 0.1) -> Optional[float]:
+    if not values:
+        return None
+    s = sorted(values)
+    k = int(len(s) * cut)
+    core = s[k:len(s) - k] or s
+    return sum(core) / len(core)
+
+
+def speed_profile(rows: List[Dict[str, Any]], day: str, calendar: Dict[str, str]) -> Dict[str, Any]:
+    """这家店同类整天里，每个半小时每分钟叫多少个号（相邻两个半小时代表值之差）。
+    返回 {"buckets": {HH:MM: {mean, p20, p80, days}}, "overall": {...}}；p20 用于“慢”，p80 用于“快”。"""
+    overrides = {r["collected_at"][:10]: r["date_type"] for r in rows if r["date_type"] in ("holiday", "workday")}
+    cal = {**overrides, **calendar}
+    kind = day_kind(day, calendar)
+    by_day: Dict[str, list] = {}
+    for r in rows:
+        if r["store_status"] == "OPEN" and r["display_called_no"] is not None:
+            by_day.setdefault(r["collected_at"][:10], []).append(r)
+    same, other = {}, {}
+    for d, items in by_day.items():
+        items.sort(key=lambda r: r["collected_at"])
+        target = same if day_kind(d, cal) == kind else other
+        for a, b in zip(items, items[1:]):
+            minutes = (datetime.fromisoformat(b["collected_at"]) - datetime.fromisoformat(a["collected_at"])).total_seconds() / 60
+            delta = b["display_called_no"] - a["display_called_no"]
+            if 20 <= minutes <= 40 and delta >= 0:
+                target.setdefault(half_hour(a["collected_at"]), []).append(delta / minutes)
+
+    def summarize(values):
+        return {"mean": trimmed_mean(values), "p20": quantile(values, .2), "p80": quantile(values, .8), "days": len(values)}
+    buckets = {}
+    for t in sorted(set(same) | set(other)):
+        values = same.get(t, [])
+        if len(values) < FEW_DAYS:  # 同类日子太少时并入其他日子
+            values = values + other.get(t, [])
+        if values:
+            buckets[t] = summarize(values)
+    every = [v for d in (same, other) for vs in d.values() for v in vs]
+    return {"kind": kind, "buckets": buckets, "overall": summarize(every) if every else None}
+
+
+def eta_from_called(profile: Dict[str, Any], ticket: int, called: int, called_at: str) -> Dict[str, Any]:
+    """从“现在叫到 called 号”起按以往叫号速度逐分钟往后推，估计 ticket 号几点叫到。
+    快 / 一般 / 慢 分别用该时段速度的 P80 / 截尾均值 / P20；营业结束（23:00）前叫不到记为 None。"""
+    out = {"ticket": ticket, "called": called, "called_at": called_at, "fast": None, "typical": None, "slow": None}
+    if ticket <= called:
+        out.update(fast=called_at, typical=called_at, slow=called_at, already=True)
+        return out
+    start = minutes_of(called_at)
+    overall = profile.get("overall") or {}
+    for key, field in (("fast", "p80"), ("typical", "mean"), ("slow", "p20")):
+        n, t = float(called), start
+        while t < 23 * 60:
+            b = profile["buckets"].get(clock(t - t % 30)) or overall
+            n += max(0.0, b.get(field) or 0.0)
+            t += 1
+            if n >= ticket:
+                out[key] = clock(t)
+                break
+    return out
+
+
 # ---------- 输出 ----------
 
 def fmt_num(v, step: int = 1) -> str:
@@ -449,7 +512,8 @@ def cmd_plan(src: Source, args) -> None:
 def cmd_eta(src: Source, args) -> None:
     meta, store = src.meta(), find_store(src, args.store)
     day = resolve_day(meta, args.date)
-    pat = day_patterns(src.daily(store["id"]), day, meta.get("calendar") or {})
+    rows = src.daily(store["id"])
+    pat = day_patterns(rows, day, meta.get("calendar") or {})
     eta = build_eta(pat, args.ticket, args.after)
     def say(v):
         if not v:
@@ -465,10 +529,25 @@ def cmd_eta(src: Source, args) -> None:
         if left > 0 and live.get("rate_per_min"):
             line += f"，按本机均速约 {round(left / live['rate_per_min'])} 分钟"
         lines.append(line + "。")
+    called, called_at = args.called, args.called_at
+    if called is None and live and live.get("called_no"):
+        called, called_at = live["called_no"], (live.get("observed_at") or "")[11:16] or None
+    anchored = None
+    if called is not None:
+        called_at = called_at or now_cst().strftime("%H:%M")
+        profile = speed_profile(rows, day, meta.get("calendar") or {})
+        anchored = eta_from_called(profile, args.ticket, called, called_at)
+        if anchored.get("already"):
+            lines.insert(1, f"{called_at} 已经叫到 {called} 号，{args.ticket} 号已经过了。")
+        else:
+            span = lambda v: v or "营业结束前叫不到"
+            lines.insert(1, f"按 {called_at} 叫到 {called} 号、这家店以往的叫号速度推算：一般 {span(anchored['typical'])}，"
+                            f"快的话 {span(anchored['fast'])}，慢的话 {span(anchored['slow'])}。")
+            lines.insert(2, "（以上按当前号码推算，通常比下面只看历史的时间准；下面是不知道当前号码时的历史参考）")
     lines.append(f"只和{DAY_KIND_LABEL[day_kind(day, meta.get('calendar') or {})]}比。叫号是号码不是人数，会因桌型、过号、批量叫号跳动；只能给区间。")
     notes = freshness(src, now_cst())
     lines += notes
-    emit(args, {"store": store, "date": day, "eta": eta, "live": live, "notes": notes}, lines)
+    emit(args, {"store": store, "date": day, "eta": eta, "anchored": anchored, "live": live, "notes": notes}, lines)
 
 
 def main(argv=None) -> int:
@@ -487,6 +566,7 @@ def main(argv=None) -> int:
     s.add_argument("--travel", type=int, default=0); s.add_argument("--date", type=date_arg); s.add_argument("--no-live", action="store_true")
     s = sub.add_parser("eta", help="手里的号大概几点叫到"); s.add_argument("store"); s.add_argument("--ticket", type=int, required=True)
     s.add_argument("--date", type=date_arg); s.add_argument("--after", type=hhmm_arg, default="00:00", help="只看这个时间之后"); s.add_argument("--no-live", action="store_true")
+    s.add_argument("--called", type=int, help="小程序里现在叫到几号（填了就按以往叫号速度推算）"); s.add_argument("--called-at", type=hhmm_arg, help="看到这个号码的时间，默认现在")
     args = p.parse_args(argv)
     try:
         {"status": cmd_status, "stores": cmd_stores, "pattern": cmd_pattern, "day": cmd_day,
