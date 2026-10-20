@@ -455,7 +455,8 @@ func buildQueueDashboardLatestRows(query QueueDashboardQuery, baseline QueueBase
 			continue
 		}
 		at, ok := parseRFC3339Local(queueObservationCollectedAt(observation))
-		if !ok {
+		if _, known := queueKnownWait(observation); !ok || !known {
+			// 手动记一笔的等待未知，不当作门店排队状态。
 			continue
 		}
 		snapshot := queueDashboardSnapshot{
@@ -1264,7 +1265,8 @@ func buildQueueDashboardLocalTrend(query QueueDashboardQuery, baselineRecords []
 			continue
 		}
 		at, ok := parseRFC3339Local(queueObservationCollectedAt(observation))
-		if !ok {
+		if _, known := queueKnownWait(observation); !ok || !known {
+			// 手动记一笔的等待未知，不进排队压力趋势。
 			continue
 		}
 		addSnapshot(queueDashboardSnapshot{

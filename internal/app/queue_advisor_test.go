@@ -61,7 +61,8 @@ func TestQueuePickupPlanUsesLiveWaitForCurrentPickup(t *testing.T) {
 	}
 }
 
-func TestQueuePickupPlanDoesNotUseHistoryWhenCurrentLiveWaitUnavailable(t *testing.T) {
+// 实时拿不到时，“现在取号”按以往同一时段的等待估计，并说明不是实时。
+func TestQueuePickupPlanFallsBackToHistoryWhenCurrentLiveWaitUnavailable(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -75,11 +76,14 @@ func TestQueuePickupPlanDoesNotUseHistoryWhenCurrentLiveWaitUnavailable(t *testi
 	})
 
 	got := buildQueuePickupPlan(context.Background(), "3006", "12:10", now)
-	if got.WaitMinutesRange != nil || got.MealRange != nil {
-		t.Fatalf("current pickup with unavailable live wait must not fall back to historical time, got %+v", got)
+	if got.WaitMinutesRange == nil || got.MealRange == nil || got.WaitMinutesRange.Low < 100 {
+		t.Fatalf("current pickup without live wait should use the historical wait, got %+v", got)
 	}
-	if !strings.Contains(got.Message, "当前") || !strings.Contains(got.Message, "取号") {
-		t.Fatalf("message should explain current pickup is unavailable, got %q", got.Message)
+	if got.Basis == queuePlanLiveBasis || got.Source == "live" {
+		t.Fatalf("history fallback must not be labelled as live, got %+v", got)
+	}
+	if !strings.Contains(got.Message, "实时") || strings.Contains(got.Message, "未开放线上取号") {
+		t.Fatalf("message should say live wait is unavailable without guessing why, got %q", got.Message)
 	}
 }
 

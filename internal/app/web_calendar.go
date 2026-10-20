@@ -75,8 +75,8 @@ func handleStores(w http.ResponseWriter, r *http.Request) {
 	}
 	client := getWebClient()
 	reg := GetStoreRegistry()
-	publicClient := NewQueueLiveClient()
 	stores := make([]map[string]string, 0)
+	offline := false
 
 	for _, id := range ws.StoreIDs {
 		name := id
@@ -88,9 +88,13 @@ func handleStores(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if name == id { // 凭证缺失或未命中时，用公开接口兜底解析门店名
-			if s, err := publicClient.GetStore(r.Context(), id); err == nil && s.Name != "" {
+			if s, err := fetchQueueLiveStore(r.Context(), id); err == nil && s.Name != "" {
 				name = s.Name
 				address = s.Address
+			} else if s, ok := offlineStoreByID(id); ok {
+				// 实时也读不到时用离线目录（内置历史 + 本机记录）里的店名。
+				name = s.Name
+				offline = true
 			}
 		}
 		stores = append(stores, map[string]string{
@@ -99,6 +103,10 @@ func handleStores(w http.ResponseWriter, r *http.Request) {
 			"nickname": reg.DisplayName(id, name),
 			"address":  address,
 		})
+	}
+	if offline {
+		// 响应仍是数组，离线兜底用响应头标明，原有调用方不受影响。
+		w.Header().Set("X-Sushiro-Offline", "1")
 	}
 	writeJSON(w, stores)
 }
