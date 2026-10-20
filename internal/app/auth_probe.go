@@ -96,9 +96,9 @@ func runAuthProbeWithClient(ctx context.Context, requestedStore string, tokens *
 	}
 
 	storeResult, storeName := probeGetStoreInfo(ctx, httpClient, settings, storeID)
-	report.Results = append(report.Results, storeResult)
+	report.Results = append(report.Results, normalizePublicProbeResult(storeResult))
 	report.Store = storeName
-	report.Results = append(report.Results, probeTimeslots(ctx, httpClient, settings, storeID))
+	report.Results = append(report.Results, normalizePublicProbeResult(probeTimeslots(ctx, httpClient, settings, storeID)))
 
 	if missing := tokens.MissingFields(true); len(missing) > 0 {
 		report.Results = append(report.Results, AuthProbeResult{
@@ -110,16 +110,25 @@ func runAuthProbeWithClient(ctx context.Context, requestedStore string, tokens *
 		report.Results = append(report.Results, probeReservations(ctx, httpClient, settings))
 	}
 
+	// 通过 = 没有失败项，且至少有一项真的验证成功；全部跳过不算通过。
 	report.OK = true
+	verified := false
 	for _, result := range report.Results {
-		if !result.OK && !result.Skipped {
+		if result.Skipped {
+			continue
+		}
+		if !result.OK {
 			report.OK = false
 			break
 		}
+		verified = true
+	}
+	if !verified {
+		report.OK = false
 	}
 	report.Advice = authProbeAdvice(report)
 	for _, result := range report.Results {
-		if result.OK && !result.Skipped && strings.Contains(result.Path, "/api_auth/") {
+		if result.OK && !result.Skipped && authProbeAccountPath(result.Path) {
 			report.Authenticated = true
 		}
 	}
@@ -223,6 +232,33 @@ func probeReservations(ctx context.Context, client *http.Client, settings Settin
 	return result
 }
 
+// authProbePublicPath 是旧接口的公开门店路径（/wechat/api/）：2026-10 起它拒绝匿名和旧 token，
+// 返回 401/403 不说明账号凭证有问题。
+func authProbePublicPath(path string) bool {
+	return strings.HasPrefix(path, "/wechat/api/")
+}
+
+// authProbeAccountPath 是需要账号凭证的路径（/wechat/api_auth/）：只有它成功才算账号验证通过。
+func authProbeAccountPath(path string) bool {
+	return strings.Contains(path, "/api_auth/")
+}
+
+// normalizePublicProbeResult 把公开门店接口的 401/403/451（旧接口不再开放的几种回法，同 friendlyPublicQueueError）
+// 记为“跳过”：不算失败，也不把账号凭证标成失效。
+func normalizePublicProbeResult(result AuthProbeResult) AuthProbeResult {
+	switch result.Status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusUnavailableForLegalReasons:
+	default:
+		return result
+	}
+	if authProbePublicPath(result.Path) {
+		result.Skipped = true
+		result.OK = false
+		result.Detail = "寿司郎旧的门店接口已不再开放，这一项不用来判断账号是否可用。"
+	}
+	return result
+}
+
 func normalizeReservationsProbeResult(result AuthProbeResult) AuthProbeResult {
 	if result.Status == http.StatusNotFound && strings.Contains(result.Path, "/ticketing/getReservations") {
 		result.Skipped = true
@@ -300,14 +336,31 @@ func authProbeAdvice(report AuthProbeReport) []string {
 			continue
 		}
 	}
+	if len(out) == 0 && !authProbeHasFailure(report) {
+		out = append(out, "这次没有能用来验证账号的接口；凭证没有被标成失效，取号时以寿司郎的实际结果为准。")
+	}
 	if len(out) == 0 {
 		out = append(out, "基础接口未全部通过，复制本结果继续排查。")
 	}
 	return UniqueNonEmptyStrings(out)
 }
 
+func authProbeHasFailure(report AuthProbeReport) bool {
+	for _, result := range report.Results {
+		if !result.OK && !result.Skipped {
+			return true
+		}
+	}
+	return false
+}
+
+// authProbeRejected 不看公开门店接口（/wechat/api/）：它的 401/403 是寿司郎换接口造成的，不代表凭证失效。
+// 其余结果（账号接口，或来源不明的结果）返回 401/403 仍按凭证被拒处理。
 func authProbeRejected(report AuthProbeReport) bool {
 	for _, result := range report.Results {
+		if authProbePublicPath(result.Path) {
+			continue
+		}
 		if result.Status == http.StatusUnauthorized || result.Status == http.StatusForbidden {
 			return true
 		}

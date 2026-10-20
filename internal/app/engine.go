@@ -91,6 +91,9 @@ type EngineState struct {
 	// Warning 是非致命提示（如 Windows QUIC 屏蔽失败可能抓不到包），不改变 status/不中断采集，
 	// 前端显示一条黄色提示。空=无。
 	Warning string `json:"warning,omitempty"`
+	// LiveConnected 表示本机已有可用的实时数据连接（例如抓包时小程序请求了新网关）。
+	// 只是状态，不含任何连接内容；与取号凭证是否抓全无关。
+	LiveConnected bool `json:"live_connected"`
 }
 
 type CaptureStatusJSON struct {
@@ -172,13 +175,21 @@ func (e *BookingEngine) beginRun(message string) (context.Context, context.Cance
 }
 
 func (e *BookingEngine) GetState() EngineState {
+	live := liveSessionConnectedNow() // 读本地文件，放在锁外
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	s := e.state
 	if e.tokens != nil && e.state.Status == EngineCapturing {
 		s.Capture = e.captureStatus()
 	}
+	s.LiveConnected = live
 	return s
+}
+
+// publishEngineSnapshot 推送一份状态快照，并补上实时数据连接状态（锁外读取）。
+func publishEngineSnapshot(snap EngineState) {
+	snap.LiveConnected = liveSessionConnectedNow()
+	bus.publish("engine", mustJSON(snap))
 }
 
 func (e *BookingEngine) captureStatus() *CaptureStatusJSON {
@@ -248,7 +259,7 @@ func (e *BookingEngine) setStage(stage CaptureStage, step, total int) {
 	e.state.StageTotal = total
 	snap := e.snapshotStateLocked()
 	e.mu.Unlock()
-	bus.publish("engine", mustJSON(snap))
+	publishEngineSnapshot(snap)
 }
 
 // setError 标记结构化错误分类（前端据此显示人话 + 出路按钮），并 publish。
@@ -258,7 +269,7 @@ func (e *BookingEngine) setError(kind ErrorKind) {
 	e.state.ErrorKind = kind
 	snap := e.snapshotStateLocked()
 	e.mu.Unlock()
-	bus.publish("engine", mustJSON(snap))
+	publishEngineSnapshot(snap)
 }
 
 // resetProgress 清空 stage/error_kind，运行开始/结束时调用，避免上次状态残留。
@@ -278,7 +289,7 @@ func (e *BookingEngine) setWarning(msg string) {
 	e.state.Warning = msg
 	snap := e.snapshotStateLocked()
 	e.mu.Unlock()
-	bus.publish("engine", mustJSON(snap))
+	publishEngineSnapshot(snap)
 }
 
 // classifyCertError 按 err 文案兜底分类证书错误（仅当平台层未回填 ErrorKind 时）。
@@ -479,7 +490,13 @@ func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64
 	e.mu.Unlock()
 
 	e.setStage(StageStartingProxy, 0, 0)
-	proxy, err := StartProxy(caCert, caKey, tokens, e.addLog)
+	// 小程序请求新网关时顺手连接实时数据（会员连接只存本机），不影响取号凭证的完成条件。
+	proxyOptions := DesktopCaptureOptions()
+	proxyOptions.OnGatewayExchange = newCaptureGatewayHandler(func(s LiveSession) {
+		e.addLog(liveCaptureConnectedMessage(s, time.Now()))
+		bus.publish("engine", mustJSON(e.GetState()))
+	})
+	proxy, err := StartProxyWithOptions(caCert, caKey, tokens, proxyOptions, e.addLog)
 	if err != nil {
 		e.setState(EngineError, "启动代理失败: "+err.Error())
 		e.setError(ErrKindProxy)
@@ -525,6 +542,7 @@ func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64
 		proxyHint += "；已使用 PAC 仅代理寿司郎域名"
 	}
 	e.addLog(proxyHint + "。请彻底关闭 PC 微信后重新打开，在寿司郎小程序浏览门店、预约页面和我的单据，不要为验证提交真实订单。")
+	e.addLog("打开任意门店页时，会顺便连接实时数据（约 1 小时有效，只在这台电脑上用来看叫号）。")
 	e.addLog("提示：如果 PC 微信小程序弹出“服务器出错/网络错误”，但本工具抓到凭证并通过基础接口自检，可以直接忽略小程序弹窗。")
 
 	ticker := time.NewTicker(1 * time.Second)

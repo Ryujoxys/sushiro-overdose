@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -307,9 +308,9 @@ func localNetTicketIsStale(record ReservationRecord, savedAt string, now time.Ti
 	return false
 }
 
-// isNoCurrentNetTicketError 判定错误是否语义上等价于「当前没有排队号」（而非网络/鉴权故障）。
-// 用途：区分「该清掉本地过号记录」与「只是请求失败要保留」。命中 404 或中英文「无号」提示即视为前者。
-// 注意最后一条 missing ticket id/number 还要叠加 null/{}/[] 才算，避免把含号错误误判。
+// isNoCurrentNetTicketError 判定能否清掉本地保存的排队号副本：查询接口 404（沿用旧行为，号码查询页不存在
+// 时本地副本也无从核对），或官方明确表示现在没有号（isDefiniteNoCurrentNetTicket）。
+// 认证失败、网络错误、看不懂的内容都不算，本地副本留到按日期过期。
 func isNoCurrentNetTicketError(err error) bool {
 	if err == nil {
 		return false
@@ -317,16 +318,124 @@ func isNoCurrentNetTicketError(err error) bool {
 	if IsHTTPStatus(err, http.StatusNotFound) {
 		return true
 	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "no ticket") ||
-		strings.Contains(text, "not issued") ||
-		strings.Contains(text, "not found") ||
-		strings.Contains(text, "no data") ||
-		strings.Contains(text, "没有排队") ||
-		strings.Contains(text, "未取号") ||
-		strings.Contains(text, "不存在") ||
-		strings.Contains(text, "missing ticket id/number") && (strings.Contains(text, "null") || strings.Contains(text, "{}") || strings.Contains(text, "[]"))
+	return isDefiniteNoCurrentNetTicket(err)
 }
+
+// netTicketStatusMissingMarker 是 internal/api 在号码查询成功、但回复里没有号码时报出的前缀，后面跟着回复内容。
+const netTicketStatusMissingMarker = "missing ticket id/number: "
+
+// netTicketStatusTicketKeys 是号码查询回复里放当前号码的字段（与 internal/api 的解析一致）。
+var netTicketStatusTicketKeys = map[string]bool{
+	"netTicket": true, "reservationTicket": true, "reservation": true,
+	"data": true, "ticket": true, "currentTicket": true, "current": true,
+}
+
+// isDefiniteNoCurrentNetTicket 只认寿司郎明确的“现在没有号”：
+//   - 查询成功，回复是空内容（null / {} / []），或只有空的号码字段（如 {"netTicket":null}）；
+//   - 或回复（含 4xx 业务错误）明确写着没有排队号。
+//
+// 认证失败（401/403）、接口不存在（404）、限流、服务器错误、网络错误和看不懂的回复都不算——
+// 这些情况下不能说“没有号”，也不能据此再取一个号。
+func isDefiniteNoCurrentNetTicket(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch status := apiErr.StatusCode; {
+		case status < 400 || status >= 500,
+			status == http.StatusUnauthorized, status == http.StatusForbidden, status == http.StatusNotFound,
+			status == http.StatusRequestTimeout, status == http.StatusTooManyRequests:
+			return false
+		}
+		return netTicketNoTicketText(apiErr.Body)
+	}
+	msg := err.Error()
+	i := strings.Index(msg, netTicketStatusMissingMarker)
+	if i < 0 {
+		return false
+	}
+	body := strings.TrimSpace(msg[i+len(netTicketStatusMissingMarker):])
+	return netTicketStatusReplyEmpty(body) || netTicketNoTicketText(body)
+}
+
+// netTicketNoTicketText 判断官方文字是否明确说现在没有排队号。
+func netTicketNoTicketText(text string) bool {
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{"no ticket", "no_ticket", "not issued", "没有排队", "暂无排队", "未取号"} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// netTicketStatusReplyEmpty 判断号码查询回复是否是空的：null、{}、[]，或所有字段都为空且至少有一个号码字段。
+// 有任何非空的其它字段（错误码、提示文字等）都不算空，按看不懂处理。
+func netTicketStatusReplyEmpty(body string) bool {
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return false
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return false
+	}
+	switch v := value.(type) {
+	case nil:
+		return true
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		if len(v) == 0 {
+			return true
+		}
+		sawTicketKey := false
+		for key, field := range v {
+			if !jsonValueEmpty(field) {
+				return false
+			}
+			sawTicketKey = sawTicketKey || netTicketStatusTicketKeys[key]
+		}
+		return sawTicketKey
+	}
+	return false
+}
+
+func jsonValueEmpty(value any) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	}
+	return false
+}
+
+// netTicketStatusFailureMessage 是查不到当前号码时给用户的话：不说“没有号”，不出现状态码。
+func netTicketStatusFailureMessage(err error) string {
+	const notNone = "这不代表你没有号，可以先在小程序里看一下。"
+	if isAuthError(err) || isCredentialRefreshLikelyError(err) {
+		return "查不到你现在的排队号：通行证可能已过期，或被手机上的登录顶掉了，请重新获取通行证。" + notNone
+	}
+	if msg := friendlyNetworkError(err); msg != "" && msg != err.Error() {
+		return "查不到你现在的排队号（" + msg + "）。" + notNone
+	}
+	return "暂时查不到你现在的排队号。" + notNone
+}
+
+// netTicketStatusUnknownBeforeTake 是取号前查不清有没有号时的拒绝说明：不提交，避免重复取号。
+const netTicketStatusUnknownBeforeTake = "查不到你现在有没有号，为避免重复取号，请在小程序里取号"
+
+// netTicketNotSubmittedCode 标出“取号请求根本没有发出”的拒绝：页面据此说明没有提交，
+// 不必当成“结果未确认”去锁住取号按钮。
+const netTicketNotSubmittedCode = "ticket_not_submitted"
 
 // localRecordIsStale 判断本地保存的记录（排队号或预约）是否已过期、该刷掉：
 //   - 排队号：沿用跨天失效（localNetTicketIsStale）；
@@ -600,10 +709,15 @@ type netTicketTakeOutcome struct {
 	status int
 	body   map[string]any
 	errMsg string
+	code   string // 机器可读的错误类别（可空），见 netTicketNotSubmittedCode
 }
 
 func (o netTicketTakeOutcome) write(w http.ResponseWriter) {
 	if o.errMsg != "" {
+		if o.code != "" {
+			writeErrorCode(w, o.status, o.code, o.errMsg)
+			return
+		}
 		writeError(w, o.status, o.errMsg)
 		return
 	}
@@ -612,12 +726,19 @@ func (o netTicketTakeOutcome) write(w http.ResponseWriter) {
 
 // takeNetTicketLocked 在持有 netTicketMu 的前提下取号。先探活：若已有一个有效排队号，
 // 直接复用（recover），不再发 create——这是并发/连点场景下不发第二张号的关键。
+// 探活失败时，只有官方明确“现在没有号”才继续提交；其余任何失败（认证、网络、服务器、看不懂的回复）
+// 都拒绝提交，请用户到小程序里取号，宁可不取也不重复取。
 func takeNetTicketLocked(ctx context.Context, client *Client, storeID string) netTicketTakeOutcome {
 	doneActivity := markMainFlowActive("taking-ticket")
 	defer doneActivity()
 	// 前置探活：官方若已发号，复用它，避免重复取号顶掉手机端会话。
-	if existing, probeErr := client.GetNetTicketStatus(ctx); probeErr == nil &&
-		reservationRecordLooksSuccessful(existing) && !reservationRecordIsReservation(existing) {
+	existing, probeErr := client.GetNetTicketStatus(ctx)
+	if probeErr != nil && !isDefiniteNoCurrentNetTicket(probeErr) {
+		noteAuthResult(probeErr) // 认证失败照常标记，其它失败不改变凭证状态
+		LogMessage(time.Now(), "Ticket not submitted: the current ticket status could not be confirmed")
+		return netTicketTakeOutcome{status: http.StatusBadGateway, errMsg: netTicketStatusUnknownBeforeTake, code: netTicketNotSubmittedCode}
+	}
+	if probeErr == nil && netTicketLooksSuccessful(existing) {
 		ticket := normalizeNetTicketRecord(existing)
 		plan := LoadNetTicketPlan()
 		plan.Enabled = false
@@ -692,13 +813,14 @@ func writeQueueTicketStatusForAuth(w http.ResponseWriter, r *http.Request, clien
 	}
 	ticket, err := client.GetNetTicketStatus(r.Context())
 	if err != nil {
-		if !IsHTTPStatus(err, http.StatusNotFound) && isNoCurrentNetTicketError(err) {
+		// 只有官方明确“现在没有号”才回“没有号”并算作凭证可用；看不懂的回复不标记健康、不说没有号。
+		if isDefiniteNoCurrentNetTicket(err) {
 			noteAuthResult(nil)
 			writeJSON(w, map[string]any{"ok": true, "ticket": nil, "plan": LoadNetTicketPlan()})
 			return
 		}
 		noteAuthResult(err)
-		writeError(w, http.StatusBadGateway, friendlyNetTicketError(err))
+		writeError(w, http.StatusBadGateway, netTicketStatusFailureMessage(err))
 		return
 	}
 	noteAuthResult(nil)

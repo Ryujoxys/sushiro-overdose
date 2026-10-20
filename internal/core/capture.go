@@ -26,14 +26,14 @@ func (t *CapturedTokens) CaptureFromRequest(req *http.Request, bodyBytes []byte)
 		t.XAppClient = v
 	}
 
-	authHeader := req.Header.Get("Authorization")
+	// 登录 token 会在抓包途中刷新（小程序重新登录、旧 token 过期），所以总是保留最新一次看到的，
+	// 不像 X-App-Code / UA 这类固定值只取第一次。
+	authHeader := strings.TrimSpace(req.Header.Get("Authorization"))
 	if authHeader != "" {
 		path := req.URL.Path
 		if strings.Contains(path, "/api_auth/") || strings.Contains(path, "createReservation") {
-			if t.ReservationAuth == "" {
-				t.ReservationAuth = authHeader
-			}
-		} else if t.QueryAuth == "" {
+			t.ReservationAuth = authHeader
+		} else {
 			t.QueryAuth = authHeader
 		}
 	}

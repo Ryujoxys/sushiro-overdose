@@ -4,11 +4,13 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type authImportRequest struct {
@@ -29,21 +31,43 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "无效的请求格式: "+err.Error())
 		return
 	}
+	// 粘贴里有发往新网关的请求时，顺手连接实时数据（会员连接只存本机，新的才写入）；
+	// 它不会成为取号凭证，见 authContextFromText。
+	liveConnected, liveProblem := connectLiveSessionFromImport(req.Text, time.Now())
 	tokens, sources, err := parseAuthImportText(req.Text)
 	if err != nil {
+		if liveConnected {
+			writeJSON(w, map[string]any{"saved": false, "live_connected": true, "message": "实时数据已连接；这段内容里没有取号凭证。"})
+			return
+		}
+		if liveProblem != "" {
+			writeError(w, http.StatusBadRequest, liveProblem)
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	finalizeImportedTokens(tokens)
 	missing := tokens.MissingFields(true)
 	resp := map[string]any{
-		"saved":   false,
-		"message": "已解析，字段尚未完整",
-		"missing": missing,
-		"capture": captureStatusForTokens(tokens),
-		"sources": sources,
+		"saved":          false,
+		"message":        "已解析，字段尚未完整",
+		"missing":        missing,
+		"capture":        captureStatusForTokens(tokens),
+		"sources":        sources,
+		"live_connected": liveConnected,
+	}
+	if liveProblem != "" {
+		resp["live_error"] = liveProblem
 	}
 	if len(missing) > 0 {
+		switch {
+		case liveConnected:
+			resp["message"] = "实时数据已连接；取号凭证还不完整"
+		case liveProblem != "":
+			// 粘的是新网关的请求却没连上：说清楚为什么，别只说“字段尚未完整”。
+			resp["message"] = liveProblem
+		}
 		writeJSON(w, resp)
 		return
 	}
@@ -95,6 +119,33 @@ func handleAuthImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// connectLiveSessionFromImport 用粘贴里发往新网关的请求建立实时数据连接。返回：这段粘贴之后实时数据是否已连接
+// （粘贴里没有可用的网关请求时为 false，什么都不写）；粘贴里有发往新网关的请求却用不了时，给用户看的原因。
+// 原因只取 ParseLiveSessionText 的固定中文提示，不含粘贴内容。
+func connectLiveSessionFromImport(text string, now time.Time) (bool, string) {
+	const prefix = "实时数据没有连上："
+	session, err := ParseLiveSessionText(text, now)
+	if err != nil {
+		// 没找到网关请求（含只有旧接口请求的粘贴）不是“没连上”，只是这段内容与实时数据无关。
+		unrelated := errors.Is(err, errLiveImportEmpty) || errors.Is(err, errLiveImportNotGateway) || errors.Is(err, errLiveImportLegacy)
+		if !unrelated && strings.Contains(strings.ToLower(text), liveGatewayHost) {
+			return false, prefix + err.Error()
+		}
+		return false, ""
+	}
+	if _, err := SaveLiveSession(session); err != nil {
+		LogMessage(now, "Saving the live session from a credential import failed: "+err.Error())
+		return false, prefix + "连接没有保存成功，请重试"
+	}
+	if queueLiveSessionProvider == nil {
+		return false, "" // 这个进程不读连接，说不出连没连上
+	}
+	if !liveSessionConnectedNow() { // 刚好到期，或这条连接已被寿司郎拒绝过
+		return false, prefix + errLiveImportExpired.Error()
+	}
+	return true, ""
+}
+
 // parseAuthImportText 对同一段文本依次跑 JSON、curl、原始头三种解析器，每种命中就往 tokens 里补字段。
 // 三者可以叠加（比如一段 curl 里既有 -H 头又有 -d body），所以不是"命中一种就停"。
 // 只要最终没识别到任何凭证字段才算失败。返回的 sources 标注命中的来源，供前端展示。
@@ -108,8 +159,11 @@ func parseAuthImportText(text string) (*CapturedTokens, []string, error) {
 	if parseAuthImportJSON(tokens, text) {
 		sources["json"] = struct{}{}
 	}
-	if parseAuthImportCurl(tokens, text) {
-		sources["curl"] = struct{}{}
+	// “复制全部为 cURL”会一次给出多条命令：逐条解析，免得网关请求的上下文和旧接口请求混在一起。
+	for _, command := range liveSplitCurlCommands(text) {
+		if parseAuthImportCurl(tokens, command) {
+			sources["curl"] = struct{}{}
+		}
 	}
 	if parseAuthImportRaw(tokens, text) {
 		sources["headers"] = struct{}{}
@@ -354,13 +408,18 @@ func parseAuthImportURL(tokens *CapturedTokens, rawURL string) {
 	}
 }
 
-// applyAuthField 把单个"字段名=值"写入 tokens。两条核心规则：
+// applyAuthField 把单个"字段名=值"写入 tokens。三条核心规则：
 //  1. 先到先得：每个字段只在为空时写入，避免后面的低质量来源覆盖前面已抓到的准确值。
 //  2. authorization 按 context 区分：context=="reservation" 写 ReservationAuth，否则写 QueryAuth——
 //     因为同一个 Authorization 头在两个接口里语义不同，靠 URL/正文推断出的 context 来分流。
+//  3. 新网关（context=="gateway"）的请求只取门店编号：会员 token 只用于实时数据，不当取号凭证，
+//     也就不会被发往旧接口主机。
 func applyAuthField(tokens *CapturedTokens, key, value, context string) {
 	value = strings.TrimSpace(trimShellToken(value))
 	if value == "" {
+		return
+	}
+	if context == importContextGateway && !isStoreField(key) {
 		return
 	}
 	normalized := normalizeAuthFieldName(key)
@@ -564,11 +623,18 @@ func splitStoreIDs(value string) []string {
 	return out
 }
 
+// importContextGateway 标记来自新网关（sapi.sushiro.com.cn）的请求：只取门店编号，不取任何凭证头。
+const importContextGateway = "gateway"
+
 // authContextFromText 从 URL 或正文片段推断这套凭证属于哪个接口上下文：
+// 含新网关主机 → "gateway"（只用于实时数据，不当取号凭证）；
 // 含 api_auth/reservation/ticketing → "reservation"（预约接口）；含 /wechat/api/ 或 query → "query"（查询接口）；
 // 否则空串（未知，applyAuthField 会按 query 兜底）。这个推断决定 Authorization 写到哪个字段。
 func authContextFromText(s string) string {
 	lower := strings.ToLower(s)
+	if strings.Contains(lower, liveGatewayHost) {
+		return importContextGateway
+	}
 	if strings.Contains(lower, "api_auth") || strings.Contains(lower, "reservation") || strings.Contains(lower, "ticketing") {
 		return "reservation"
 	}
@@ -578,13 +644,17 @@ func authContextFromText(s string) string {
 	return ""
 }
 
-// mergeImportContext 合并上下文推断：reservation 优先级最高（一旦认定预约就不再降级），
-// next 为空保持 current，否则用 next。用于把 URL、字段名等多处线索汇成一个最终 context。
+// mergeImportContext 合并上下文推断：gateway 优先级最高（新网关请求里的头一律不当取号凭证），
+// 其次 reservation（一旦认定预约就不再降级）；next 为空保持 current，否则用 next。
+// 用于把 URL、字段名等多处线索汇成一个最终 context。
 func mergeImportContext(current, next string) string {
-	if current == "reservation" || next == "" {
+	if current == importContextGateway || next == "" {
 		return current
 	}
-	return next
+	if next == importContextGateway || current != "reservation" {
+		return next
+	}
+	return current
 }
 
 var urlPattern = regexp.MustCompile(`https?://[^\s'"<>]+`)

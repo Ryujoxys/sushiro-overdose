@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Ryujoxys/sushiro-overdose/internal/proxy"
 )
 
 // Live session：用户自己的小程序会员连接（spec 018）。
@@ -29,8 +31,9 @@ import (
 const (
 	liveSessionFile = "live_session.json"
 
-	liveGatewayHost   = "sapi.sushiro.com.cn"
-	liveLegacyHost    = "crm-cn-prd.sushiro.com.cn"
+	// 主机名与抓包代理共用一处定义（internal/proxy），避免两边不一致。
+	liveGatewayHost   = proxy.SushiroGatewayHost
+	liveLegacyHost    = proxy.SushiroHost
 	liveGatewayMarker = "/gateway/"
 
 	liveSessionExpiryMargin   = 30 * time.Second // 到期前 30 秒就不再使用，避免请求途中过期

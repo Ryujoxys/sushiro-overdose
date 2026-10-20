@@ -31,12 +31,22 @@ func handleProxyPAC(w http.ResponseWriter, r *http.Request) {
   if (host.charAt(0) !== "[" && host.indexOf(":") >= 0) {
     host = host.split(":")[0];
   }
-  if (host === "%s") {
+  if (%s) {
     return "PROXY 127.0.0.1:%d";
   }
   return "DIRECT";
 }
-`, SushiroHost, port)
+`, proxyPACHostCondition(), port)
+}
+
+// proxyPACHostCondition 只让会被解密的两个精确主机走本机代理，其余（含 sushiro.com.cn 其它子域）直连。
+func proxyPACHostCondition() string {
+	hosts := SushiroInterceptHosts()
+	parts := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		parts = append(parts, strconv.Quote(host))
+	}
+	return "host === " + strings.Join(parts, " || host === ")
 }
 
 func logProxyPACRequest(r *http.Request, port int) {

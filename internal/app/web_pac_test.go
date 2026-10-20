@@ -17,8 +17,11 @@ func TestHandleProxyPACOnlyProxiesSushiroHost(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, `host === "crm-cn-prd.sushiro.com.cn"`) {
-		t.Fatalf("PAC does not match sushiro host: %s", body)
+	if !strings.Contains(body, `if (host === "crm-cn-prd.sushiro.com.cn" || host === "sapi.sushiro.com.cn") {`) {
+		t.Fatalf("PAC does not match exactly the two sushiro API hosts: %s", body)
+	}
+	if strings.Contains(body, "dnsDomainIs") || strings.Contains(body, "shExpMatch") || strings.Contains(body, `".sushiro.com.cn"`) {
+		t.Fatalf("PAC must not proxy the whole sushiro domain: %s", body)
 	}
 	if !strings.Contains(body, `host = host.split(":")[0]`) {
 		t.Fatalf("PAC does not normalize hosts that include a port: %s", body)
