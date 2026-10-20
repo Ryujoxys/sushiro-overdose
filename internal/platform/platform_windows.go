@@ -146,25 +146,27 @@ func clearSystemProxy() error {
 	return nil
 }
 
-// blockSushiroQUIC 屏蔽到寿司郎域名的出站 QUIC(UDP 443)，逼微信的 Chromium/XWeb
-// 内核回退 TCP，从而能被只处理 TCP 的 MITM 代理解密。需要管理员权限；失败仅记录不阻断。
+// blockSushiroQUIC 屏蔽到会被解密的寿司郎主机（旧接口 + 新网关，见 SushiroInterceptHosts）的出站
+// QUIC(UDP 443)，逼微信的 Chromium/XWeb 内核回退 TCP，从而能被只处理 TCP 的 MITM 代理解密。
+// 需要管理员权限；失败仅记录不阻断。
 func blockSushiroQUIC() {
 	_ = removeQUICBlockRule()
+	hosts := strings.Join(SushiroInterceptHosts(), ", ")
 	ips := resolveSushiroIPs()
 	if len(ips) == 0 {
-		LogMessage(time.Now(), "QUIC 屏蔽跳过: 无法解析 "+SushiroHost+" 的 IP")
+		LogMessage(time.Now(), "QUIC block skipped: could not resolve "+hosts)
 		return
 	}
 	if err := runHiddenWindowsCommand("netsh", "advfirewall", "firewall", "add", "rule",
 		"name="+quicBlockRuleName, "dir=out", "action=block",
 		"protocol=UDP", "remoteport=443", "remoteip="+strings.Join(ips, ",")); err != nil {
-		LogMessage(time.Now(), "QUIC 屏蔽设置失败(可能需管理员权限): "+err.Error())
+		LogMessage(time.Now(), "QUIC block failed (administrator rights may be required): "+err.Error())
 		// 记录为非致命提示：QUIC 没屏蔽，微信可能走 UDP 绕过代理导致抓不到包。
 		// engine 读到后推给前端，建议用户重启微信再试。
 		RecordProxyWarning("Windows 微信 QUIC 屏蔽失败（可能需管理员权限），微信可能走旁路导致抓不到包；建议重启微信再试，或改用手机抓包。")
 		return
 	}
-	LogMessage(time.Now(), fmt.Sprintf("已屏蔽到 %s 的出站 QUIC(UDP 443)，强制微信走 TCP 以便抓包", SushiroHost))
+	LogMessage(time.Now(), fmt.Sprintf("Blocked outbound QUIC (UDP 443) to %s so WeChat falls back to TCP for capture", hosts))
 }
 
 func unblockSushiroQUIC() {
@@ -177,18 +179,25 @@ func removeQUICBlockRule() error {
 	return runHiddenWindowsCommand("netsh", "advfirewall", "firewall", "delete", "rule", "name="+quicBlockRuleName)
 }
 
+// resolveSushiroIPs 解析会被解密的两个精确主机的地址（去重）；某个主机解析失败时仍返回另一个的地址。
 func resolveSushiroIPs() []string {
-	addrs, err := net.LookupIP(SushiroHost)
-	if err != nil {
-		return nil
-	}
+	return resolveHostIPs(SushiroInterceptHosts(), net.LookupIP)
+}
+
+func resolveHostIPs(hosts []string, lookup func(string) ([]net.IP, error)) []string {
 	seen := map[string]bool{}
-	out := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		s := a.String()
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
+	out := []string{}
+	for _, host := range hosts {
+		addrs, err := lookup(host)
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			s := a.String()
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
 		}
 	}
 	return out

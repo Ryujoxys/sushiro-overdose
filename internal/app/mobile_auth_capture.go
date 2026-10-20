@@ -107,7 +107,12 @@ func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
 	}
 
 	tokens := NewCapturedTokens()
-	proxy, err := StartMobileCaptureProxy(caCert, caKey, tokens, m.addLog)
+	// 手机经代理打开小程序门店页时顺手连接实时数据；取号凭证的完成条件不变。
+	proxyOptions := MobileCaptureOptions()
+	proxyOptions.OnGatewayExchange = newCaptureGatewayHandler(func(s LiveSession) {
+		m.addLog(liveCaptureConnectedMessage(s, time.Now()))
+	})
+	proxy, err := StartProxyWithOptions(caCert, caKey, tokens, proxyOptions, m.addLog)
 	if err != nil {
 		doneActivity()
 		return nil, err
@@ -339,6 +344,8 @@ func (m *mobileAuthCaptureManager) statusLocked() map[string]any {
 		"ttl_secs":   int(mobileAuthCaptureTTL.Seconds()),
 		"ca_path":    filepath.Join(CertDirPath(), "ca.crt"),
 		"logs":       append([]LogEntry(nil), m.logs...),
+		// 实时数据是否已连接（抓到新网关请求即算）；只是状态，不含连接内容，与取号凭证是否抓全无关。
+		"live_connected": liveSessionConnectedNow(),
 	}
 	if m.tokens != nil {
 		out["capture"] = captureStatusForTokens(m.tokens)
@@ -441,7 +448,7 @@ ul{padding-left:20px}
 <li>回「Wi-Fi」→ 当前网络 → 「配置代理」选「手动」，服务器/端口填下面任一：
 <ul>` + hostList + `</ul></li>
 <li>彻底关闭再打开手机微信，进寿司郎小程序。</li>
-<li>点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。</li>
+<li>点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。打开门店页时，电脑会顺便连上实时数据（约 1 小时有效）。</li>
 <li>电脑提示捕获完成后，立刻关闭手机 Wi-Fi 代理（改回「关闭」）。</li>
 </ol>
 <div class="ok">安装并信任证书后，继续设置代理并打开小程序。电脑收到凭证后会提示关闭手机代理，再点电脑上的「验证连接」。</div>
@@ -451,10 +458,10 @@ ul{padding-left:20px}
 <div class="warn">安卓微信可能不信任用户证书，安装证书不代表能够读取小程序请求。已有可用抓包工具时，可按下面方式手动导入；无法读取请求请改用电脑微信。</div>
 <ol class="steps">
 <li>回电脑的连接窗口，点「停止连接」，再选择「安卓手机（手动导入）」。无需设置手机 Wi-Fi 代理。</li>
-<li>在已配置可用的抓包工具里过滤 <code>crm-cn-prd.sushiro.com.cn</code>。</li>
+<li>在已配置可用的抓包工具里过滤 <code>sapi.sushiro.com.cn</code>（门店和叫号）和 <code>crm-cn-prd.sushiro.com.cn</code>（取号）。</li>
 <li>打开微信进寿司郎小程序，点一次「门店」，再打开「我的预约 / 我的排队」查询页（无需提交订单）。</li>
 <li>找到查询请求，导出为 cURL 或复制请求头。不要提交真实订单。</li>
-<li>将内容传到自己的电脑，粘进「已有抓包凭证？」并点「导入凭证」，随后点「验证连接」。这些内容含登录凭证，不要发给其他人。</li>
+<li>将内容传到自己的电脑：发往 <code>sapi.sushiro.com.cn</code> 的门店请求粘进设置里「实时数据」的「粘贴抓包」，可看实时叫号（约 1 小时有效）；发往 <code>crm-cn-prd.sushiro.com.cn</code> 的请求粘进「已有抓包凭证？」并点「导入凭证」，随后点「验证连接」。这些内容含登录信息，不要发给其他人。</li>
 </ol>
 <div class="ok">安卓这条路不用设 Wi-Fi 代理、不用回这页——抓完直接回电脑粘贴。</div>
 </div>

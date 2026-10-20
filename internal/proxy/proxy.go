@@ -7,6 +7,9 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 import (
 	"bufio"
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/rsa"
 	"crypto/tls"
@@ -25,8 +28,27 @@ import (
 const ProxyPort = 8080
 const ProxyPortSearchLimit = 100
 
-// SushiroHost 是唯一会被 MITM 解密的寿司郎 API 主机。白名单与证书签发都以此为准。
-const SushiroHost = "crm-cn-prd.sushiro.com.cn"
+// 会被 MITM 解密的寿司郎主机只有下面两个（精确匹配，不是整个 sushiro.com.cn 域）。
+// 解密、证书签发、PAC 与 Windows QUIC 拦截都以 SushiroInterceptHosts 为准。
+const (
+	// SushiroHost 是旧接口主机：取号凭证（/wechat/api_auth/）仍从这里抓。
+	SushiroHost = "crm-cn-prd.sushiro.com.cn"
+	// SushiroGatewayHost 是小程序 2026-10 起查门店实时数据用的新网关（spec 018）。
+	SushiroGatewayHost = "sapi.sushiro.com.cn"
+	// SushiroGatewayAPIPath 是新网关只读接口的路径前缀。
+	SushiroGatewayAPIPath = "/gateway/wechat/api/2.0/"
+	// SushiroGatewayStorePath / SushiroGatewayStoresPath 是会缓冲响应、把响应体交给 OnGatewayExchange 的两个只读接口。
+	SushiroGatewayStorePath  = SushiroGatewayAPIPath + "getStoreById"
+	SushiroGatewayStoresPath = SushiroGatewayAPIPath + "stores"
+	// sushiroGatewayMarker 标出网关请求：只有新网关主机上路径以它开头的请求才会调用 OnGatewayExchange。
+	sushiroGatewayMarker = "/gateway/"
+)
+
+// SushiroInterceptHosts 返回会被解密的主机，顺序固定（旧接口在前）。
+func SushiroInterceptHosts() []string {
+	return []string{SushiroHost, SushiroGatewayHost}
+}
+
 const proxyErrorBodyLogLimit = 4096
 
 // proxyTunnelDialTimeout 限制 pass-through 隧道连真实上游的等待时间，避免卡死在已下线的主机。
@@ -36,16 +58,42 @@ const proxyTunnelDialTimeout = 3 * time.Second
 // 超过即判定异常并中断，防止恶意/异常大响应把内存吃爆。
 const maxSushiroBufferedResponseBytes = 8 << 20
 
-// isSushiroTargetHost 判断目标 host 是否就是 SushiroHost（去端口、去末尾点、忽略大小写）。
-// 命中即代表「这条 CONNECT 要做 MITM」，与 allowedProxyTarget 的白名单语义不同：
-// 后者放行 sushiro.com.cn 整域做 pass-through，但只有精确的 API 主机才被解密。
-func isSushiroTargetHost(host string) bool {
+// normalizeProxyHost 去端口、去末尾点、转小写。
+func normalizeProxyHost(host string) string {
 	host = strings.TrimSpace(host)
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	return host == SushiroHost
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+// isSushiroTargetHost 判断目标 host 是否是 SushiroInterceptHosts 之一（去端口、去末尾点、忽略大小写，精确匹配）。
+// 命中即代表「这条 CONNECT 要做 MITM」，与 allowedProxyTarget 的白名单语义不同：
+// 后者放行 sushiro.com.cn 整域做 pass-through，但只有这两个精确的 API 主机才被解密。
+func isSushiroTargetHost(host string) bool {
+	host = normalizeProxyHost(host)
+	for _, intercept := range SushiroInterceptHosts() {
+		if host == intercept {
+			return true
+		}
+	}
+	return false
+}
+
+// isSushiroGatewayHost 判断目标 host 是否是新网关主机（精确匹配）。
+func isSushiroGatewayHost(host string) bool {
+	return normalizeProxyHost(host) == SushiroGatewayHost
+}
+
+// isGatewayReadPath 判断是否是要缓冲响应的两个网关只读接口（getStoreById / stores）。
+func isGatewayReadPath(path string) bool {
+	path = strings.TrimSuffix(path, "/")
+	return path == SushiroGatewayStorePath || path == SushiroGatewayStoresPath
+}
+
+// isGatewayExchangeTarget 判断这次请求是否交给 OnGatewayExchange：新网关主机上路径以 /gateway/ 开头的请求。
+func isGatewayExchangeTarget(target *url.URL) bool {
+	return target != nil && isSushiroGatewayHost(target.Host) && strings.HasPrefix(target.Path, sushiroGatewayMarker)
 }
 
 // allowedProxyTarget reports whether a CONNECT tunnel / plain HTTP proxy
@@ -59,18 +107,14 @@ func isSushiroTargetHost(host string) bool {
 // 中文要点：这是「防止本进程变成开放代理/SSRF 跳板」的核心闸门。
 // 移动抓包代理监听 0.0.0.0（局域网可连），若不限制目标，同网段任意设备都能拿它当中转连任何主机。
 // 这里只放行 sushiro.com.cn 域（精确 API 主机 + 防御性子域后缀匹配，覆盖 CDN/静态资源），
-// 其余一律在拨号前拒绝。注意：放行 ≠ 解密，只有精确的 SushiroHost 才会被 MITM（见 isSushiroTargetHost）。
+// 其余一律在拨号前拒绝。注意：放行 ≠ 解密，只有 SushiroInterceptHosts 里的两个精确主机才会被 MITM（见 isSushiroTargetHost）。
 func allowedProxyTarget(host string) bool {
-	host = strings.TrimSpace(host)
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	host = normalizeProxyHost(host)
 	if host == "" {
 		return false
 	}
-	// Exact sushiro API host (the only thing we actually MITM).
-	if host == SushiroHost {
+	// Exact sushiro API hosts (the only things we actually MITM).
+	if isSushiroTargetHost(host) {
 		return true
 	}
 	// Defensive suffix match so a sushiro subdomain the mobile client hits
@@ -78,15 +122,21 @@ func allowedProxyTarget(host string) bool {
 	return strings.HasSuffix(host, ".sushiro.com.cn")
 }
 
-// shouldBufferSushiroAPIResponse 决定是否把响应体整块读进内存做 API 发现记录。
-// 只有寿司郎 API 主机下的 /wechat/api/ 与 /wechat/api_auth/ 路径才缓冲——这些是含业务语义的接口，
-// 值得采样存档；其它响应一律流式透传，避免无谓占用内存。
+// shouldBufferSushiroAPIResponse 决定是否把响应体整块读进内存（API 发现记录、OnGatewayExchange）。
+// 旧接口主机下的 /wechat/api/ 与 /wechat/api_auth/ 路径，以及新网关的 getStoreById / stores 才缓冲——
+// 这些是含业务语义的接口；其它响应一律流式透传，避免无谓占用内存。
 func shouldBufferSushiroAPIResponse(target *url.URL) bool {
-	if target == nil || !isSushiroTargetHost(target.Host) {
+	if target == nil {
 		return false
 	}
-	return strings.HasPrefix(target.Path, "/wechat/api/") ||
-		strings.HasPrefix(target.Path, "/wechat/api_auth/")
+	switch normalizeProxyHost(target.Host) {
+	case SushiroHost:
+		return strings.HasPrefix(target.Path, "/wechat/api/") ||
+			strings.HasPrefix(target.Path, "/wechat/api_auth/")
+	case SushiroGatewayHost:
+		return isGatewayReadPath(target.Path)
+	}
+	return false
 }
 
 // ---- MITM Proxy Server ----
@@ -104,11 +154,30 @@ type ProxyServer struct {
 	traceMu       sync.Mutex
 	seenHosts     map[string]struct{}
 	patchRequests bool
+	onGateway     GatewayExchangeFunc
 }
+
+// GatewayExchangeFunc 接收一次经代理转发的新网关请求：req 是转发出去的请求（含头部），status 是上游状态码，
+// body 只在 getStoreById / stores 两个只读接口时给出（已解压的响应体），其余为 nil。
+// 实现方不得把 body 或请求头的值写进磁盘或日志。
+type GatewayExchangeFunc func(req *http.Request, status int, body []byte)
 
 type ProxyOptions struct {
 	ListenHost    string
 	PatchRequests bool
+	// OnGatewayExchange 只在新网关主机（sapi.sushiro.com.cn）上路径以 /gateway/ 开头的请求转发完成后调用，
+	// 从不为其它主机调用；为 nil 时不调用。proxy 包不依赖 app，由界面进程注入处理函数。
+	OnGatewayExchange GatewayExchangeFunc
+}
+
+// DesktopCaptureOptions 是电脑抓包代理的默认设置：只监听本机，并把 PC 微信请求改成手机兼容形态。
+func DesktopCaptureOptions() ProxyOptions {
+	return ProxyOptions{ListenHost: "127.0.0.1", PatchRequests: true}
+}
+
+// MobileCaptureOptions 是手机抓包代理的默认设置：监听局域网，保持手机原始请求不改。
+func MobileCaptureOptions() ProxyOptions {
+	return ProxyOptions{ListenHost: "0.0.0.0", PatchRequests: false}
 }
 
 // BufferedConn 把一个底层 net.Conn 连同一个 bufio.Reader 包成统一的 Read 来源。
@@ -124,17 +193,11 @@ func (c *BufferedConn) Read(p []byte) (int, error) {
 }
 
 func StartProxy(caCert tls.Certificate, caKey *rsa.PrivateKey, tokens *CapturedTokens, logger ...func(string)) (*ProxyServer, error) {
-	return StartProxyWithOptions(caCert, caKey, tokens, ProxyOptions{
-		ListenHost:    "127.0.0.1",
-		PatchRequests: true,
-	}, logger...)
+	return StartProxyWithOptions(caCert, caKey, tokens, DesktopCaptureOptions(), logger...)
 }
 
 func StartMobileCaptureProxy(caCert tls.Certificate, caKey *rsa.PrivateKey, tokens *CapturedTokens, logger ...func(string)) (*ProxyServer, error) {
-	return StartProxyWithOptions(caCert, caKey, tokens, ProxyOptions{
-		ListenHost:    "0.0.0.0",
-		PatchRequests: false,
-	}, logger...)
+	return StartProxyWithOptions(caCert, caKey, tokens, MobileCaptureOptions(), logger...)
 }
 
 func StartProxyWithOptions(caCert tls.Certificate, caKey *rsa.PrivateKey, tokens *CapturedTokens, options ProxyOptions, logger ...func(string)) (*ProxyServer, error) {
@@ -163,6 +226,7 @@ func StartProxyWithOptions(caCert tls.Certificate, caKey *rsa.PrivateKey, tokens
 		logf:          logf,
 		seenHosts:     map[string]struct{}{},
 		patchRequests: options.PatchRequests,
+		onGateway:     options.OnGatewayExchange,
 	}
 
 	go ps.serve()
@@ -263,7 +327,7 @@ func (ps *ProxyServer) handleConn(clientConn net.Conn) {
 		}
 	}
 
-	// 关键分支：只有寿司郎 API 主机走 MITM（解密 + 抓凭证），其余 sushiro.com.cn 子域走 pass-through 透传，
+	// 关键分支：只有两个精确的寿司郎 API 主机走 MITM（解密 + 抓凭证），其余 sushiro.com.cn 子域走 pass-through 透传，
 	// 其它一切 host 直接 403 拒绝。这决定了下游两条完全不同的连接处理路径。
 	isSushiro := isSushiroTargetHost(hostPort)
 	ps.traceConnect(hostPort, isSushiro)
@@ -342,6 +406,7 @@ func (ps *ProxyServer) handleConn(clientConn net.Conn) {
 
 	state := tlsClient.ConnectionState()
 	ps.addLog(fmt.Sprintf("MITM established for %s (client_tls=%s alpn=%s)", serverName, tlsVersionName(state.Version), DefaultString(state.NegotiatedProtocol, "http/1.1")))
+	gateway := isSushiroGatewayHost(hostPort)
 
 	// Read-Forward-Relay loop
 	// 在同一条 TLS 连接上循环：读一条请求 → 抓凭证/patch → 转发真服务器 → 回传响应。
@@ -377,7 +442,13 @@ func (ps *ProxyServer) handleConn(clientConn net.Conn) {
 
 		// Capture tokens
 		// 抓取凭证的核心一步：从请求头/体里识别 wechatId、token、门店等参数写入 tokens。
-		ps.tokens.CaptureFromRequest(req, bodyBytes)
+		// 取号凭证只来自旧接口主机；新网关的会员 token 只交给 OnGatewayExchange（实时数据连接），
+		// 不写进取号凭证，网关请求只顺手记下门店编号。
+		if gateway {
+			captureGatewayStoreID(ps.tokens, req)
+		} else if ps.tokens != nil {
+			ps.tokens.CaptureFromRequest(req, bodyBytes)
+		}
 		ps.addLog(fmt.Sprintf("Request address: %s %s", req.Method, sanitizedProxyURL(requestURLForTrace(req, "https", hostPort))))
 
 		// Rebuild request for forwarding
@@ -389,6 +460,10 @@ func (ps *ProxyServer) handleConn(clientConn net.Conn) {
 			req.Host = hostWithoutPort(hostPort)
 		}
 		removeHopByHopHeaders(req.Header)
+		if gateway && isGatewayReadPath(req.URL.Path) {
+			// 让上游 transport 自己协商 gzip 并透明解压：缓冲下来的门店数据才是可读的 JSON（小程序可能要 br）。
+			req.Header.Del("Accept-Encoding")
+		}
 		setForwardRequestBody(req, bodyBytes)
 
 		// Forward
@@ -400,10 +475,82 @@ func (ps *ProxyServer) handleConn(clientConn net.Conn) {
 		}
 
 		// Relay response
-		if err := ps.relayResponse(tlsClient, resp, req.Method, req.URL, requestHeaderKeys, requestBodyKeys, requestBodyFields); err != nil {
+		bufferedBody, err := ps.relayResponse(tlsClient, resp, req.Method, req.URL, requestHeaderKeys, requestBodyKeys, requestBodyFields)
+		if err != nil {
+			return
+		}
+		// 响应已回给小程序之后才交给界面进程：不拖慢小程序，也不改它看到的内容。
+		if gateway {
+			ps.notifyGatewayExchange(req, resp, bufferedBody)
+		}
+	}
+}
+
+// captureGatewayStoreID 只从新网关请求里记下门店编号（取号凭证的“门店”一项），不读任何头部。
+func captureGatewayStoreID(tokens *CapturedTokens, req *http.Request) {
+	if tokens == nil || req == nil || req.URL == nil {
+		return
+	}
+	storeID := strings.TrimSpace(req.URL.Query().Get("storeId"))
+	if storeID == "" || len(storeID) > 12 || strings.Trim(storeID, "0123456789") != "" {
+		return
+	}
+	tokens.Lock()
+	defer tokens.Unlock()
+	for _, existing := range tokens.StoreIDs {
+		if existing == storeID {
 			return
 		}
 	}
+	tokens.StoreIDs = append(tokens.StoreIDs, storeID)
+}
+
+// notifyGatewayExchange 把一次新网关请求交给注入的处理函数。只对新网关主机调用；
+// 响应体按 Content-Encoding 解压后给出，解不开时给 nil。处理函数出问题不影响代理继续工作。
+func (ps *ProxyServer) notifyGatewayExchange(req *http.Request, resp *http.Response, bufferedBody []byte) {
+	if ps.onGateway == nil || req == nil || resp == nil || !isGatewayExchangeTarget(req.URL) {
+		return
+	}
+	var body []byte
+	if bufferedBody != nil && isGatewayReadPath(req.URL.Path) {
+		body = decodeGatewayBody(resp.Header.Get("Content-Encoding"), bufferedBody)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			ps.addLog(fmt.Sprintf("Gateway exchange handler panicked: %s %s", req.Method, sanitizedProxyURL(req.URL)))
+		}
+	}()
+	ps.onGateway(req, resp.StatusCode, body)
+}
+
+// decodeGatewayBody 返回可读的响应体：未压缩原样返回，gzip / deflate 解压（同样受缓冲上限约束），其它编码返回 nil。
+func decodeGatewayBody(encoding string, body []byte) []byte {
+	var reader io.Reader
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil
+		}
+		defer zr.Close()
+		reader = zr
+	case "deflate":
+		if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			defer zr.Close()
+			reader = zr
+		} else {
+			reader = flate.NewReader(bytes.NewReader(body))
+		}
+	default:
+		return nil
+	}
+	decoded, err := io.ReadAll(io.LimitReader(reader, int64(maxSushiroBufferedResponseBytes)+1))
+	if err != nil || len(decoded) > maxSushiroBufferedResponseBytes {
+		return nil
+	}
+	return decoded
 }
 
 func (ps *ProxyServer) handlePlainHTTPProxy(clientConn net.Conn, firstLine string, br *bufio.Reader) {
@@ -454,7 +601,7 @@ func (ps *ProxyServer) handlePlainHTTPProxy(clientConn net.Conn, firstLine strin
 			fmt.Fprintf(clientConn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 			return
 		}
-		if err := ps.relayResponse(clientConn, resp, req.Method, req.URL, requestHeaderKeys, requestBodyKeys, requestBodyFields); err != nil {
+		if _, err := ps.relayResponse(clientConn, resp, req.Method, req.URL, requestHeaderKeys, requestBodyKeys, requestBodyFields); err != nil {
 			return
 		}
 
@@ -526,7 +673,8 @@ func hostWithoutPort(hostPort string) string {
 	return hostPort
 }
 
-func (ps *ProxyServer) relayResponse(w io.Writer, resp *http.Response, method string, target *url.URL, requestHeaderKeys, requestBodyKeys []string, requestBodyFields map[string]string) error {
+// relayResponse 把上游响应写回客户端；对需要缓冲的寿司郎接口返回缓冲下来的响应体（原样，可能仍是压缩的），其余返回 nil。
+func (ps *ProxyServer) relayResponse(w io.Writer, resp *http.Response, method string, target *url.URL, requestHeaderKeys, requestBodyKeys []string, requestBodyFields map[string]string) ([]byte, error) {
 	defer resp.Body.Close()
 	upstreamProto := resp.Proto
 	var bufferedBody []byte
@@ -535,12 +683,12 @@ func (ps *ProxyServer) relayResponse(w io.Writer, resp *http.Response, method st
 		if err != nil {
 			err = fmt.Errorf("读取寿司郎 API 响应失败: %w", err)
 			ps.addLog(fmt.Sprintf("proxy buffer response failed: %s %s: %v", method, sanitizedProxyURL(target), err))
-			return err
+			return nil, err
 		}
 		if len(bodyBytes) > maxSushiroBufferedResponseBytes {
 			err := fmt.Errorf("寿司郎 API 响应超过缓冲上限 %d bytes", maxSushiroBufferedResponseBytes)
 			ps.addLog(fmt.Sprintf("proxy buffer response failed: %s %s: %v", method, sanitizedProxyURL(target), err))
-			return err
+			return nil, err
 		}
 		bufferedBody = bodyBytes
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -582,9 +730,9 @@ func (ps *ProxyServer) relayResponse(w io.Writer, resp *http.Response, method st
 	stripQUICAdvertisement(resp.Header)
 	if err := resp.Write(w); err != nil {
 		ps.addLog(fmt.Sprintf("proxy relay response failed: %s %s: %v", method, sanitizedProxyURL(target), err))
-		return err
+		return nil, err
 	}
-	return nil
+	return bufferedBody, nil
 }
 
 // stripQUICAdvertisement 删除会让客户端升级到 HTTP/3 的响应头。
