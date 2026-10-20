@@ -783,11 +783,18 @@ function fixture() {
  f.setRespond(async path=>path.startsWith('/api/queue/live')?httpError(502,{error:'实时叫号需要连接',code:'live_auth_required'}):{});
  await f.run('loadLive()');
  assert.equal(f.run('state.liveAuthRequired'),true);
- f.setRespond(async path=>path.startsWith('/api/queue/live')?httpError(502,{error:'寿司郎服务暂时不可用',code:'live_unavailable'}):{});
+ f.setRespond(async path=>path.startsWith('/api/queue/live')?httpError(502,{error:'寿司郎服务暂时不可用（HTTP 502），请稍后重试',code:'live_unavailable'}):{});
  await f.run('loadLive()');
  assert.equal(f.run('state.liveAuthRequired'),false,'a network failure still asked to connect');
  assert.equal(f.node('take-ticket-reason').textContent,'排队信息还没更新，刷新后再取号。');
- assert.match(f.node('live-store').innerHTML,/寿司郎服务暂时不可用/);
+ assert.match(f.node('live-store').innerHTML,/寿司郎服务暂时不可用，请稍后重试。/);
+ assert.doesNotMatch(f.node('live-store').innerHTML,/HTTP/,'store card showed a status code');
+ f.run("state.selectedStore='';openStorePicker('queue')");await tick();
+ f.setRespond(async path=>path.startsWith('/api/queue/stores')?httpError(502,{error:'请求太频繁（HTTP 429）：请稍后再试',code:'live_rate_limited'}):{});
+ await f.run('searchStores()');
+ assert.match(f.node('store-results').innerHTML,/请求太频繁：请稍后再试。/);
+ assert.doesNotMatch(f.node('store-results').innerHTML,/HTTP/,'store search showed a status code');
+ f.run("state.selectedStore='1012'");
  assert.equal(f.node('offline-eta').hidden,false,'estimate inputs hidden while live data is missing');
 }
 {

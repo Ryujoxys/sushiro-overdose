@@ -225,7 +225,8 @@ function serviceDetail(data) {
   const text=(cfg.enabled&&st.paused_reason?pausedText(st.paused_reason):'')||(auto.needs_update?'程序位置变了，请点“更新自启动位置”。':'')||auto.error||(cfg.enabled&&!data.background_running?'后台没有运行，请先保持这个窗口打开。':'');
   return {text,warn:false,connect:false};
 }
-// Server messages sometimes carry a status code for logs; the page shows only the words.
+// Server messages sometimes carry a status code for logs; the page shows only the words
+// (recording status, the store card and the store search all use this).
 function plainError(message) { return String(message||'').replace(/\s*[（(]HTTP \d+[）)]/g,'').replace(/[。.\s]+$/,''); }
 function clockHHMM(value) { const d=new Date(value);return Number.isNaN(d.getTime())?'':chinaHHMM(d); }
 function setExportLink(id,enabled,path) {
@@ -374,7 +375,7 @@ async function searchStores() {
     el('store-offline-note').hidden=!(data.offline||usual.offline);
     el('store-results').innerHTML=list.map(s=>'<label class="picker-row"><input type="'+(state.pickerMode==='records'?'checkbox':'radio')+'" name="picked-store" value="'+escapeHTML(s.id)+'" '+(state.picker.has(String(s.id))?'checked':'')+'><span><b>'+escapeHTML(s.name)+'</b><small>'+escapeHTML(storePlace(s))+'</small></span></label>').join('')||'<p class="empty">没有找到，试试城市或其他店名。</p>';
     updatePicked();
-  }catch(e){if(revision===state.searchRevision)el('store-results').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="retry-stores">重试</button>';}
+  }catch(e){if(revision===state.searchRevision)el('store-results').innerHTML='<p class="empty">'+escapeHTML(plainError(e.message)+'。')+'</p><button class="button secondary" data-action="retry-stores">重试</button>';}
 }
 // Store lists label the city as nameKana; records and bundled history use city/area.
 function storePlace(s) {
@@ -413,7 +414,7 @@ async function loadLive() {
     if(revision!==state.liveRevision)return;
     state.liveStore=id;
     if(e.code==='live_auth_required'){state.live=null;state.liveStale=false;state.liveAuthRequired=true;renderLiveConnect();}
-    else{state.liveStale=true;state.liveAuthRequired=false;if(keep)renderLive(e.message);else el('live-store').innerHTML='<p class="empty">'+escapeHTML(e.message)+'</p><button class="button secondary" data-action="refresh-live">重试</button>';}
+    else{state.liveStale=true;state.liveAuthRequired=false;const message=plainError(e.message)+'。';if(keep)renderLive(message);else el('live-store').innerHTML='<p class="empty">'+escapeHTML(message)+'</p><button class="button secondary" data-action="refresh-live">重试</button>';}
   }
   finally{if(revision===state.liveRevision){state.livePending='';el('live-store').removeAttribute('aria-busy');renderTakeTicket();renderOfflineEta();}}
   if(revision===state.liveRevision)await loadMealPlan();
