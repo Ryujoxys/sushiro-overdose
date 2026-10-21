@@ -955,7 +955,7 @@ func handleEngineCapture(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
-	if err := engine.StartCapture(); err != nil {
+	if err := engine.StartCaptureFor(capturePurposeFromRequest(r)); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}

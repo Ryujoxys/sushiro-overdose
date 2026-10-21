@@ -39,6 +39,7 @@ type mobileAuthCaptureManager struct {
 	qr           string
 	startedAt    time.Time
 	expiresAt    time.Time
+	purpose      string // "" = 取号凭证；captureForLive = 只为连接实时数据
 	saved        bool
 	message      string
 	logs         []LogEntry
@@ -59,7 +60,7 @@ func handleMobileAuthStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
-	status, err := mobileAuthCapture.start()
+	status, err := mobileAuthCapture.start(capturePurposeFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "启动手机凭证捕获失败: "+err.Error())
 		return
@@ -80,7 +81,7 @@ func handleMobileAuthStop(w http.ResponseWriter, r *http.Request) {
 // 安全/可用要点：①与主流程互斥（捕获时不能同时抢票，避免把手机会话顶掉）；
 // ②引导页路径含随机 token（newMobileUAToken），防同网段他人乱扫；
 // ③引导页监听 0.0.0.0:0（随机端口）——必须绑 0.0.0.0，手机才能通过电脑局域网 IP 访问到。
-func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
+func (m *mobileAuthCaptureManager) start(purpose string) (map[string]any, error) {
 	authLifecycle.Lock()
 	defer authLifecycle.Unlock()
 	m.mu.Lock()
@@ -172,7 +173,11 @@ func (m *mobileAuthCaptureManager) start() (map[string]any, error) {
 	m.startedAt = now
 	m.expiresAt = now.Add(mobileAuthCaptureTTL)
 	m.saved = false
+	m.purpose = purpose
 	m.message = "手机凭证捕获已启动，请按引导页设置手机代理并打开寿司郎小程序。"
+	if purpose == captureForLive {
+		m.message = "手机连接已启动，请按引导页设置手机代理，再打开寿司郎小程序看看门店或排队页。"
+	}
 	m.logs = nil
 
 	go func() {
@@ -205,9 +210,18 @@ func (m *mobileAuthCaptureManager) watch(ctx context.Context, token string) {
 			m.mu.Lock()
 			sameRun := m.token == token && m.tokens != nil
 			tokens := m.tokens
+			forLive, startedAt := m.purpose == captureForLive, m.startedAt
 			m.mu.Unlock()
 			if !sameRun {
 				return
+			}
+			// 只为连接实时数据时：连上就结束，不顺手保存取号凭证。
+			if forLive {
+				if liveSessionCapturedSince(startedAt, time.Now()) {
+					m.finishLive(token)
+					return
+				}
+				continue
 			}
 			if tokens.IsComplete() {
 				m.finish(token, tokens)
@@ -260,6 +274,18 @@ func (m *mobileAuthCaptureManager) finish(token string, tokens *CapturedTokens) 
 
 	m.saved = true
 	m.message = "手机凭证参数已保存。请关闭手机 Wi-Fi 代理，再回电脑测试基础接口。"
+	m.stopLocked(m.message)
+}
+
+// finishLive ends a live-data capture once the mini program's connection reached this computer.
+func (m *mobileAuthCaptureManager) finishLive(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token == "" || m.token != token {
+		return
+	}
+	m.saved = true
+	m.message = "实时数据已连接。请关闭手机 Wi-Fi 代理，回到电脑查看实时叫号。"
 	m.stopLocked(m.message)
 }
 
@@ -340,6 +366,7 @@ func (m *mobileAuthCaptureManager) statusLocked() map[string]any {
 		"addresses":  addresses,
 		"qr_svg":     m.qr,
 		"started":    m.startedAt,
+		"purpose":    m.purpose,
 		"expires":    m.expiresAt,
 		"ttl_secs":   int(mobileAuthCaptureTTL.Seconds()),
 		"ca_path":    filepath.Join(CertDirPath(), "ca.crt"),

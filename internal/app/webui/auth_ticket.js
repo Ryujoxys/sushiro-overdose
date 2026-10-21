@@ -1,5 +1,5 @@
 let ticketDraft=null,authReturnIntent='settings',authModeRunning='',authPollTimer=null,authSavedAt='',authPollBusy=false,authSessionRevision=0;
-let liveCaptureMode='',liveCaptureTimer=null,liveCaptureRevision=0,liveCapturePolling=false,liveCaptureBaseline='';
+let liveCaptureMode='',liveCaptureTimer=null,liveCaptureRevision=0,liveCapturePolling=false,liveCaptureBaseline='',liveSeenBaseline='';
 const mobileGuideAddresses={},liveCapturePollMS=3000;
 const captureStages={preparing_cert:'正在准备证书…',installing_cert_currentuser:'请在系统弹窗中允许安装证书。',installing_cert_localmachine_uac:'请在系统弹窗中授权。',starting_proxy:'正在准备连接…',setting_system_proxy:'正在设置临时代理…',waiting_capture:'请重新打开电脑微信，在寿司郎小程序里浏览门店和我的单据，无需提交订单。',probing:'凭证已收到，正在检查…'};
 
@@ -36,7 +36,9 @@ async function confirmTicket() {
       el('ticket-dialog').close();showTicket(result);ticketDraft=null;
     }catch(e){
       showError('ticket-error',e);
-      if(submitted){state.ticketUncertain=true;el('ticket-dialog').close();showTicketUncertain(e.message);}
+      // ticket_not_submitted: the server refused before sending anything (it could not tell whether a
+      // ticket already exists), so the result is known — nothing was taken. Keep the dialog's message.
+      if(submitted&&e.code!=='ticket_not_submitted'){state.ticketUncertain=true;el('ticket-dialog').close();showTicketUncertain(e.message);}
     }finally{el('ticket-confirm').disabled=false;}
   });
 }
@@ -242,7 +244,14 @@ async function importAuth() {
   await guard('auth-import',async()=>{
     showError('auth-error',null);if(authModeRunning){showError('auth-error',new Error('先点“停止连接”，再导入；已粘贴的内容会保留。'));return;}
     const text=el('auth-text').value.trim();if(!text){showError('auth-error',new Error('先粘贴凭证。'));return;}
-    try{const result=await api('/api/auth/import',{text});if(!result.saved){showError('auth-error',new Error('还缺少：'+(result.missing||[]).join('、')));return;}el('auth-text').value='';clearTicketView();showAuthVerificationState(await loadStatus());}
+    try{const result=await api('/api/auth/import',{text});
+      if(result.live_connected)refreshLiveSession();
+      if(!result.saved){
+        // A pasted gateway request may connect live data without carrying ticket credentials.
+        if(result.live_connected&&!(result.missing||[]).length){el('auth-text').value='';toast(result.message||'实时数据已连接');return;}
+        const parts=[];if((result.missing||[]).length)parts.push('还缺少：'+result.missing.join('、'));if(result.live_error)parts.push(result.live_error);
+        showError('auth-error',new Error(parts.join('。')||result.message||'没有可保存的内容'));return;
+      }el('auth-text').value='';clearTicketView();showAuthVerificationState(await loadStatus());}
     catch(e){showError('auth-error',e);}
   });
 }
@@ -300,9 +309,10 @@ async function startLiveCapture(mode) {
     liveCaptureMode=mode;liveCaptureNote(mode==='mobile'?'正在准备手机连接…':'正在准备证书和临时代理，请在系统弹窗中授权。');
     // Compare against the connection saved right now, not one read minutes ago, so an older save is never taken for this capture's.
     try{const current=await api('/api/live-session');if(revision===liveCaptureRevision)state.liveSession=current;}catch{}
-    liveCaptureBaseline=state.liveSession?.captured_at||'';
+    liveCaptureBaseline=state.liveSession?.captured_at||'';liveSeenBaseline=state.liveSession?.last_seen_at||'';
     try{
-      const result=await api(mode==='mobile'?'/api/mobile-auth/start':'/api/engine/capture',{},{timeout:30000});
+      // purpose=live: the capture ends once live data connects and never saves ticket credentials.
+      const result=await api(mode==='mobile'?'/api/mobile-auth/start':'/api/engine/capture',{purpose:'live'},{timeout:30000});
       if(revision!==liveCaptureRevision)return;
       if(mode==='mobile'){renderMobileGuide(result,'live');liveCaptureNote(liveCaptureHint('mobile'));}
     }catch(e){
@@ -314,7 +324,11 @@ async function startLiveCapture(mode) {
     scheduleLivePoll();
   });
 }
-function isNewLiveConnection(session) { return !!(session?.connected&&session.captured_at&&session.captured_at!==liveCaptureBaseline); }
+// New = a connection saved during this capture, or the held one seen in use again (an unchanged token saves nothing).
+function isNewLiveConnection(session) {
+  if(!session?.connected)return false;
+  return !!((session.captured_at&&session.captured_at!==liveCaptureBaseline)||(session.last_seen_at&&session.last_seen_at!==liveSeenBaseline));
+}
 async function readCaptureSession(revision) {
   const session=await api('/api/live-session');
   if(revision!==liveCaptureRevision)return null;

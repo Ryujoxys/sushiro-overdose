@@ -42,7 +42,7 @@
       </div>
       <div id="record-settings" class="record-block record-settings">
         <label class="field inline-field">记录间隔<select id="record-interval"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每小时</option></select></label>
-        <label class="check-row"><input id="autostart" type="checkbox">登录电脑后启动后台记录</label>
+        <label id="autostart-row" class="check-row" hidden><input id="autostart" type="checkbox">登录电脑后启动后台（新接口下关窗后不会记录，可以关闭）</label>
         <button id="repair-autostart" class="button secondary small" data-action="repair-autostart" hidden>更新自启动位置</button>
         <p class="caption">应用开着并连接了实时数据时记录；关掉窗口、连接到期或电脑休眠时暂停，已有记录都保留。</p>
       </div>

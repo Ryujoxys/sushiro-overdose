@@ -662,6 +662,48 @@ type liveSessionStatus struct {
 	RemainingSeconds int    `json:"remaining_seconds"`
 	CapturedAt       string `json:"captured_at,omitempty"`
 	Source           string `json:"source,omitempty"`
+	// LastSeenAt is when a capture last saw the mini program using this same connection.
+	// Reconnecting with an unchanged token saves nothing, so this is how a capture knows it worked.
+	LastSeenAt string `json:"last_seen_at,omitempty"`
+}
+
+// liveSessionSeen remembers, in memory only, when a capture last saw the stored connection in use.
+var liveSessionSeen struct {
+	sync.Mutex
+	mark string
+	at   time.Time
+}
+
+func noteLiveSessionSeen(s LiveSession, at time.Time) {
+	liveSessionSeen.Lock()
+	defer liveSessionSeen.Unlock()
+	liveSessionSeen.mark, liveSessionSeen.at = s.mark(), at
+}
+
+func liveSessionLastSeen(s *LiveSession) time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	liveSessionSeen.Lock()
+	defer liveSessionSeen.Unlock()
+	if liveSessionSeen.mark != s.mark() {
+		return time.Time{}
+	}
+	return liveSessionSeen.at
+}
+
+// liveSessionCapturedSince reports whether this process holds a usable connection that a capture
+// saved or saw in use at or after since. Processes without the provider always get false.
+func liveSessionCapturedSince(since, now time.Time) bool {
+	s, _ := usableLiveSession(now)
+	if s == nil {
+		return false
+	}
+	if !s.CapturedAt.Before(since) {
+		return true
+	}
+	seen := liveSessionLastSeen(s)
+	return !seen.IsZero() && !seen.Before(since)
 }
 
 func liveSessionStatusAt(s *LiveSession, now time.Time) liveSessionStatus {
@@ -671,6 +713,9 @@ func liveSessionStatusAt(s *LiveSession, now time.Time) liveSessionStatus {
 	status := liveSessionStatus{State: "expired", Source: s.Source}
 	if !s.CapturedAt.IsZero() {
 		status.CapturedAt = s.CapturedAt.Format(time.RFC3339)
+	}
+	if seen := liveSessionLastSeen(s); !seen.IsZero() {
+		status.LastSeenAt = seen.Format(time.RFC3339)
 	}
 	if expires := s.ExpiresAt; !expires.IsZero() {
 		status.ExpiresAt = expires.Format(time.RFC3339)

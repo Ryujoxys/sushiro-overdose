@@ -4,8 +4,10 @@ import . "github.com/Ryujoxys/sushiro-overdose/internal/core"
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -110,6 +112,12 @@ func saveCapturedLiveSession(header http.Header, now time.Time) (LiveSession, bo
 		return LiveSession{}, false
 	}
 	if saved {
+		noteLiveSessionSeen(s, now)
+	} else if stored, _ := usableLiveSession(now); stored != nil && stored.Authorization == s.Authorization {
+		// The mini program is still using the connection we already hold: nothing to save, but the capture worked.
+		noteLiveSessionSeen(*stored, now)
+	}
+	if saved {
 		LogMessage(now, fmt.Sprintf("Live session captured from the mini program (usable for about %d min)", liveSessionMinutesLeft(s, now)))
 	}
 	return s, saved
@@ -175,4 +183,25 @@ func passiveRecordErrorLabel(err error) string {
 func liveSessionConnectedNow() bool {
 	s, _ := usableLiveSession(time.Now())
 	return s != nil
+}
+
+// captureForLive marks a capture started only to connect live data (spec 018): it ends once the
+// mini program's gateway connection reaches this computer and does not save ticket credentials.
+const captureForLive = "live"
+
+// capturePurposeFromRequest reads an optional {"purpose":"live"} body; anything else means a ticket-credential capture.
+func capturePurposeFromRequest(r *http.Request) string {
+	if r == nil || r.Body == nil {
+		return ""
+	}
+	var body struct {
+		Purpose string `json:"purpose"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(body.Purpose) == captureForLive {
+		return captureForLive
+	}
+	return ""
 }

@@ -203,6 +203,9 @@ function renderService() {
   if(![...interval.options].some(o=>Number(o.value)===cfg.interval_minutes))interval.add(new Option('每 '+cfg.interval_minutes+' 分钟',cfg.interval_minutes));
   if(document.activeElement!==interval)interval.value=cfg.interval_minutes||5;
   el('record-toggle').textContent=cfg.enabled?'暂停记录':'开始记录';el('record-toggle').className='button '+(cfg.enabled?'secondary':'primary');el('record-toggle').hidden=!ids.length;el('record-toggle').disabled=!ids.length||state.busy.has('service');
+  // The background process never uses the live connection, so autostart records nothing now:
+  // offer the switch only to people who still have it on, so they can turn it off.
+  el('autostart-row').hidden=!auto.enabled;
   el('autostart').checked=!!auto.enabled;el('autostart').disabled=auto.supported===false||(!ids.length&&!auto.enabled)||state.busy.has('service');
   el('autostart').title=auto.error||'单独开启，不会随开始记录自动启用';
   el('repair-autostart').hidden=!auto.needs_update;el('repair-autostart').disabled=state.busy.has('service');

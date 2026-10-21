@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Ryujoxys/sushiro-overdose/internal/core"
 )
 
 const (
@@ -503,5 +505,54 @@ func TestSavingANewConnectionForgetsTheLastLiveFailure(t *testing.T) {
 	}
 	if queueLiveRecentlyFailed() {
 		t.Fatal("a fresh connection must let the next plan use live data right away")
+	}
+}
+
+func TestLiveSessionCapturedSinceCountsSavedOrSeenConnections(t *testing.T) {
+	now := time.Now()
+	start := now.Add(-time.Minute)
+	old := testLiveSession(now.Add(-10*time.Minute), time.Hour)
+	useLiveSession(t, &old)
+	if liveSessionCapturedSince(start, now) {
+		t.Fatal("a connection captured before the capture started does not count")
+	}
+	// The mini program is still using the same token: nothing new is saved, but the capture saw it.
+	noteLiveSessionSeen(old, now)
+	if !liveSessionCapturedSince(start, now) {
+		t.Fatal("seeing the held connection in use during the capture should count")
+	}
+	if got := liveSessionStatusAt(&old, now).LastSeenAt; got == "" {
+		t.Fatal("status should report when the connection was last seen")
+	}
+	fresh := testLiveSession(now, time.Hour)
+	useLiveSession(t, &fresh)
+	if !liveSessionCapturedSince(start, now) {
+		t.Fatal("a connection saved during the capture counts")
+	}
+	if liveSessionStatusAt(&fresh, now).LastSeenAt != "" {
+		t.Fatal("a sighting of another connection must not be reported for this one")
+	}
+	useLiveSession(t, nil)
+	if liveSessionCapturedSince(start, now) {
+		t.Fatal("a process without the provider never reports a connection")
+	}
+}
+
+func TestCapturePurposeFromRequest(t *testing.T) {
+	for body, want := range map[string]string{`{"purpose":"live"}`: captureForLive, `{}`: "", ``: "", `{"purpose":"ticket"}`: "", `not json`: ""} {
+		r := httptest.NewRequest(http.MethodPost, "/api/mobile-auth/start", strings.NewReader(body))
+		if got := capturePurposeFromRequest(r); got != want {
+			t.Errorf("%q => %q, want %q", body, got, want)
+		}
+	}
+}
+
+func TestLiveCaptureTimeoutExplainsLiveData(t *testing.T) {
+	e := &BookingEngine{state: EngineState{Status: EngineCapturing}}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	e.reportCaptureTimeout(ctx, core.NewCapturedTokens(), captureForLive)
+	if msg := e.GetState().Message; !strings.Contains(msg, "没有收到寿司郎小程序的实时数据") || strings.Contains(msg, "缺少") {
+		t.Fatalf("live capture timeout message = %q", msg)
 	}
 }

@@ -406,7 +406,11 @@ func (e *BookingEngine) GetLogs() []LogEntry {
 // 流程：占住运行态 → 建独立 goroutine 跑 runCapture；返回 nil 表示已启动，
 // 引擎状态由 runCapture 在内部推进（装证书 → 起代理 → 设系统代理 → 轮询凭证）。
 // 若已有任务在跑（isRunningLocked）则拒绝并取消刚建的 ctx。
-func (e *BookingEngine) StartCapture() error {
+func (e *BookingEngine) StartCapture() error { return e.StartCaptureFor("") }
+
+// StartCaptureFor starts a capture; purpose captureForLive ends it as soon as the mini program's
+// live-data connection reaches this computer and never saves ticket credentials.
+func (e *BookingEngine) StartCaptureFor(purpose string) error {
 	ctx, _, done, generation, err := e.beginRun("正在启动参数捕获...")
 	if err != nil {
 		return err
@@ -419,16 +423,17 @@ func (e *BookingEngine) StartCapture() error {
 			e.recoverEngineRun("抓取凭证")
 			e.finishRun(done)
 		}()
-		e.runCaptureSession(ctx, generation)
+		e.runCaptureSession(ctx, generation, purpose)
 	}()
 	return nil
 }
 
-func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64) {
+func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64, purpose string) {
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
 	defer cancel()
 	tokens := NewCapturedTokens()
-	defer func() { e.reportCaptureTimeout(ctx, tokens) }()
+	defer func() { e.reportCaptureTimeout(ctx, tokens, purpose) }()
 	if ctx.Err() != nil {
 		return
 	}
@@ -601,6 +606,16 @@ func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64
 			}
 			e.mu.Unlock()
 			bus.publish("engine", mustJSON(e.GetState()))
+			if purpose == captureForLive {
+				if liveSessionCapturedSince(startedAt, time.Now()) {
+					e.cleanupProxy()
+					e.addLog("实时数据已连接，系统代理已恢复。")
+					e.setStage(StageDone, 8, 8)
+					e.setState(EngineIdle, "实时数据已连接")
+					return
+				}
+				continue
+			}
 			if tokens.IsComplete() {
 				prefs := LoadPreferences()
 				// 接口发现调试开启时：抓到凭证先存好，但保持代理运行，让用户继续在
@@ -695,8 +710,13 @@ func (e *BookingEngine) runCaptureSession(ctx context.Context, generation uint64
 	}
 }
 
-func (e *BookingEngine) reportCaptureTimeout(ctx context.Context, tokens *CapturedTokens) {
+func (e *BookingEngine) reportCaptureTimeout(ctx context.Context, tokens *CapturedTokens, purpose string) {
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return
+	}
+	if purpose == captureForLive {
+		e.setState(EngineError, "连接超时，没有收到寿司郎小程序的实时数据。可以再试一次，或改用手机连接、粘贴抓包。")
+		e.setError(ErrKindCaptureTimeout)
 		return
 	}
 	missing := tokens.MissingFields(true)

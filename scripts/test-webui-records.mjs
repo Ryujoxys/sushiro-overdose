@@ -872,4 +872,41 @@ function fixture() {
  assert.equal(f.node('live-session-state').textContent,'暂时读不到');
  assert.match(f.node('live-session-detail').textContent,/读取失败/);
 }
-console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge, live code branching, offline estimate and reading, HH:MM times, offline store note, recording status copy, live-data card and capture, typed-number time, capture race).');
+{
+ // Live capture asks for purpose=live, and an unchanged token seen again counts as connected.
+ const f=fixture();let seen='';
+ f.setRespond(async path=>{
+   if(path==='/api/live-session')return {state:'active',connected:true,remaining_seconds:1800,captured_at:'2026-10-21T18:00:00+08:00',last_seen_at:seen};
+   if(path==='/api/mobile-auth/start')return {active:true,addresses:[{url:'http://192.168.1.5:50000/mobile-auth/x',qr_svg:'<svg/>'}]};
+   if(path==='/api/mobile-auth')return {active:true};
+   if(path==='/api/mobile-auth/stop')return {active:false};
+   return {};
+ });
+ await f.run("startLiveCapture('mobile')");
+ assert.deepEqual(JSON.parse(f.calls.find(c=>c.path==='/api/mobile-auth/start').options.body),{purpose:'live'});
+ await f.run('pollLiveCapture()');
+ assert.notEqual(f.run('liveCaptureMode'),'','an old connection was taken for this capture');
+ seen='2026-10-21T18:40:00+08:00';
+ await f.run('pollLiveCapture()');
+ assert.equal(f.run('liveCaptureMode'),'','seeing the held connection in use did not finish the capture');
+}
+{
+ // A take refused before anything was sent is a known result, not an unconfirmed one.
+ const f=fixture();
+ f.setRespond(async(path,options)=>path==='/api/queue/ticket'?httpError(502,{error:'查不到你现在有没有号，为避免重复取号，请在小程序里取号',code:'ticket_not_submitted'}):{has_config:true});
+ await f.run('reviewTicket()');
+ await f.run('confirmTicket()');
+ assert.equal(f.calls.filter(c=>c.path==='/api/queue/ticket').length,1,'the take was not attempted');
+ assert.equal(f.run('!!state.ticketUncertain'),false,'a refused take was shown as an unconfirmed result');
+ assert.match(f.node('ticket-error').textContent,/避免重复取号/);
+}
+{
+ // Autostart records nothing now: only people who still have it on see the switch.
+ const f=fixture();
+ await f.run('refreshRecords()');
+ f.run("state.service.autostart={enabled:false,supported:true};renderService();");
+ assert.equal(f.node('autostart-row').hidden,true,'autostart offered although the background no longer records');
+ f.run("state.service.autostart={enabled:true,supported:true};renderService();");
+ assert.equal(f.node('autostart-row').hidden,false,'people with autostart on could not turn it off');
+}
+console.log('Web UI behavior: passed (search, selected stores, clear/pause, save retry, keyboard focus, stale filter/catalog, focus-safe refresh, export scopes, auth recovery, bound cancellation, one-shot ticket, native bridge, live code branching, offline estimate and reading, HH:MM times, offline store note, recording status copy, live-data card and capture, typed-number time, capture race, live purpose and reconnect, refused take, autostart visibility).');

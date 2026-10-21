@@ -310,7 +310,7 @@ func TestCaptureDeadlineHasMissingFieldsAndRecovery(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	e := &BookingEngine{state: EngineState{Status: EngineCapturing}}
-	e.reportCaptureTimeout(ctx, NewCapturedTokens())
+	e.reportCaptureTimeout(ctx, NewCapturedTokens(), "")
 	state := e.GetState()
 	if state.Status != EngineError || state.ErrorKind != ErrKindCaptureTimeout || !strings.Contains(state.Message, "缺少") || !strings.Contains(state.Message, "导入") {
 		t.Fatalf("%+v", state)
